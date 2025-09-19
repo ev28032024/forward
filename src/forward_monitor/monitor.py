@@ -22,6 +22,7 @@ from .formatter import (
     FormattedMessage,
     build_attachments,
     clean_discord_content,
+    extract_embed_text,
     format_announcement_message,
 )
 from .state import MonitorState
@@ -126,6 +127,9 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     config.min_message_delay,
                     config.max_message_delay,
                 )
+            except asyncio.CancelledError:
+                state.save()
+                raise
             except Exception:  # pragma: no cover - runtime error path
                 LOGGER.exception("Monitoring iteration failed")
             finally:
@@ -149,7 +153,9 @@ async def _sync_announcements(
         channel_id = context.mapping.discord_channel_id
         last_seen = state.get_last_message_id(channel_id)
         try:
-            messages = await discord.fetch_messages(channel_id, after=last_seen)
+            messages = await _fetch_all_messages(
+                discord, channel_id, last_seen, limit=100
+            )
         except DiscordAPIError as exc:
             if exc.status == 404:
                 LOGGER.error(
@@ -175,6 +181,28 @@ async def _sync_announcements(
         state.update_last_message_id(channel_id, messages[-1]["id"])
 
 
+async def _fetch_all_messages(
+    discord: DiscordClient,
+    channel_id: int,
+    last_seen: str | None,
+    *,
+    limit: int,
+) -> List[dict]:
+    messages: List[dict] = []
+    cursor = last_seen
+    while True:
+        batch = await discord.fetch_messages(
+            channel_id, after=cursor, limit=limit
+        )
+        if not batch:
+            break
+        messages.extend(batch)
+        if len(batch) < limit:
+            break
+        cursor = batch[-1]["id"]
+    return messages
+
+
 async def _forward_message(
     *,
     context: ChannelContext,
@@ -188,6 +216,11 @@ async def _forward_message(
     max_delay: float,
 ) -> None:
     clean_content = clean_discord_content(message)
+    embed_text = extract_embed_text(message)
+    combined_content = "\n\n".join(
+        section for section in (clean_content, embed_text) if section
+    )
+
     attachments = build_attachments(message)
     attachment_categories = tuple(
         _attachment_category(attachment) for attachment in attachments
@@ -196,14 +229,21 @@ async def _forward_message(
     if not _should_forward(
         message,
         clean_content,
+        embed_text,
         attachments,
         attachment_categories,
         context.filters,
     ):
         return
 
-    customised_content = context.customization.apply(clean_content)
-    formatted = formatter(channel_id, message, customised_content, attachments)
+    customised_content = context.customization.apply(combined_content)
+    formatted = formatter(
+        channel_id,
+        message,
+        customised_content,
+        attachments,
+        embed_text="",
+    )
     chat_id = context.mapping.telegram_chat_id
     await telegram.send_message(chat_id, formatted.text)
     await _sleep_with_jitter(min_delay, max_delay)
@@ -235,13 +275,14 @@ async def _sleep_with_jitter(min_delay: float, max_delay: float) -> None:
 def _should_forward(
     message: dict,
     clean_content: str,
+    embed_text: str,
     attachments: Sequence[AttachmentInfo],
     attachment_categories: Sequence[str],
     filters: PreparedFilters,
 ) -> bool:
     aggregate_text: str | None = None
     if filters.requires_text:
-        aggregate_text = _aggregate_text(clean_content, attachments)
+        aggregate_text = _aggregate_text(clean_content, embed_text, attachments)
 
     if filters.whitelist:
         assert aggregate_text is not None
@@ -250,7 +291,9 @@ def _should_forward(
 
     if filters.blacklist:
         if aggregate_text is None:
-            aggregate_text = _aggregate_text(clean_content, attachments)
+            aggregate_text = _aggregate_text(
+                clean_content, embed_text, attachments
+            )
         if any(keyword in aggregate_text for keyword in filters.blacklist):
             return False
 
@@ -267,7 +310,9 @@ def _should_forward(
 
     message_types: Set[str] | None = None
     if filters.requires_types:
-        message_types = _message_types(clean_content, attachments, attachment_categories)
+        message_types = _message_types(
+            clean_content, embed_text, attachments, attachment_categories
+        )
 
     if filters.allowed_types:
         assert message_types is not None
@@ -277,7 +322,7 @@ def _should_forward(
     if filters.blocked_types:
         if message_types is None:
             message_types = _message_types(
-                clean_content, attachments, attachment_categories
+                clean_content, embed_text, attachments, attachment_categories
             )
         if message_types.intersection(filters.blocked_types):
             return False
@@ -296,19 +341,24 @@ def _author_identifiers(author: dict) -> Set[str]:
     return identifiers
 
 
-def _aggregate_text(clean_content: str, attachments: Sequence[AttachmentInfo]) -> str:
-    text_blocks = [clean_content]
+def _aggregate_text(
+    clean_content: str,
+    embed_text: str,
+    attachments: Sequence[AttachmentInfo],
+) -> str:
+    text_blocks = [clean_content, embed_text]
     text_blocks.extend(attachment.filename or "" for attachment in attachments)
     return " ".join(block for block in text_blocks if block).casefold()
 
 
 def _message_types(
     clean_content: str,
+    embed_text: str,
     attachments: Sequence[AttachmentInfo],
     attachment_categories: Sequence[str],
 ) -> Set[str]:
     types: Set[str] = set()
-    if clean_content.strip():
+    if clean_content.strip() or embed_text.strip():
         types.add("text")
 
     if attachments:
