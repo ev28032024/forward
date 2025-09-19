@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Iterable, List, Sequence, Set
+from typing import Callable, Iterable, List, Sequence, Set
 
 import aiohttp
 
@@ -91,22 +91,20 @@ async def _sync_announcements(
         if not messages:
             continue
 
-        for message in messages:
-            attachments = build_attachments(message)
-            clean_content = clean_discord_content(message)
-            filters = global_filters.combine(mapping.filters)
-            if not _should_forward(message, clean_content, attachments, filters):
-                continue
+        filters = global_filters.combine(mapping.filters)
+        customization = global_customization.combine(mapping.customization)
 
-            customization = global_customization.combine(mapping.customization)
-            customised_content = customization.apply(clean_content)
-            text = format_announcement_message(
-                channel_id, message, customised_content, attachments
-            )
-            await telegram.send_message(mapping.telegram_chat_id, text)
-            await _sleep_with_jitter(min_delay, max_delay)
-            await _send_attachments(
-                telegram, mapping.telegram_chat_id, attachments, min_delay, max_delay
+        for message in messages:
+            await _forward_message(
+                mapping=mapping,
+                channel_id=channel_id,
+                message=message,
+                telegram=telegram,
+                filters=filters,
+                customization=customization,
+                formatter=format_announcement_message,
+                min_delay=min_delay,
+                max_delay=max_delay,
             )
         state.update_last_message_id(channel_id, messages[-1]["id"])
 
@@ -129,26 +127,50 @@ async def _sync_pins(
 
         new_pin_ids = current_pin_ids - known_pins
         if new_pin_ids:
+            filters = global_filters.combine(mapping.filters)
+            customization = global_customization.combine(mapping.customization)
+
             for message in pins:
                 if message["id"] in new_pin_ids:
-                    attachments = build_attachments(message)
-                    clean_content = clean_discord_content(message)
-                    filters = global_filters.combine(mapping.filters)
-                    if not _should_forward(message, clean_content, attachments, filters):
-                        continue
-
-                    customization = global_customization.combine(mapping.customization)
-                    customised_content = customization.apply(clean_content)
-                    text = format_pinned_message(
-                        channel_id, message, customised_content, attachments
-                    )
-                    await telegram.send_message(mapping.telegram_chat_id, text)
-                    await _sleep_with_jitter(min_delay, max_delay)
-                    await _send_attachments(
-                        telegram, mapping.telegram_chat_id, attachments, min_delay, max_delay
+                    await _forward_message(
+                        mapping=mapping,
+                        channel_id=channel_id,
+                        message=message,
+                        telegram=telegram,
+                        filters=filters,
+                        customization=customization,
+                        formatter=format_pinned_message,
+                        min_delay=min_delay,
+                        max_delay=max_delay,
                     )
 
         state.set_known_pins(channel_id, current_pin_ids)
+
+
+async def _forward_message(
+    *,
+    mapping: ChannelMapping,
+    channel_id: int,
+    message: dict,
+    telegram: TelegramClient,
+    filters: MessageFilters,
+    customization: MessageCustomization,
+    formatter: Callable[[int, dict, str, Sequence[AttachmentInfo]], str],
+    min_delay: float,
+    max_delay: float,
+) -> None:
+    attachments = build_attachments(message)
+    clean_content = clean_discord_content(message)
+    if not _should_forward(message, clean_content, attachments, filters):
+        return
+
+    customised_content = customization.apply(clean_content)
+    text = formatter(channel_id, message, customised_content, attachments)
+    await telegram.send_message(mapping.telegram_chat_id, text)
+    await _sleep_with_jitter(min_delay, max_delay)
+    await _send_attachments(
+        telegram, mapping.telegram_chat_id, attachments, min_delay, max_delay
+    )
 
 
 async def _sleep_with_jitter(min_delay: float, max_delay: float) -> None:

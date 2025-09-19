@@ -8,15 +8,22 @@ telegram_chat_id: "@default_channel_or_chat_id"
 filters:
   whitelist:
     - "airdrop"
+  blacklist:
+    - "maintenance"
   blocked_senders:
     - "spammer123"
   allowed_types:
     - text
     - image
+  blocked_types:
+    - audio
 
 customization:
-  header: "🔥 Важные новости"
-  footer: "— Forward Bot"
+  header:
+    - "🔥 Важные новости"
+    - "#HashTag"
+  footer:
+    - "— Forward Bot"
   replace:
     OG: "Original"
 
