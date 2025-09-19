@@ -3,7 +3,9 @@ from __future__ import annotations
 from forward_monitor.formatter import (
     AttachmentInfo,
     FormattedMessage,
+    build_attachments,
     clean_discord_content,
+    extract_embed_text,
     format_announcement_message,
 )
 
@@ -26,6 +28,17 @@ def test_clean_discord_content_strips_markdown_wrappers() -> None:
     assert (
         clean_discord_content(message)
         == "Look at bold and code with italics"
+    )
+
+
+def test_clean_discord_content_preserves_indentation() -> None:
+    message = {
+        "content": "Line one\n  - Nested item\n    Code block",
+    }
+
+    assert (
+        clean_discord_content(message)
+        == "Line one\n  - Nested item\n    Code block"
     )
 
 
@@ -56,6 +69,50 @@ def test_format_includes_embed_data() -> None:
     assert "Footer text" in result.text
     assert "Embed Author" in result.text
     assert result.extra_messages == ()
+
+
+def test_extract_embed_text_returns_clean_text() -> None:
+    message = {
+        "embeds": [
+            {
+                "title": "  Title  ",
+                "description": "`Code` block",
+            }
+        ]
+    }
+
+    text = extract_embed_text(message)
+    assert "Title" in text
+    assert "Code block" in text
+
+
+def test_build_attachments_includes_embed_urls() -> None:
+    message = {
+        "attachments": [
+            {
+                "url": "https://example.com/file.txt",
+                "filename": "file.txt",
+                "content_type": "text/plain",
+            }
+        ],
+        "embeds": [
+            {
+                "image": {"url": "https://example.com/image.png"},
+                "thumbnail": {"url": "https://example.com/thumb.png"},
+                "video": {"url": "https://example.com/video.mp4"},
+                "provider": {"url": "https://example.com/provider"},
+            }
+        ],
+    }
+
+    attachments = build_attachments(message)
+    urls = {attachment.url for attachment in attachments}
+    assert "https://example.com/file.txt" in urls
+    assert "https://example.com/image.png" in urls
+    assert "https://example.com/thumb.png" in urls
+    assert "https://example.com/video.mp4" in urls
+    assert "https://example.com/provider" in urls
+    assert len(urls) == len(attachments)
 
 
 def test_format_keeps_small_attachment_summary_inline() -> None:

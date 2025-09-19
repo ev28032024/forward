@@ -6,6 +6,7 @@ import html
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Mapping, Sequence
+from urllib.parse import urlparse
 
 __all__ = [
     "AttachmentInfo",
@@ -13,6 +14,7 @@ __all__ = [
     "format_announcement_message",
     "build_attachments",
     "clean_discord_content",
+    "extract_embed_text",
 ]
 
 TELEGRAM_MAX_LENGTH = 4096
@@ -52,12 +54,15 @@ def format_announcement_message(
     message: Mapping[str, Any],
     content: str,
     attachments: Sequence[AttachmentInfo],
+    *,
+    embed_text: str | None = None,
 ) -> FormattedMessage:
     """Build the outgoing text for a regular Discord message."""
 
     author_name = _author_name(message)
     prefix = f"📢 Новое сообщение в канале {channel_id} от {author_name}"
-    embed_text = _format_embeds(message)
+    if embed_text is None:
+        embed_text = extract_embed_text(message)
     combined_content = _combine_content_sections([content, embed_text])
     jump_url = _build_jump_url(message, channel_id)
     return _compose_message(prefix, combined_content, attachments, jump_url)
@@ -178,10 +183,13 @@ def build_attachments(message: Mapping[str, Any]) -> List[AttachmentInfo]:
     """Convert the raw Discord payload into AttachmentInfo objects."""
 
     attachments: List[AttachmentInfo] = []
+    seen_urls: set[str] = set()
+
     for raw in message.get("attachments", []):
         url = raw.get("url")
-        if not url:
+        if not url or url in seen_urls:
             continue
+        seen_urls.add(url)
         attachments.append(
             AttachmentInfo(
                 url=url,
@@ -190,6 +198,14 @@ def build_attachments(message: Mapping[str, Any]) -> List[AttachmentInfo]:
                 size=raw.get("size"),
             )
         )
+
+    embeds = message.get("embeds") or []
+    if isinstance(embeds, Sequence):
+        for embed in embeds:
+            if not isinstance(embed, Mapping):
+                continue
+            attachments.extend(_build_embed_attachments(embed, seen_urls))
+
     return attachments
 
 
@@ -274,11 +290,17 @@ def _clean_text_fragment(
     if "&" in content:
         content = html.unescape(content)
 
-    lines = [line.strip() for line in content.splitlines()]
+    processed_lines: List[str] = []
+    for line in content.splitlines():
+        if line.strip():
+            processed_lines.append(line.rstrip())
+        else:
+            processed_lines.append("")
+
     # Remove trailing empty lines for tidier messages but preserve intentional blank spacing inside.
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
+    while processed_lines and not processed_lines[-1]:
+        processed_lines.pop()
+    return "\n".join(processed_lines)
 
 
 def _strip_simple_markdown(content: str) -> str:
@@ -312,6 +334,12 @@ def _combine_content_sections(sections: Sequence[str]) -> str:
     if not parts:
         return ""
     return "\n\n".join(parts)
+
+
+def extract_embed_text(message: Mapping[str, Any]) -> str:
+    """Return cleaned textual content from embeds."""
+
+    return _format_embeds(message)
 
 
 def _format_embeds(message: Mapping[str, Any]) -> str:
@@ -363,3 +391,71 @@ def _format_embeds(message: Mapping[str, Any]) -> str:
             sections.append("\n".join(lines))
 
     return "\n\n".join(sections)
+
+
+def _build_embed_attachments(
+    embed: Mapping[str, Any], seen_urls: set[str]
+) -> List[AttachmentInfo]:
+    attachments: List[AttachmentInfo] = []
+
+    for key, category in (
+        ("image", "image/unknown"),
+        ("thumbnail", "image/unknown"),
+        ("video", "video/unknown"),
+    ):
+        item = embed.get(key)
+        attachment = _attachment_from_embed_item(item, category, seen_urls)
+        if attachment is not None:
+            attachments.append(attachment)
+
+    provider = embed.get("provider")
+    provider_attachment = _attachment_from_embed_item(provider, None, seen_urls)
+    if provider_attachment is not None:
+        attachments.append(provider_attachment)
+
+    return attachments
+
+
+def _attachment_from_embed_item(
+    item: Any,
+    content_type: str | None,
+    seen_urls: set[str],
+) -> AttachmentInfo | None:
+    if not isinstance(item, Mapping):
+        return None
+
+    url = item.get("url") or item.get("proxy_url")
+    if not url or not isinstance(url, str) or url in seen_urls:
+        return None
+
+    seen_urls.add(url)
+    filename = _filename_from_url(url)
+    attachment_content_type = content_type
+    if attachment_content_type is None:
+        attachment_content_type = _guess_content_type_from_filename(filename)
+
+    return AttachmentInfo(url=url, filename=filename, content_type=attachment_content_type)
+
+
+def _filename_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    path = parsed.path or ""
+    if not path:
+        return None
+    filename = path.rsplit("/", 1)[-1]
+    if not filename:
+        return None
+    return filename
+
+
+def _guess_content_type_from_filename(filename: str | None) -> str | None:
+    if not filename or "." not in filename:
+        return None
+    extension = filename.rsplit(".", 1)[-1].lower()
+    if extension in {"jpg", "jpeg", "png", "gif", "bmp", "webp"}:
+        return "image/unknown"
+    if extension in {"mp4", "mov", "mkv", "webm"}:
+        return "video/unknown"
+    if extension in {"mp3", "wav", "ogg", "flac", "m4a"}:
+        return "audio/unknown"
+    return None
