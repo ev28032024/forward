@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Dict
 
@@ -35,6 +36,8 @@ class MonitorState:
         tmp_path = self._path.with_name(self._path.name + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as file:
             json.dump(self._data, file, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
         try:
             tmp_path.replace(self._path)
         except Exception:

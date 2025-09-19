@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-from forward_monitor.formatter import AttachmentInfo, build_attachments, clean_discord_content, extract_embed_text
-from forward_monitor.monitor import _attachment_category, _message_types, _should_forward
-from forward_monitor.config import MessageFilters
+import logging
+
+import pytest
+
+from forward_monitor.config import ChannelMapping, MessageCustomization, MessageFilters
+from forward_monitor.formatter import (
+    AttachmentInfo,
+    build_attachments,
+    clean_discord_content,
+    extract_embed_text,
+)
+from forward_monitor.monitor import (
+    ChannelContext,
+    _attachment_category,
+    _forward_message,
+    _message_types,
+    _should_forward,
+)
 
 
 def test_attachment_category_supports_file_alias() -> None:
@@ -26,7 +41,9 @@ def test_should_forward_respects_file_alias_in_filters() -> None:
     message = {"author": {"id": "42"}}
 
     categories = [_attachment_category(attachment)]
-    assert _should_forward(message, "", "", [attachment], categories, filters)
+    allowed, reason = _should_forward(message, "", "", [attachment], categories, filters)
+    assert allowed
+    assert reason is None
 
 
 def test_message_types_include_document_alias() -> None:
@@ -59,7 +76,7 @@ def test_should_forward_whitelist_matches_embed_text() -> None:
     categories: list[str] = []
     embed_text = extract_embed_text(message)
 
-    assert _should_forward(
+    allowed, reason = _should_forward(
         message,
         clean_discord_content(message),
         embed_text,
@@ -67,6 +84,8 @@ def test_should_forward_whitelist_matches_embed_text() -> None:
         categories,
         filters,
     )
+    assert allowed
+    assert reason is None
 
 
 def test_should_forward_allowed_types_accepts_embed_text() -> None:
@@ -85,7 +104,7 @@ def test_should_forward_allowed_types_accepts_embed_text() -> None:
     attachments: list[AttachmentInfo] = []
     categories: list[str] = []
 
-    assert _should_forward(
+    allowed, reason = _should_forward(
         message,
         clean_discord_content(message),
         embed_text,
@@ -93,6 +112,8 @@ def test_should_forward_allowed_types_accepts_embed_text() -> None:
         categories,
         filters,
     )
+    assert allowed
+    assert reason is None
 
 
 def test_should_forward_allows_embed_image_attachment() -> None:
@@ -110,7 +131,7 @@ def test_should_forward_allows_embed_image_attachment() -> None:
     attachments = build_attachments(message)
     categories = [_attachment_category(attachment) for attachment in attachments]
 
-    assert _should_forward(
+    allowed, reason = _should_forward(
         message,
         clean_discord_content(message),
         extract_embed_text(message),
@@ -118,3 +139,80 @@ def test_should_forward_allows_embed_image_attachment() -> None:
         categories,
         filters,
     )
+    assert allowed
+    assert reason is None
+
+
+def test_whitelist_matches_attachment_domain() -> None:
+    attachment = AttachmentInfo(url="https://cdn.example.net/path/to/file.png")
+    filters = MessageFilters(whitelist=["cdn.example.net"]).prepare()
+    categories = [_attachment_category(attachment)]
+    allowed, reason = _should_forward(
+        {"author": {"id": "1"}},
+        "",
+        "",
+        [attachment],
+        categories,
+        filters,
+    )
+    assert allowed
+    assert reason is None
+
+
+def test_allowed_senders_accepts_member_nick() -> None:
+    filters = MessageFilters(allowed_senders=["Project Lead"]).prepare()
+    message = {
+        "author": {"id": "2", "username": "user"},
+        "member": {"nick": "Project Lead"},
+    }
+    allowed, reason = _should_forward(
+        message,
+        "",
+        "",
+        [],
+        [],
+        filters,
+    )
+    assert allowed
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixture) -> None:
+    context = ChannelContext(
+        mapping=ChannelMapping(discord_channel_id=10, telegram_chat_id="chat"),
+        filters=MessageFilters(blacklist=["deny"]).prepare(),
+        customization=MessageCustomization().prepare(),
+    )
+
+    message = {
+        "id": "123",
+        "author": {"id": "42"},
+        "content": "should deny",
+    }
+
+    class DummyTelegram:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, str]] = []
+
+        async def send_message(self, chat_id: str, text: str) -> None:
+            self.sent.append((chat_id, text))
+
+    telegram = DummyTelegram()
+
+    def unused_formatter(*_args, **_kwargs):  # pragma: no cover - formatter unused
+        raise RuntimeError("formatter should not be called")
+
+    with caplog.at_level(logging.DEBUG, logger="forward_monitor.monitor"):
+        await _forward_message(
+            context=context,
+            channel_id=10,
+            message=message,
+            telegram=telegram,
+            formatter=unused_formatter,
+            min_delay=0,
+            max_delay=0,
+        )
+
+    assert not telegram.sent
+    assert "blacklist" in caplog.text

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 import asyncio
+import aiohttp
 import pytest
 
 from forward_monitor.discord_client import DISCORD_API_BASE, DiscordAPIError, DiscordClient
@@ -102,6 +103,46 @@ async def test_fetch_messages_waits_for_rate_limit(monkeypatch: pytest.MonkeyPat
     assert messages == [{"id": "1"}]
     assert recorded_delays == [pytest.approx(0.25, abs=0.01)]
     assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_request_json_retries_on_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+
+    class FlakySession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: Mapping[str, str] | None = None,
+            params: Mapping[str, str] | None = None,
+        ) -> _FakeResponse:
+            self.calls += 1
+            if self.calls == 1:
+                raise aiohttp.ClientConnectionError()
+            return _FakeResponse(200, json_payload={"ok": True})
+
+    session = FlakySession()
+    client = DiscordClient("token", session)  # type: ignore[arg-type]
+
+    result = await client._request_json(  # pylint: disable=protected-access
+        "GET",
+        "https://example.com",
+        max_network_retries=1,
+    )
+
+    assert result == {"ok": True}
+    assert session.calls == 2
+    assert delays == [1]
 
 
 @pytest.mark.asyncio

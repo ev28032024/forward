@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Sequence
 
 import pytest
@@ -15,6 +16,17 @@ class StubTelegram:
 
     async def send_message(self, chat_id: str, text: str) -> None:
         self.sent.append((chat_id, text))
+
+
+class DummyState:
+    def __init__(self) -> None:
+        self._values: dict[int, str] = {}
+
+    def get_last_message_id(self, channel_id: int) -> str | None:
+        return self._values.get(channel_id)
+
+    def update_last_message_id(self, channel_id: int, message_id: str) -> None:
+        self._values[channel_id] = message_id
 
 
 @pytest.mark.asyncio
@@ -38,12 +50,14 @@ async def test_forward_message_sends_extra_messages() -> None:
         attachments: Sequence[AttachmentInfo],
         *,
         embed_text: str | None = None,
+        channel_label: str | None = None,
     ) -> FormattedMessage:
         assert channel_id == 1
         assert content == "Hello"
         assert payload is message
         assert list(attachments) == []
         assert embed_text == ""
+        assert channel_label is None
         return FormattedMessage("Main", ("Extra one", "Extra two"))
 
     telegram = StubTelegram()
@@ -144,16 +158,6 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
                 return self._batches.pop(0)
             return []
 
-    class DummyState:
-        def __init__(self) -> None:
-            self._values: dict[int, str] = {}
-
-        def get_last_message_id(self, channel_id: int) -> str | None:
-            return self._values.get(channel_id)
-
-        def update_last_message_id(self, channel_id: int, message_id: str) -> None:
-            self._values[channel_id] = message_id
-
     discord = FakeDiscord([first_batch, second_batch])
     telegram = StubTelegram()
     state = DummyState()
@@ -174,3 +178,131 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
         (5, None, 100),
         (5, "100", 100),
     ]
+
+
+@pytest.mark.asyncio
+async def test_sync_announcements_fetches_channels_in_parallel() -> None:
+    slow_context = ChannelContext(
+        mapping=ChannelMapping(
+            discord_channel_id=11,
+            telegram_chat_id="slow_chat",
+            display_name="Slow Channel",
+        ),
+        filters=MessageFilters().prepare(),
+        customization=MessageCustomization().prepare(),
+    )
+    fast_context = ChannelContext(
+        mapping=ChannelMapping(discord_channel_id=12, telegram_chat_id="fast_chat"),
+        filters=MessageFilters().prepare(),
+        customization=MessageCustomization().prepare(),
+    )
+
+    slow_started = asyncio.Event()
+    fast_completed = asyncio.Event()
+    release_slow = asyncio.Event()
+
+    class ParallelDiscord:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+
+        async def fetch_messages(
+            self,
+            channel_id: int,
+            *,
+            after: str | None = None,
+            limit: int = 100,
+        ) -> list[dict[str, Any]]:
+            self.calls.append(channel_id)
+            if channel_id == 11:
+                slow_started.set()
+                await release_slow.wait()
+                return [
+                    {"id": "21", "author": {"id": "1"}, "content": "slow news"},
+                ]
+            await slow_started.wait()
+            fast_completed.set()
+            return [
+                {"id": "12", "author": {"id": "2"}, "content": "fast update"},
+            ]
+
+    discord = ParallelDiscord()
+    telegram = StubTelegram()
+    state = DummyState()
+
+    sync_task = asyncio.create_task(
+        _sync_announcements(
+            [slow_context, fast_context],
+            discord,
+            telegram,
+            state,
+            min_delay=0,
+            max_delay=0,
+        )
+    )
+
+    await slow_started.wait()
+    await fast_completed.wait()
+    assert not sync_task.done(), "Expected slow fetch to still be pending"
+
+    release_slow.set()
+    await sync_task
+
+    assert {call for call in discord.calls} == {11, 12}
+    assert any("slow news" in text for _, text in telegram.sent)
+    assert any("fast update" in text for _, text in telegram.sent)
+    assert state._values[11] == "21"
+    assert state._values[12] == "12"
+
+
+@pytest.mark.asyncio
+async def test_sync_announcements_continues_after_forward_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = ChannelContext(
+        mapping=ChannelMapping(discord_channel_id=7, telegram_chat_id="chat"),
+        filters=MessageFilters().prepare(),
+        customization=MessageCustomization().prepare(),
+    )
+
+    messages = [
+        {"id": "31", "author": {"id": "1"}, "content": "first"},
+        {"id": "32", "author": {"id": "1"}, "content": "second"},
+    ]
+
+    class FakeDiscord:
+        async def fetch_messages(
+            self,
+            channel_id: int,
+            *,
+            after: str | None = None,
+            limit: int = 100,
+        ) -> list[dict[str, Any]]:
+            return messages
+
+    forwarded: list[str] = []
+    error_triggered = False
+
+    async def failing_forward(**kwargs):  # type: ignore[no-untyped-def]
+        nonlocal error_triggered
+        message = kwargs["message"]
+        if not error_triggered:
+            error_triggered = True
+            raise RuntimeError("boom")
+        forwarded.append(message["content"])
+
+    monkeypatch.setattr("forward_monitor.monitor._forward_message", failing_forward)
+
+    telegram = StubTelegram()
+    state = DummyState()
+
+    await _sync_announcements(
+        [context],
+        FakeDiscord(),
+        telegram,
+        state,
+        min_delay=0,
+        max_delay=0,
+    )
+
+    assert forwarded == ["second"]
+    assert state._values[7] == "32"

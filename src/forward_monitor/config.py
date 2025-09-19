@@ -13,6 +13,19 @@ DEFAULT_STATE_FILE = Path("monitor_state.json")
 DEFAULT_MIN_MESSAGE_DELAY = 0.5
 DEFAULT_MAX_MESSAGE_DELAY = 2.0
 
+SUPPORTED_MESSAGE_TYPES: FrozenSet[str] = frozenset(
+    {
+        "text",
+        "attachment",
+        "image",
+        "video",
+        "audio",
+        "file",
+        "document",
+        "other",
+    }
+)
+
 __all__ = [
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_STATE_FILE",
@@ -33,6 +46,7 @@ class ChannelMapping:
 
     discord_channel_id: int
     telegram_chat_id: str
+    display_name: str | None = None
     filters: "MessageFilters" = field(default_factory=lambda: MessageFilters())
     customization: "MessageCustomization" = field(
         default_factory=lambda: MessageCustomization()
@@ -205,12 +219,19 @@ class MonitorConfig:
         data = _load_yaml(path)
         path = path.resolve()
         try:
-            discord_token = data["discord_token"]
-            telegram_token = data["telegram_token"]
-            telegram_chat_id = str(data["telegram_chat_id"])
+            discord_token = str(data["discord_token"]).strip()
+            telegram_token = str(data["telegram_token"]).strip()
+            telegram_chat_id = str(data["telegram_chat_id"]).strip()
         except KeyError as exc:  # pragma: no cover - defensive programming
             missing = exc.args[0]
             raise ValueError(f"Missing required configuration key: {missing}") from exc
+
+        if not discord_token:
+            raise ValueError("Configuration field 'discord_token' must not be empty")
+        if not telegram_token:
+            raise ValueError("Configuration field 'telegram_token' must not be empty")
+        if not telegram_chat_id:
+            raise ValueError("Configuration field 'telegram_chat_id' must not be empty")
 
         filters = _parse_filters(data.get("filters"))
         customization = _parse_customization(data.get("customization"))
@@ -283,16 +304,39 @@ def _coerce_channel_mappings(
                     f"Configuration field '{field_name}' entries must specify 'discord_channel_id'"
                 )
             channel_id = _coerce_channel_id(discord_raw, field_name)
-            telegram_chat = str(telegram_raw or default_chat_id)
+            fallback_chat = default_chat_id
+            telegram_chat_source = fallback_chat if telegram_raw is None else telegram_raw
+            telegram_chat = str(telegram_chat_source).strip()
+            if not telegram_chat:
+                raise ValueError(
+                    f"Configuration field '{field_name}' entries must specify a non-empty 'telegram_chat_id'"
+                )
             filters = _parse_filters(item.get("filters"))
             customization = _parse_customization(item.get("customization"))
+            display_name_raw = item.get("display_name")
+            display_name = None
+            if display_name_raw is not None:
+                display_name = str(display_name_raw).strip() or None
         else:
             channel_id = _coerce_channel_id(item, field_name)
-            telegram_chat = str(default_chat_id)
+            telegram_chat = str(default_chat_id).strip()
+            if not telegram_chat:
+                raise ValueError(
+                    f"Configuration field '{field_name}' requires a non-empty fallback 'telegram_chat_id'"
+                )
             filters = MessageFilters()
             customization = MessageCustomization()
+            display_name = None
 
-        mappings.append(ChannelMapping(channel_id, telegram_chat, filters, customization))
+        mappings.append(
+            ChannelMapping(
+                channel_id,
+                telegram_chat,
+                display_name,
+                filters,
+                customization,
+            )
+        )
 
     return mappings
 
@@ -313,13 +357,18 @@ def _parse_filters(raw: object) -> MessageFilters:
     if not isinstance(raw, dict):
         raise ValueError("Configuration field 'filters' must be a mapping if provided")
 
+    allowed_types = _to_string_list(raw.get("allowed_types"))
+    blocked_types = _to_string_list(raw.get("blocked_types"))
+    _validate_message_types(allowed_types, "filters.allowed_types")
+    _validate_message_types(blocked_types, "filters.blocked_types")
+
     return MessageFilters(
         whitelist=_to_string_list(raw.get("whitelist")),
         blacklist=_to_string_list(raw.get("blacklist")),
         allowed_senders=_to_string_list(raw.get("allowed_senders")),
         blocked_senders=_to_string_list(raw.get("blocked_senders")),
-        allowed_types=_to_string_list(raw.get("allowed_types")),
-        blocked_types=_to_string_list(raw.get("blocked_types")),
+        allowed_types=allowed_types,
+        blocked_types=blocked_types,
     )
 
 
@@ -354,14 +403,38 @@ def _parse_replacements(raw: object) -> Dict[str, str]:
         for item in raw:
             if not isinstance(item, dict):
                 continue
-            find = item.get("find") or item.get("from") or item.get("search")
-            replace = item.get("replace") or item.get("to")
-            if find is None or replace is None:
+            find_value = None
+            for candidate in ("find", "from", "search"):
+                if candidate in item:
+                    find_value = item[candidate]
+                    break
+            if find_value is None:
                 continue
-            replacements[str(find)] = str(replace)
+            replace_value = None
+            for candidate in ("replace", "to"):
+                if candidate in item:
+                    replace_value = item[candidate]
+                    break
+            if replace_value is None:
+                continue
+            replacements[str(find_value)] = str(replace_value)
         return replacements
 
     raise ValueError("Replacement rules must be provided as a mapping or a list of mappings")
+
+
+def _validate_message_types(values: Iterable[str], field_name: str) -> None:
+    invalid = [
+        value
+        for value in values
+        if value.casefold() not in SUPPORTED_MESSAGE_TYPES
+    ]
+    if invalid:
+        supported = ", ".join(sorted(SUPPORTED_MESSAGE_TYPES))
+        raise ValueError(
+            f"Configuration field '{field_name}' contains unsupported message types: {', '.join(invalid)}. "
+            f"Supported types: {supported}"
+        )
 
 
 def _to_string_list(raw: object) -> List[str]:

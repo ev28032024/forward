@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Mapping, MutableMapping, Optional
 
+import asyncio
 import aiohttp
 
 
@@ -11,6 +12,7 @@ _DEFAULT_HEADERS: Mapping[str, str] = {
     "User-Agent": "forward-monitor/0.1",
 }
 _RATE_LIMIT_MAX_RETRIES = 5
+_NETWORK_MAX_RETRIES = 3
 
 
 class DiscordAPIError(RuntimeError):
@@ -66,33 +68,42 @@ class DiscordClient:
         *,
         params: Optional[Mapping[str, str]] = None,
         max_rate_limit_retries: int = _RATE_LIMIT_MAX_RETRIES,
+        max_network_retries: int = _NETWORK_MAX_RETRIES,
     ) -> Any:
         attempts = 0
+        network_attempts = 0
         while True:
-            async with self._session.request(
-                method, url, headers=self._headers, params=params
-            ) as response:
-                if response.status == 429:
-                    attempts += 1
-                    if attempts > max_rate_limit_retries:
+            try:
+                async with self._session.request(
+                    method, url, headers=self._headers, params=params
+                ) as response:
+                    network_attempts = 0
+                    if response.status == 429:
+                        attempts += 1
+                        if attempts > max_rate_limit_retries:
+                            text = await response.text()
+                            raise DiscordAPIError(response.status, text)
+
+                        retry_after = await _rate_limit_delay_seconds(response)
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    if response.status >= 400:
                         text = await response.text()
                         raise DiscordAPIError(response.status, text)
 
-                    retry_after = await _rate_limit_delay_seconds(response)
-                    await asyncio.sleep(retry_after)
-                    continue
-
-                if response.status >= 400:
-                    text = await response.text()
-                    raise DiscordAPIError(response.status, text)
-
-                content_type = response.headers.get("Content-Type", "")
-                if "application/json" not in content_type:
-                    text = await response.text()
-                    raise RuntimeError(
-                        f"Unexpected content type '{content_type}' from Discord API: {text[:200]}"
-                    )
-                return await response.json()
+                    content_type = response.headers.get("Content-Type", "")
+                    if "application/json" not in content_type:
+                        text = await response.text()
+                        raise RuntimeError(
+                            f"Unexpected content type '{content_type}' from Discord API: {text[:200]}"
+                        )
+                    return await response.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                network_attempts += 1
+                if network_attempts > max_network_retries:
+                    raise exc
+                await asyncio.sleep(2 ** (network_attempts - 1))
 
 
 async def _rate_limit_delay_seconds(response: aiohttp.ClientResponse) -> float:

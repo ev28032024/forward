@@ -77,6 +77,7 @@ def test_extract_embed_text_returns_clean_text() -> None:
             {
                 "title": "  Title  ",
                 "description": "`Code` block",
+                "url": "https://example.com/details",
             }
         ]
     }
@@ -84,6 +85,36 @@ def test_extract_embed_text_returns_clean_text() -> None:
     text = extract_embed_text(message)
     assert "Title" in text
     assert "Code block" in text
+    assert "https://example.com/details" in text
+
+
+def test_format_announcement_uses_channel_label() -> None:
+    message = {
+        "author": {"username": "Tester"},
+        "id": 999,
+    }
+
+    result = format_announcement_message(
+        123,
+        message,
+        "Body",
+        [],
+        channel_label="Announcements",
+    )
+
+    assert "канале Announcements" in result.text
+    assert "123" not in result.text.splitlines()[0]
+
+
+def test_build_jump_url_supports_direct_messages() -> None:
+    message = {
+        "author": {"username": "Tester"},
+        "id": 555,
+    }
+
+    formatted = format_announcement_message(888, message, "Body", [])
+
+    assert any("https://discord.com/channels/@me/888/555" in chunk for chunk in (formatted.text, *formatted.extra_messages))
 
 
 def test_build_attachments_includes_embed_urls() -> None:
