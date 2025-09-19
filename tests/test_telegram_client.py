@@ -8,6 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import aiohttp
 import pytest
 
 from forward_monitor import telegram_client
@@ -35,8 +36,8 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, responses: Iterable[_FakeResponse]):
-        self._responses: List[_FakeResponse] = list(responses)
+    def __init__(self, responses: Iterable[_FakeResponse | Exception]):
+        self._responses: List[_FakeResponse | Exception] = list(responses)
         self.calls = 0
 
     def post(self, url: str, *, json: dict[str, Any]) -> _FakeResponse:
@@ -44,6 +45,8 @@ class _FakeSession:
         # implements the async context management protocol, so we simply return it.
         response = self._responses[min(self.calls, len(self._responses) - 1)]
         self.calls += 1
+        if isinstance(response, Exception):
+            raise response
         return response
 
 
@@ -61,6 +64,42 @@ async def test_post_respects_explicit_retry_statuses(monkeypatch: pytest.MonkeyP
         await client.send_message("chat", "hello", retry_statuses=[], retry_attempts=0)
 
     assert session.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_post_retries_on_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _sleep(delay: float) -> None:
+        _sleep.calls.append(delay)
+
+    _sleep.calls = []  # type: ignore[attr-defined]
+    monkeypatch.setattr(telegram_client.asyncio, "sleep", _sleep)
+
+    session = _FakeSession(
+        [aiohttp.ClientOSError(0, "boom"), _FakeResponse(200, json_payload={"ok": True})]
+    )
+    client = TelegramClient("token", session)  # type: ignore[arg-type]
+
+    response = await client.send_message("chat", "hello", retry_attempts=2)
+
+    assert response == {"ok": True}
+    assert session.calls == 2
+    assert _sleep.calls == [1.0]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_post_raises_after_network_error_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(telegram_client.asyncio, "sleep", _sleep)
+
+    session = _FakeSession([aiohttp.ClientOSError(0, "boom")] * 3)
+    client = TelegramClient("token", session)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError):
+        await client.send_message("chat", "hello", retry_attempts=2)
+
+    assert session.calls == 3
 
 
 def test_normalise_retry_statuses_accepts_strings() -> None:

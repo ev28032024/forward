@@ -153,19 +153,26 @@ class TelegramClient:
         backoff = 1.0
         while True:
             attempt += 1
-            async with self._session.post(url, json=payload) as response:
-                if response.status in statuses and attempt <= retry_attempts:
-                    retry_after = await _retry_after_seconds(response)
-                    await asyncio.sleep(max(retry_after, backoff))
+            try:
+                async with self._session.post(url, json=payload) as response:
+                    if response.status in statuses and attempt <= retry_attempts:
+                        retry_after = await _retry_after_seconds(response)
+                        await asyncio.sleep(max(retry_after, backoff))
+                        backoff = min(backoff * 2, 30)
+                        continue
+
+                    if response.status >= 400:
+                        detail = await response.text()
+                        raise RuntimeError(
+                            f"Telegram API request failed with status {response.status}: {detail}"
+                        )
+                    return await response.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                if attempt <= retry_attempts:
+                    await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 30)
                     continue
-
-                if response.status >= 400:
-                    detail = await response.text()
-                    raise RuntimeError(
-                        f"Telegram API request failed with status {response.status}: {detail}"
-                    )
-                return await response.json()
+                raise RuntimeError("Telegram API request failed due to a network error") from exc
 
 
 def _normalise_retry_statuses(statuses: Iterable[int | str]) -> Set[int]:
