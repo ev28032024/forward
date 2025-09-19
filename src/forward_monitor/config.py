@@ -7,6 +7,12 @@ from typing import Dict, Iterable, List
 import yaml
 
 
+DEFAULT_POLL_INTERVAL = 300
+DEFAULT_STATE_FILE = Path("monitor_state.json")
+DEFAULT_MIN_MESSAGE_DELAY = 0.5
+DEFAULT_MAX_MESSAGE_DELAY = 2.0
+
+
 @dataclass(slots=True)
 class ChannelMapping:
     """Relationship between a Discord channel and a Telegram chat."""
@@ -104,16 +110,18 @@ class MonitorConfig:
     telegram_chat_id: str
     announcement_channels: List[ChannelMapping] = field(default_factory=list)
     pinned_channels: List[ChannelMapping] = field(default_factory=list)
-    poll_interval: int = 300
-    state_file: Path = Path("monitor_state.json")
-    min_message_delay: float = 0.5
-    max_message_delay: float = 2.0
+    poll_interval: int = DEFAULT_POLL_INTERVAL
+    state_file: Path = DEFAULT_STATE_FILE
+    min_message_delay: float = DEFAULT_MIN_MESSAGE_DELAY
+    max_message_delay: float = DEFAULT_MAX_MESSAGE_DELAY
     filters: MessageFilters = field(default_factory=MessageFilters)
     customization: MessageCustomization = field(default_factory=MessageCustomization)
 
     @classmethod
     def from_file(cls, path: Path) -> "MonitorConfig":
+        path = path.expanduser()
         data = _load_yaml(path)
+        path = path.resolve()
         try:
             discord_token = data["discord_token"]
             telegram_token = data["telegram_token"]
@@ -135,11 +143,14 @@ class MonitorConfig:
             "pinned_channels",
             telegram_chat_id,
         )
-        poll_interval = int(data.get("poll_interval", cls.poll_interval))
-        state_file_raw = data.get("state_file")
-        state_file = Path(state_file_raw) if state_file_raw else cls.state_file
-        min_message_delay = float(data.get("min_message_delay", cls.min_message_delay))
-        max_message_delay = float(data.get("max_message_delay", cls.max_message_delay))
+        poll_interval = int(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
+        state_file = _resolve_state_file(path, data.get("state_file"), DEFAULT_STATE_FILE)
+        min_message_delay = float(
+            data.get("min_message_delay", DEFAULT_MIN_MESSAGE_DELAY)
+        )
+        max_message_delay = float(
+            data.get("max_message_delay", DEFAULT_MAX_MESSAGE_DELAY)
+        )
 
         if min_message_delay < 0:
             raise ValueError("Configuration field 'min_message_delay' cannot be negative")
@@ -303,3 +314,12 @@ def _merge_lists(first: Iterable[str], second: Iterable[str]) -> List[str]:
         if key not in seen:
             seen[key] = None
     return list(seen.keys())
+
+
+def _resolve_state_file(
+    config_path: Path, raw_value: object, default: Path
+) -> Path:
+    candidate = Path(str(raw_value)).expanduser() if raw_value else default.expanduser()
+    if not candidate.is_absolute():
+        candidate = (config_path.parent / candidate).resolve()
+    return candidate
