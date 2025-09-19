@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, FrozenSet, Iterable, Iterator, List, Tuple
 
-import yaml
+from yaml import safe_load
 
 
 DEFAULT_POLL_INTERVAL = 300
 DEFAULT_STATE_FILE = Path("monitor_state.json")
 DEFAULT_MIN_MESSAGE_DELAY = 0.5
 DEFAULT_MAX_MESSAGE_DELAY = 2.0
+
+__all__ = [
+    "DEFAULT_POLL_INTERVAL",
+    "DEFAULT_STATE_FILE",
+    "DEFAULT_MIN_MESSAGE_DELAY",
+    "DEFAULT_MAX_MESSAGE_DELAY",
+    "ChannelMapping",
+    "MessageFilters",
+    "PreparedFilters",
+    "MessageCustomization",
+    "PreparedCustomization",
+    "MonitorConfig",
+]
 
 
 @dataclass(slots=True)
@@ -56,6 +70,41 @@ class MessageFilters:
             blocked_types=_merge_lists(self.blocked_types, other.blocked_types),
         )
 
+    def prepare(self) -> "PreparedFilters":
+        """Materialise frequently used filter data in an efficient form."""
+
+        whitelist = tuple(_casefold_unique(self.whitelist))
+        blacklist = tuple(_casefold_unique(self.blacklist))
+        allowed_senders = frozenset(_casefold_unique(self.allowed_senders))
+        blocked_senders = frozenset(_casefold_unique(self.blocked_senders))
+        allowed_types = frozenset(_casefold_unique(self.allowed_types))
+        blocked_types = frozenset(_casefold_unique(self.blocked_types))
+
+        return PreparedFilters(
+            whitelist=whitelist,
+            blacklist=blacklist,
+            allowed_senders=allowed_senders,
+            blocked_senders=blocked_senders,
+            allowed_types=allowed_types,
+            blocked_types=blocked_types,
+            requires_text=bool(whitelist or blacklist),
+            requires_types=bool(allowed_types or blocked_types),
+        )
+
+
+@dataclass(slots=True)
+class PreparedFilters:
+    """Immutable, case-folded filters ready for matching."""
+
+    whitelist: Tuple[str, ...]
+    blacklist: Tuple[str, ...]
+    allowed_senders: FrozenSet[str]
+    blocked_senders: FrozenSet[str]
+    allowed_types: FrozenSet[str]
+    blocked_types: FrozenSet[str]
+    requires_text: bool
+    requires_types: bool
+
 
 @dataclass(slots=True)
 class MessageCustomization:
@@ -64,6 +113,10 @@ class MessageCustomization:
     headers: List[str] = field(default_factory=list)
     footers: List[str] = field(default_factory=list)
     replacements: Dict[str, str] = field(default_factory=dict)
+
+    _prepared: "PreparedCustomization" | None = field(
+        init=False, default=None, repr=False
+    )
 
     def combine(self, other: "MessageCustomization" | None) -> "MessageCustomization":
         if other is None:
@@ -82,23 +135,53 @@ class MessageCustomization:
             replacements=combined_replacements,
         )
 
+    def prepare(self) -> "PreparedCustomization":
+        if self._prepared is None:
+            header_text = "\n".join(segment for segment in self.headers if segment)
+            footer_text = "\n".join(segment for segment in self.footers if segment)
+            replacements = tuple(
+                (find, replace) for find, replace in self.replacements.items()
+            )
+            self._prepared = PreparedCustomization(
+                header_text=header_text,
+                footer_text=footer_text,
+                replacements=replacements,
+            )
+        return self._prepared
+
     def apply(self, content: str) -> str:
+        return self.prepare().apply(content)
+
+
+@dataclass(slots=True)
+class PreparedCustomization:
+    """Pre-processed representation of customisation rules."""
+
+    header_text: str
+    footer_text: str
+    replacements: Tuple[Tuple[str, str], ...]
+
+    def apply(self, content: str) -> str:
+        if not (self.header_text or self.footer_text or self.replacements):
+            return content or ""
+
         result = content or ""
-        for find, replace in self.replacements.items():
+        for find, replace in self.replacements:
             result = result.replace(find, replace)
 
         parts: List[str] = []
-        header_text = "\n".join([segment for segment in self.headers if segment])
-        footer_text = "\n".join([segment for segment in self.footers if segment])
-
-        if header_text:
-            parts.append(header_text)
+        if self.header_text:
+            parts.append(self.header_text)
         if result:
             parts.append(result)
-        if footer_text:
-            parts.append(footer_text)
+        if self.footer_text:
+            parts.append(self.footer_text)
 
-        return "\n\n".join(parts) if parts else ""
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        return "\n\n".join(parts)
 
 
 @dataclass(slots=True)
@@ -109,7 +192,6 @@ class MonitorConfig:
     telegram_token: str
     telegram_chat_id: str
     announcement_channels: List[ChannelMapping] = field(default_factory=list)
-    pinned_channels: List[ChannelMapping] = field(default_factory=list)
     poll_interval: int = DEFAULT_POLL_INTERVAL
     state_file: Path = DEFAULT_STATE_FILE
     min_message_delay: float = DEFAULT_MIN_MESSAGE_DELAY
@@ -138,11 +220,6 @@ class MonitorConfig:
             "announcement_channels",
             telegram_chat_id,
         )
-        pinned_channels = _coerce_channel_mappings(
-            data.get("pinned_channels", []),
-            "pinned_channels",
-            telegram_chat_id,
-        )
         poll_interval = int(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
         state_file = _resolve_state_file(path, data.get("state_file"), DEFAULT_STATE_FILE)
         min_message_delay = float(
@@ -164,7 +241,6 @@ class MonitorConfig:
             telegram_token=telegram_token,
             telegram_chat_id=telegram_chat_id,
             announcement_channels=announcement_channels,
-            pinned_channels=pinned_channels,
             poll_interval=poll_interval,
             state_file=state_file,
             min_message_delay=min_message_delay,
@@ -179,7 +255,7 @@ def _load_yaml(path: Path) -> dict:
         raise FileNotFoundError(f"Configuration file not found: {path}")
 
     with path.open("r", encoding="utf-8") as file:
-        data = yaml.safe_load(file) or {}
+        data = safe_load(file) or {}
 
     if not isinstance(data, dict):  # pragma: no cover - configuration error path
         raise ValueError("Configuration file must contain a mapping at the top level")
@@ -308,12 +384,22 @@ def _to_string_list(raw: object) -> List[str]:
 
 
 def _merge_lists(first: Iterable[str], second: Iterable[str]) -> List[str]:
+    return list(dict.fromkeys(str(item) for item in chain(first, second)))
+
+
+def _casefold_unique(values: Iterable[object]) -> Iterator[str]:
     seen: Dict[str, None] = {}
-    for item in list(first) + list(second):
-        key = str(item)
-        if key not in seen:
-            seen[key] = None
-    return list(seen.keys())
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        lowered = text.casefold()
+        if lowered in seen:
+            continue
+        seen[lowered] = None
+        yield lowered
 
 
 def _resolve_state_file(

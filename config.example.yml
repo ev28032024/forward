@@ -19,12 +19,12 @@ filters:
     - audio
 
 customization:
-  header:
+  headers:
     - "🔥 Важные новости"
     - "#HashTag"
-  footer:
+  footers:
     - "— Forward Bot"
-  replace:
+  replacements:
     OG: "Original"
 
 announcement_channels:
@@ -34,20 +34,10 @@ announcement_channels:
       blacklist:
         - "maintenance"
     customization:
-      header: "📢 Анонсы"
-      replace:
+      headers: ["📢 Анонсы"]
+      replacements:
         LFG: "Let's go"
   - discord_channel_id: 223456789012345678  # будет использовать chat_id по умолчанию
-
-pinned_channels:
-  - discord_channel_id: 987654321098765432
-    telegram_chat_id: "@validators_updates"
-    filters:
-      whitelist:
-        - "guide"
-    customization:
-      footer:
-        - "📌 Закреплённая информация"
 
 poll_interval: 300  # интервал проверки в секундах
 state_file: "monitor_state.json"
