@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Callable, Iterable, List, Sequence, Set
+from typing import Callable, Dict, Iterable, List, Sequence, Set
 
 import aiohttp
 
@@ -25,6 +25,48 @@ from .state import MonitorState
 from .telegram_client import TelegramClient
 
 LOGGER = logging.getLogger(__name__)
+
+
+_MIME_PREFIX_CATEGORIES: Dict[str, str] = {
+    "image/": "image",
+    "video/": "video",
+    "audio/": "audio",
+}
+
+_MIME_TYPE_CATEGORIES: Dict[str, str] = {
+    "application/pdf": "file",
+    "text/plain": "file",
+}
+
+_EXTENSION_CATEGORIES: Dict[str, str] = {
+    "jpg": "image",
+    "jpeg": "image",
+    "png": "image",
+    "gif": "image",
+    "bmp": "image",
+    "webp": "image",
+    "mp4": "video",
+    "mov": "video",
+    "mkv": "video",
+    "webm": "video",
+    "mp3": "audio",
+    "wav": "audio",
+    "ogg": "audio",
+    "flac": "audio",
+    "m4a": "audio",
+    "pdf": "file",
+    "txt": "file",
+    "doc": "file",
+    "docx": "file",
+    "xls": "file",
+    "xlsx": "file",
+    "csv": "file",
+    "zip": "file",
+}
+
+_TYPE_ALIASES: Dict[str, Set[str]] = {
+    "file": {"document"},
+}
 
 
 async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
@@ -252,6 +294,7 @@ def _message_types(clean_content: str, attachments: Sequence[AttachmentInfo]) ->
         for attachment in attachments:
             category = _attachment_category(attachment)
             types.add(category)
+            types.update(_TYPE_ALIASES.get(category, set()))
 
     return types
 
@@ -259,25 +302,16 @@ def _message_types(clean_content: str, attachments: Sequence[AttachmentInfo]) ->
 def _attachment_category(attachment: AttachmentInfo) -> str:
     content_type = (attachment.content_type or "").lower()
     if content_type:
-        if content_type.startswith("image/"):
-            return "image"
-        if content_type.startswith("video/"):
-            return "video"
-        if content_type.startswith("audio/"):
-            return "audio"
-        if content_type in {"application/pdf", "text/plain"}:
-            return "document"
+        for prefix, category in _MIME_PREFIX_CATEGORIES.items():
+            if content_type.startswith(prefix):
+                return category
+        if content_type in _MIME_TYPE_CATEGORIES:
+            return _MIME_TYPE_CATEGORIES[content_type]
 
     filename = (attachment.filename or "").lower()
     extension = filename.rsplit(".", 1)[-1] if "." in filename else ""
-    if extension in {"jpg", "jpeg", "png", "gif", "bmp", "webp"}:
-        return "image"
-    if extension in {"mp4", "mov", "mkv", "webm"}:
-        return "video"
-    if extension in {"mp3", "wav", "ogg", "flac", "m4a"}:
-        return "audio"
-    if extension in {"pdf", "txt", "doc", "docx", "xls", "xlsx", "csv", "zip"}:
-        return "document"
+    if extension in _EXTENSION_CATEGORIES:
+        return _EXTENSION_CATEGORIES[extension]
 
     return "other"
 
@@ -293,16 +327,26 @@ async def _send_attachments(
         category = _attachment_category(attachment)
         caption = _attachment_caption(attachment)
         try:
-            if category == "image":
-                await telegram.send_photo(chat_id, attachment.url, caption=caption)
-            elif category == "video":
-                await telegram.send_video(chat_id, attachment.url, caption=caption)
-            elif category == "audio":
-                await telegram.send_audio(chat_id, attachment.url, caption=caption)
-            else:
-                await telegram.send_document(chat_id, attachment.url, caption=caption)
+            await _send_single_attachment(telegram, chat_id, attachment.url, category, caption)
         finally:
             await _sleep_with_jitter(min_delay, max_delay)
+
+
+async def _send_single_attachment(
+    telegram: TelegramClient,
+    chat_id: str,
+    url: str,
+    category: str,
+    caption: str | None,
+) -> None:
+    if category == "image":
+        await telegram.send_photo(chat_id, url, caption=caption)
+    elif category == "video":
+        await telegram.send_video(chat_id, url, caption=caption)
+    elif category == "audio":
+        await telegram.send_audio(chat_id, url, caption=caption)
+    else:
+        await telegram.send_document(chat_id, url, caption=caption)
 
 
 def _attachment_caption(attachment: AttachmentInfo) -> str | None:
