@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Set
 
 import aiohttp
 
@@ -45,12 +45,12 @@ class TelegramClient:
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
     ) -> Dict[str, Any]:
-        payload = {"chat_id": chat_id, "photo": photo}
-        if caption:
-            payload["caption"] = caption
-        return await self._post(
-            "sendPhoto",
-            payload,
+        return await self._send_media(
+            method="sendPhoto",
+            chat_id=chat_id,
+            media_field="photo",
+            media_value=photo,
+            caption=caption,
             retry_attempts=retry_attempts,
             retry_statuses=retry_statuses,
         )
@@ -64,12 +64,12 @@ class TelegramClient:
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
     ) -> Dict[str, Any]:
-        payload = {"chat_id": chat_id, "video": video}
-        if caption:
-            payload["caption"] = caption
-        return await self._post(
-            "sendVideo",
-            payload,
+        return await self._send_media(
+            method="sendVideo",
+            chat_id=chat_id,
+            media_field="video",
+            media_value=video,
+            caption=caption,
             retry_attempts=retry_attempts,
             retry_statuses=retry_statuses,
         )
@@ -83,12 +83,12 @@ class TelegramClient:
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
     ) -> Dict[str, Any]:
-        payload = {"chat_id": chat_id, "audio": audio}
-        if caption:
-            payload["caption"] = caption
-        return await self._post(
-            "sendAudio",
-            payload,
+        return await self._send_media(
+            method="sendAudio",
+            chat_id=chat_id,
+            media_field="audio",
+            media_value=audio,
+            caption=caption,
             retry_attempts=retry_attempts,
             retry_statuses=retry_statuses,
         )
@@ -102,11 +102,32 @@ class TelegramClient:
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
     ) -> Dict[str, Any]:
-        payload = {"chat_id": chat_id, "document": document}
-        if caption:
+        return await self._send_media(
+            method="sendDocument",
+            chat_id=chat_id,
+            media_field="document",
+            media_value=document,
+            caption=caption,
+            retry_attempts=retry_attempts,
+            retry_statuses=retry_statuses,
+        )
+
+    async def _send_media(
+        self,
+        *,
+        method: str,
+        chat_id: str,
+        media_field: str,
+        media_value: str,
+        caption: str | None,
+        retry_attempts: int,
+        retry_statuses: Iterable[int] | None,
+    ) -> Dict[str, Any]:
+        payload = {"chat_id": chat_id, media_field: media_value}
+        if caption is not None:
             payload["caption"] = caption
         return await self._post(
-            "sendDocument",
+            method,
             payload,
             retry_attempts=retry_attempts,
             retry_statuses=retry_statuses,
@@ -121,7 +142,11 @@ class TelegramClient:
         retry_statuses: Iterable[int] | None = None,
     ) -> Dict[str, Any]:
         url = f"https://api.telegram.org/bot{self._token}/{method}"
-        statuses = set(retry_statuses or self.RETRYABLE_STATUSES)
+        statuses = (
+            set(self.RETRYABLE_STATUSES)
+            if retry_statuses is None
+            else _normalise_retry_statuses(retry_statuses)
+        )
         attempt = 0
         backoff = 1.0
         while True:
@@ -139,6 +164,18 @@ class TelegramClient:
                         f"Telegram API request failed with status {response.status}: {detail}"
                     )
                 return await response.json()
+
+
+def _normalise_retry_statuses(statuses: Iterable[int | str]) -> Set[int]:
+    normalised: Set[int] = set()
+    for status in statuses:
+        try:
+            normalised.add(int(status))
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive programming
+            raise ValueError(
+                f"Retry status codes must be integers; got {status!r}"
+            ) from exc
+    return normalised
 
 
 async def _retry_after_seconds(response: aiohttp.ClientResponse) -> float:
