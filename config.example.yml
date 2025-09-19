@@ -26,17 +26,22 @@ customization:
     - "— Forward Bot"
   replacements:
     OG: "Original"
+    "[скрыть]": ""
 
 announcement_channels:
   - discord_channel_id: 123456789012345678
     telegram_chat_id: "-1001234567890"
+    display_name: "Основной канал"
     filters:
       blacklist:
         - "maintenance"
     customization:
       headers: ["📢 Анонсы"]
       replacements:
-        LFG: "Let's go"
+        - find: "LFG"
+          replace: "Let's go"
+        - find: "[link]"
+          replace: ""
   - discord_channel_id: 223456789012345678  # будет использовать chat_id по умолчанию
 
 poll_interval: 300  # интервал проверки в секундах

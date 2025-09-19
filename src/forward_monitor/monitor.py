@@ -4,7 +4,8 @@ import asyncio
 import logging
 import random
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Sequence, Set
+from typing import Callable, Dict, Iterable, List, Sequence, Set, Tuple
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -149,35 +150,60 @@ async def _sync_announcements(
     min_delay: float,
     max_delay: float,
 ) -> None:
+    fetch_jobs: List[asyncio.Task[List[dict]]] = []
+    context_meta: List[Tuple[ChannelContext, int]] = []
+
     for context in contexts:
         channel_id = context.mapping.discord_channel_id
         last_seen = state.get_last_message_id(channel_id)
-        try:
-            messages = await _fetch_all_messages(
-                discord, channel_id, last_seen, limit=100
+        fetch_jobs.append(
+            asyncio.create_task(
+                _fetch_all_messages(discord, channel_id, last_seen, limit=100)
             )
-        except DiscordAPIError as exc:
-            if exc.status == 404:
+        )
+        context_meta.append((context, channel_id))
+
+    if not fetch_jobs:
+        return
+
+    results = await asyncio.gather(*fetch_jobs, return_exceptions=True)
+
+    for (context, channel_id), result in zip(context_meta, results):
+        if isinstance(result, Exception):
+            if isinstance(result, DiscordAPIError) and result.status == 404:
                 LOGGER.error(
                     "Discord channel %s was not found when fetching messages. "
                     "Check the configuration for this channel.",
                     channel_id,
                 )
                 continue
-            raise
+            raise result
+
+        messages = result
         if not messages:
             continue
 
         for message in messages:
-            await _forward_message(
-                context=context,
-                channel_id=channel_id,
-                message=message,
-                telegram=telegram,
-                formatter=format_announcement_message,
-                min_delay=min_delay,
-                max_delay=max_delay,
-            )
+            try:
+                await _forward_message(
+                    context=context,
+                    channel_id=channel_id,
+                    message=message,
+                    telegram=telegram,
+                    formatter=format_announcement_message,
+                    min_delay=min_delay,
+                    max_delay=max_delay,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "Failed to forward message %s from channel %s",
+                    message.get("id"),
+                    channel_id,
+                )
+                continue
+
         state.update_last_message_id(channel_id, messages[-1]["id"])
 
 
@@ -209,9 +235,7 @@ async def _forward_message(
     channel_id: int,
     message: dict,
     telegram: TelegramClient,
-    formatter: Callable[
-        [int, dict, str, Sequence[AttachmentInfo]], FormattedMessage
-    ],
+    formatter: Callable[..., FormattedMessage],
     min_delay: float,
     max_delay: float,
 ) -> None:
@@ -226,23 +250,40 @@ async def _forward_message(
         _attachment_category(attachment) for attachment in attachments
     )
 
-    if not _should_forward(
+    should_forward, reason = _should_forward(
         message,
         clean_content,
         embed_text,
         attachments,
         attachment_categories,
         context.filters,
-    ):
+    )
+    if not should_forward:
+        message_id = message.get("id")
+        if reason:
+            LOGGER.debug(
+                "Skipping message %s from channel %s because of %s",
+                message_id,
+                channel_id,
+                reason,
+            )
+        else:
+            LOGGER.debug(
+                "Skipping message %s from channel %s due to filters",
+                message_id,
+                channel_id,
+            )
         return
 
     customised_content = context.customization.apply(combined_content)
+    channel_label = context.mapping.display_name
     formatted = formatter(
         channel_id,
         message,
         customised_content,
         attachments,
         embed_text="",
+        channel_label=channel_label,
     )
     chat_id = context.mapping.telegram_chat_id
     await telegram.send_message(chat_id, formatted.text)
@@ -279,7 +320,7 @@ def _should_forward(
     attachments: Sequence[AttachmentInfo],
     attachment_categories: Sequence[str],
     filters: PreparedFilters,
-) -> bool:
+) -> tuple[bool, str | None]:
     aggregate_text: str | None = None
     if filters.requires_text:
         aggregate_text = _aggregate_text(clean_content, embed_text, attachments)
@@ -287,7 +328,7 @@ def _should_forward(
     if filters.whitelist:
         assert aggregate_text is not None
         if not any(keyword in aggregate_text for keyword in filters.whitelist):
-            return False
+            return False, "whitelist"
 
     if filters.blacklist:
         if aggregate_text is None:
@@ -295,18 +336,24 @@ def _should_forward(
                 clean_content, embed_text, attachments
             )
         if any(keyword in aggregate_text for keyword in filters.blacklist):
-            return False
+            return False, "blacklist"
 
     author = message.get("author") or {}
     author_values = _author_identifiers(author)
+    member = message.get("member") or {}
+    nickname = member.get("nick")
+    if nickname is not None:
+        nick_text = str(nickname).strip()
+        if nick_text:
+            author_values.add(nick_text.casefold())
 
     if filters.allowed_senders:
         if author_values.isdisjoint(filters.allowed_senders):
-            return False
+            return False, "allowed_senders"
 
     if filters.blocked_senders:
         if author_values.intersection(filters.blocked_senders):
-            return False
+            return False, "blocked_senders"
 
     message_types: Set[str] | None = None
     if filters.requires_types:
@@ -317,7 +364,7 @@ def _should_forward(
     if filters.allowed_types:
         assert message_types is not None
         if not message_types.intersection(filters.allowed_types):
-            return False
+            return False, "allowed_types"
 
     if filters.blocked_types:
         if message_types is None:
@@ -325,9 +372,9 @@ def _should_forward(
                 clean_content, embed_text, attachments, attachment_categories
             )
         if message_types.intersection(filters.blocked_types):
-            return False
+            return False, "blocked_types"
 
-    return True
+    return True, None
 
 
 def _author_identifiers(author: dict) -> Set[str]:
@@ -346,8 +393,15 @@ def _aggregate_text(
     embed_text: str,
     attachments: Sequence[AttachmentInfo],
 ) -> str:
-    text_blocks = [clean_content, embed_text]
-    text_blocks.extend(attachment.filename or "" for attachment in attachments)
+    text_blocks: List[str] = [clean_content, embed_text]
+    for attachment in attachments:
+        if attachment.filename:
+            text_blocks.append(attachment.filename)
+        if attachment.url:
+            parsed = urlparse(attachment.url)
+            domain = parsed.netloc or parsed.path or attachment.url
+            if domain:
+                text_blocks.append(domain)
     return " ".join(block for block in text_blocks if block).casefold()
 
 

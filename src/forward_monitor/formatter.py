@@ -56,11 +56,13 @@ def format_announcement_message(
     attachments: Sequence[AttachmentInfo],
     *,
     embed_text: str | None = None,
+    channel_label: str | None = None,
 ) -> FormattedMessage:
     """Build the outgoing text for a regular Discord message."""
 
     author_name = _author_name(message)
-    prefix = f"📢 Новое сообщение в канале {channel_id} от {author_name}"
+    label = (channel_label or "").strip() or str(channel_id)
+    prefix = f"📢 Новое сообщение в канале {label} от {author_name}"
     if embed_text is None:
         embed_text = extract_embed_text(message)
     combined_content = _combine_content_sections([content, embed_text])
@@ -220,6 +222,8 @@ def _build_jump_url(message: Mapping[str, Any], channel_id: int) -> str | None:
     message_id = message.get("id")
     if guild_id and message_id:
         return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+    if message_id and not guild_id:
+        return f"https://discord.com/channels/@me/{channel_id}/{message_id}"
     return None
 
 
@@ -386,6 +390,12 @@ def _format_embeds(message: Mapping[str, Any]) -> str:
             author_name = _clean_text_fragment(author.get("name"), message)
             if author_name:
                 lines.append(author_name)
+
+        url = embed.get("url")
+        if url is not None:
+            url_text = str(url).strip()
+            if url_text:
+                lines.append(url_text)
 
         if lines:
             sections.append("\n".join(lines))

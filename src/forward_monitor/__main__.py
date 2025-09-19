@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 from pathlib import Path
 
 from .config import MonitorConfig
@@ -34,9 +35,12 @@ def main() -> None:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
     config_path = Path(args.config)
-    config = MonitorConfig.from_file(config_path)
-
-    asyncio.run(run_monitor(config, once=args.once))
+    try:
+        config = MonitorConfig.from_file(config_path)
+        asyncio.run(run_monitor(config, once=args.once))
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        logging.error("Failed to start monitor: %s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

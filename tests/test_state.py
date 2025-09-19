@@ -97,3 +97,21 @@ def test_monitor_state_atomic_save(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
 
     data = json.loads(state_path.read_text(encoding="utf-8"))
     assert data["last_message_ids"]["123"] == "789"
+
+
+def test_monitor_state_flushes_to_disk(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_path = tmp_path / "state.json"
+    monitor_state = state_module.MonitorState(state_path)
+    monitor_state.update_last_message_id(1, "2")
+
+    called = False
+
+    def tracking_fsync(fd: int) -> None:  # type: ignore[no-untyped-def]
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(state_module.os, "fsync", tracking_fsync)
+
+    monitor_state.save()
+
+    assert called
