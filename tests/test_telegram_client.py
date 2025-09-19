@@ -1,12 +1,10 @@
 from __future__ import annotations
+
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
-from pathlib import Path
-from typing import Any, Iterable, List
-
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from types import TracebackType
+from typing import Any, cast
 
 import aiohttp
 import pytest
@@ -25,7 +23,12 @@ class _FakeResponse:
     async def __aenter__(self) -> "_FakeResponse":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         return None
 
     async def text(self) -> str:
@@ -37,7 +40,7 @@ class _FakeResponse:
 
 class _FakeSession:
     def __init__(self, responses: Iterable[_FakeResponse | Exception]):
-        self._responses: List[_FakeResponse | Exception] = list(responses)
+        self._responses: list[_FakeResponse | Exception] = list(responses)
         self.calls = 0
 
     def post(self, url: str, *, json: dict[str, Any]) -> _FakeResponse:
@@ -53,7 +56,7 @@ class _FakeSession:
 @pytest.mark.asyncio
 async def test_post_respects_explicit_retry_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession([_FakeResponse(429, text="rate limited")])
-    client = TelegramClient("token", session)  # type: ignore[arg-type]
+    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
 
     async def _unexpected_retry(_: Any) -> float:
         raise AssertionError("retry helper must not be called when retries are disabled")
@@ -68,22 +71,23 @@ async def test_post_respects_explicit_retry_statuses(monkeypatch: pytest.MonkeyP
 
 @pytest.mark.asyncio
 async def test_post_retries_on_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _sleep(delay: float) -> None:
-        _sleep.calls.append(delay)
+    delays: list[float] = []
 
-    _sleep.calls = []  # type: ignore[attr-defined]
+    async def _sleep(delay: float) -> None:
+        delays.append(delay)
+
     monkeypatch.setattr(telegram_client.asyncio, "sleep", _sleep)
 
     session = _FakeSession(
         [aiohttp.ClientOSError(0, "boom"), _FakeResponse(200, json_payload={"ok": True})]
     )
-    client = TelegramClient("token", session)  # type: ignore[arg-type]
+    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
 
     response = await client.send_message("chat", "hello", retry_attempts=2)
 
     assert response == {"ok": True}
     assert session.calls == 2
-    assert _sleep.calls == [1.0]  # type: ignore[attr-defined]
+    assert delays == [1.0]
 
 
 @pytest.mark.asyncio
@@ -92,7 +96,7 @@ async def test_post_raises_on_unsuccessful_payload() -> None:
         200, json_payload={"ok": False, "description": "chat not found", "error_code": 400}
     )
     session = _FakeSession([response])
-    client = TelegramClient("token", session)  # type: ignore[arg-type]
+    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
 
     with pytest.raises(RuntimeError) as excinfo:
         await client.send_message("chat", "hello")
@@ -110,7 +114,7 @@ async def test_post_raises_after_network_error_retries(monkeypatch: pytest.Monke
     monkeypatch.setattr(telegram_client.asyncio, "sleep", _sleep)
 
     session = _FakeSession([aiohttp.ClientOSError(0, "boom")] * 3)
-    client = TelegramClient("token", session)  # type: ignore[arg-type]
+    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
 
     with pytest.raises(RuntimeError):
         await client.send_message("chat", "hello", retry_attempts=2)
@@ -119,7 +123,7 @@ async def test_post_raises_after_network_error_retries(monkeypatch: pytest.Monke
 
 
 def test_normalise_retry_statuses_accepts_strings() -> None:
-    statuses = telegram_client._normalise_retry_statuses([429, "503"])  # type: ignore[arg-type]
+    statuses = telegram_client._normalise_retry_statuses([429, "503"])
     assert statuses == {429, 503}
 
 
@@ -130,6 +134,9 @@ async def test_retry_after_parses_http_date() -> None:
     response = _FakeResponse(429)
     response.headers["Retry-After"] = format_datetime(retry_time)
 
-    delay = await telegram_client._retry_after_seconds(response, now=reference)
+    delay = await telegram_client._retry_after_seconds(
+        cast(aiohttp.ClientResponse, response),
+        now=reference,
+    )
 
     assert delay == pytest.approx(42.0, abs=0.01)

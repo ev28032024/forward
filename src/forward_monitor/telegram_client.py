@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Iterable, Set
+from typing import Any, Dict, Set
 
 import aiohttp
-
 
 __all__ = ["TelegramClient"]
 
@@ -199,9 +199,7 @@ def _normalise_retry_statuses(statuses: Iterable[int | str]) -> Set[int]:
         try:
             normalised.add(int(status))
         except (TypeError, ValueError) as exc:  # pragma: no cover - defensive programming
-            raise ValueError(
-                f"Retry status codes must be integers; got {status!r}"
-            ) from exc
+            raise ValueError(f"Retry status codes must be integers; got {status!r}") from exc
     return normalised
 
 

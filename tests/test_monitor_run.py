@@ -3,21 +3,33 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import TracebackType
+from typing import Sequence
 
 import pytest
 
-from forward_monitor.config import ChannelMapping, MessageCustomization, MessageFilters, MonitorConfig
 from forward_monitor import monitor
+from forward_monitor.config import (
+    ChannelMapping,
+    MessageCustomization,
+    MessageFilters,
+    MonitorConfig,
+)
 
 
 class DummySession:
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
         pass
 
     async def __aenter__(self) -> "DummySession":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         return None
 
 
@@ -34,7 +46,10 @@ class DummyTelegramClient:
 
 
 @pytest.mark.asyncio
-async def test_run_monitor_propagates_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_monitor_propagates_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(monitor.aiohttp, "ClientSession", DummySession)
     monkeypatch.setattr(monitor, "DiscordClient", DummyDiscordClient)
     monkeypatch.setattr(monitor, "TelegramClient", DummyTelegramClient)
@@ -42,12 +57,12 @@ async def test_run_monitor_propagates_cancellation(tmp_path: Path, monkeypatch: 
     state_file = tmp_path / "state.json"
 
     async def fake_sync(
-        contexts,
-        discord,
-        telegram,
-        state,
-        min_delay,
-        max_delay,
+        contexts: Sequence[monitor.ChannelContext],
+        discord: monitor.DiscordClient,
+        telegram: monitor.TelegramClient,
+        state: monitor.MonitorState,
+        min_delay: float,
+        max_delay: float,
     ) -> None:
         state.update_last_message_id(123, "456")
         raise asyncio.CancelledError

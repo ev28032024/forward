@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-
 try:  # pragma: no cover - optional dependency
-    import pytest_asyncio  # type: ignore  # noqa: F401
+    import pytest_asyncio  # noqa: F401
 except ImportError:  # pragma: no cover - fallback path
     pytest_plugins: list[str] = []
 
@@ -21,9 +20,9 @@ except ImportError:  # pragma: no cover - fallback path
             return None
         loop = asyncio.new_event_loop()
         try:
+            fixture_info = getattr(pyfuncitem, "_fixtureinfo")
             kwargs = {
-                name: pyfuncitem.funcargs[name]
-                for name in pyfuncitem._fixtureinfo.argnames  # type: ignore[attr-defined]
+                name: pyfuncitem.funcargs[name] for name in getattr(fixture_info, "argnames", ())
             }
             loop.run_until_complete(pyfuncitem.obj(**kwargs))
         finally:

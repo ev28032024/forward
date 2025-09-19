@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Mapping, MutableMapping, Optional
+from collections.abc import Mapping, MutableMapping
+from typing import Any, Optional
 
-import asyncio
 import aiohttp
-
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 _DEFAULT_HEADERS: Mapping[str, str] = {
@@ -44,9 +43,7 @@ class DiscordClient:
         after: Optional[str] = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        params: MutableMapping[str, str] = {
-            "limit": str(max(1, min(limit, 100)))
-        }
+        params: MutableMapping[str, str] = {"limit": str(max(1, min(limit, 100)))}
         if after:
             params["after"] = after
 
@@ -96,7 +93,8 @@ class DiscordClient:
                     if "application/json" not in content_type:
                         text = await response.text()
                         raise RuntimeError(
-                            f"Unexpected content type '{content_type}' from Discord API: {text[:200]}"
+                            "Unexpected content type "
+                            f"'{content_type}' from Discord API: {text[:200]}",
                         )
                     return await response.json()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
