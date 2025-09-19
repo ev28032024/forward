@@ -1,0 +1,48 @@
+# Пример конфигурации для forward_monitor
+# Переименуйте файл и заполните токены/ID перед запуском
+
+discord_token: "DISCORD_USER_TOKEN"
+telegram_token: "TELEGRAM_BOT_TOKEN"
+telegram_chat_id: "@default_channel_or_chat_id"
+
+filters:
+  whitelist:
+    - "airdrop"
+  blocked_senders:
+    - "spammer123"
+  allowed_types:
+    - text
+    - image
+
+customization:
+  header: "🔥 Важные новости"
+  footer: "— Forward Bot"
+  replace:
+    OG: "Original"
+
+announcement_channels:
+  - discord_channel_id: 123456789012345678
+    telegram_chat_id: "-1001234567890"
+    filters:
+      blacklist:
+        - "maintenance"
+    customization:
+      header: "📢 Анонсы"
+      replace:
+        LFG: "Let's go"
+  - discord_channel_id: 223456789012345678  # будет использовать chat_id по умолчанию
+
+pinned_channels:
+  - discord_channel_id: 987654321098765432
+    telegram_chat_id: "@validators_updates"
+    filters:
+      whitelist:
+        - "guide"
+    customization:
+      footer:
+        - "📌 Закреплённая информация"
+
+poll_interval: 300  # интервал проверки в секундах
+state_file: "monitor_state.json"
+min_message_delay: 0.5  # минимальная пауза между отправками (сек)
+max_message_delay: 2.0  # максимальная пауза между отправками (сек)
