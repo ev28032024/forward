@@ -9,6 +9,15 @@ import aiohttp
 DISCORD_API_BASE = "https://discord.com/api/v10"
 
 
+class DiscordAPIError(RuntimeError):
+    """Error raised when the Discord API returns a non-success response."""
+
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"Discord API request failed with status {status}: {body}")
+        self.status = status
+        self.body = body
+
+
 class DiscordClient:
     """Simple HTTP client for the Discord REST API."""
 
@@ -53,9 +62,7 @@ class DiscordClient:
 
                 if response.status >= 400:
                     text = await response.text()
-                    raise RuntimeError(
-                        f"Discord API request failed with status {response.status}: {text}"
-                    )
+                    raise DiscordAPIError(response.status, text)
 
                 content_type = response.headers.get("Content-Type", "")
                 if "application/json" not in content_type:
