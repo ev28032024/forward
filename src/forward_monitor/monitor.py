@@ -200,13 +200,21 @@ async def _sync_pins(
                 )
                 continue
             raise
-        known_pins = set(state.get_known_pins(channel_id))
-        current_pin_ids = {pin["id"] for pin in pins}
+        known_pins = {str(pin_id) for pin_id in state.get_known_pins(channel_id)}
+        message_items: List[tuple[str, dict]] = []
+        current_pin_ids: Set[str] = set()
+        for pin in pins:
+            message_id = pin.get("id")
+            if message_id is None:
+                continue
+            message_id_text = str(message_id)
+            message_items.append((message_id_text, pin))
+            current_pin_ids.add(message_id_text)
 
         new_pin_ids = current_pin_ids - known_pins
         if new_pin_ids:
-            for message in pins:
-                if message["id"] in new_pin_ids:
+            for message_id, message in message_items:
+                if message_id in new_pin_ids:
                     await _forward_message(
                         context=context,
                         channel_id=channel_id,
