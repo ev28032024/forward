@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Sequence, Set
 
 import aiohttp
@@ -25,6 +26,32 @@ from .state import MonitorState
 from .telegram_client import TelegramClient
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ChannelContext:
+    """Pre-computed filters and customisation for a Discord channel."""
+
+    mapping: ChannelMapping
+    filters: MessageFilters
+    customization: MessageCustomization
+
+
+def _channel_contexts(
+    global_filters: MessageFilters,
+    global_customization: MessageCustomization,
+    channel_mappings: Iterable[ChannelMapping],
+) -> List[ChannelContext]:
+    contexts: List[ChannelContext] = []
+    for mapping in channel_mappings:
+        contexts.append(
+            ChannelContext(
+                mapping=mapping,
+                filters=global_filters.combine(mapping.filters),
+                customization=global_customization.combine(mapping.customization),
+            )
+        )
+    return contexts
 
 
 _MIME_PREFIX_CATEGORIES: Dict[str, str] = {
@@ -81,25 +108,27 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
 
         while True:
             try:
+                announcement_contexts = _channel_contexts(
+                    config.filters, config.customization, config.announcement_channels
+                )
                 await _sync_announcements(
-                    config.announcement_channels,
+                    announcement_contexts,
                     discord,
                     telegram,
                     state,
                     config.min_message_delay,
                     config.max_message_delay,
-                    config.filters,
-                    config.customization,
+                )
+                pin_contexts = _channel_contexts(
+                    config.filters, config.customization, config.pinned_channels
                 )
                 await _sync_pins(
-                    config.pinned_channels,
+                    pin_contexts,
                     discord,
                     telegram,
                     state,
                     config.min_message_delay,
                     config.max_message_delay,
-                    config.filters,
-                    config.customization,
                 )
             except Exception:  # pragma: no cover - runtime error path
                 LOGGER.exception("Monitoring iteration failed")
@@ -112,38 +141,27 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
             await asyncio.sleep(config.poll_interval)
 
 
-def _channel_list(channels: Iterable[ChannelMapping]) -> List[ChannelMapping]:
-    return list(channels)
-
-
 async def _sync_announcements(
-    channel_mappings: Iterable[ChannelMapping],
+    contexts: Sequence[ChannelContext],
     discord: DiscordClient,
     telegram: TelegramClient,
     state: MonitorState,
     min_delay: float,
     max_delay: float,
-    global_filters: MessageFilters,
-    global_customization: MessageCustomization,
 ) -> None:
-    for mapping in _channel_list(channel_mappings):
-        channel_id = mapping.discord_channel_id
+    for context in contexts:
+        channel_id = context.mapping.discord_channel_id
         last_seen = state.get_last_message_id(channel_id)
         messages = await discord.fetch_messages(channel_id, after=last_seen)
         if not messages:
             continue
 
-        filters = global_filters.combine(mapping.filters)
-        customization = global_customization.combine(mapping.customization)
-
         for message in messages:
             await _forward_message(
-                mapping=mapping,
+                context=context,
                 channel_id=channel_id,
                 message=message,
                 telegram=telegram,
-                filters=filters,
-                customization=customization,
                 formatter=format_announcement_message,
                 min_delay=min_delay,
                 max_delay=max_delay,
@@ -152,35 +170,28 @@ async def _sync_announcements(
 
 
 async def _sync_pins(
-    channel_mappings: Iterable[ChannelMapping],
+    contexts: Sequence[ChannelContext],
     discord: DiscordClient,
     telegram: TelegramClient,
     state: MonitorState,
     min_delay: float,
     max_delay: float,
-    global_filters: MessageFilters,
-    global_customization: MessageCustomization,
 ) -> None:
-    for mapping in _channel_list(channel_mappings):
-        channel_id = mapping.discord_channel_id
+    for context in contexts:
+        channel_id = context.mapping.discord_channel_id
         pins = await discord.fetch_pins(channel_id)
         known_pins = set(state.get_known_pins(channel_id))
         current_pin_ids = {pin["id"] for pin in pins}
 
         new_pin_ids = current_pin_ids - known_pins
         if new_pin_ids:
-            filters = global_filters.combine(mapping.filters)
-            customization = global_customization.combine(mapping.customization)
-
             for message in pins:
                 if message["id"] in new_pin_ids:
                     await _forward_message(
-                        mapping=mapping,
+                        context=context,
                         channel_id=channel_id,
                         message=message,
                         telegram=telegram,
-                        filters=filters,
-                        customization=customization,
                         formatter=format_pinned_message,
                         min_delay=min_delay,
                         max_delay=max_delay,
@@ -191,28 +202,26 @@ async def _sync_pins(
 
 async def _forward_message(
     *,
-    mapping: ChannelMapping,
+    context: ChannelContext,
     channel_id: int,
     message: dict,
     telegram: TelegramClient,
-    filters: MessageFilters,
-    customization: MessageCustomization,
     formatter: Callable[[int, dict, str, Sequence[AttachmentInfo]], str],
     min_delay: float,
     max_delay: float,
 ) -> None:
-    attachments = build_attachments(message)
     clean_content = clean_discord_content(message)
-    if not _should_forward(message, clean_content, attachments, filters):
+    attachments = build_attachments(message)
+
+    if not _should_forward(message, clean_content, attachments, context.filters):
         return
 
-    customised_content = customization.apply(clean_content)
+    customised_content = context.customization.apply(clean_content)
     text = formatter(channel_id, message, customised_content, attachments)
-    await telegram.send_message(mapping.telegram_chat_id, text)
+    chat_id = context.mapping.telegram_chat_id
+    await telegram.send_message(chat_id, text)
     await _sleep_with_jitter(min_delay, max_delay)
-    await _send_attachments(
-        telegram, mapping.telegram_chat_id, attachments, min_delay, max_delay
-    )
+    await _send_attachments(telegram, chat_id, attachments, min_delay, max_delay)
 
 
 async def _sleep_with_jitter(min_delay: float, max_delay: float) -> None:

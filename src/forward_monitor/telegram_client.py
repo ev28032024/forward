@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Iterable, Set
 
 import aiohttp
@@ -178,13 +180,26 @@ def _normalise_retry_statuses(statuses: Iterable[int | str]) -> Set[int]:
     return normalised
 
 
-async def _retry_after_seconds(response: aiohttp.ClientResponse) -> float:
+async def _retry_after_seconds(
+    response: aiohttp.ClientResponse, *, now: datetime | None = None
+) -> float:
+    reference_time = now or datetime.now(timezone.utc)
     retry_header = response.headers.get("Retry-After")
     if retry_header:
         try:
             return float(retry_header)
         except ValueError:  # pragma: no cover - defensive parsing
-            return 1.0
+            try:
+                retry_at = parsedate_to_datetime(retry_header)
+            except (TypeError, ValueError, IndexError):
+                retry_at = None
+            if retry_at is not None:
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - reference_time).total_seconds()
+                if delay > 0:
+                    return delay
+                return 1.0
 
     try:
         payload = await response.json()

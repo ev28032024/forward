@@ -1,4 +1,6 @@
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any, Iterable, List
 
@@ -64,3 +66,15 @@ async def test_post_respects_explicit_retry_statuses(monkeypatch: pytest.MonkeyP
 def test_normalise_retry_statuses_accepts_strings() -> None:
     statuses = telegram_client._normalise_retry_statuses([429, "503"])  # type: ignore[arg-type]
     assert statuses == {429, 503}
+
+
+@pytest.mark.asyncio
+async def test_retry_after_parses_http_date() -> None:
+    reference = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    retry_time = reference + timedelta(seconds=42)
+    response = _FakeResponse(429)
+    response.headers["Retry-After"] = format_datetime(retry_time)
+
+    delay = await telegram_client._retry_after_seconds(response, now=reference)
+
+    assert delay == pytest.approx(42.0, abs=0.01)
