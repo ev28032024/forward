@@ -22,10 +22,11 @@ def test_should_forward_respects_file_alias_in_filters() -> None:
         content_type=None,
     )
 
-    filters = MessageFilters(allowed_types=["file"])
+    filters = MessageFilters(allowed_types=["file"]).prepare()
     message = {"author": {"id": "42"}}
 
-    assert _should_forward(message, "", [attachment], filters)
+    categories = [_attachment_category(attachment)]
+    assert _should_forward(message, "", [attachment], categories, filters)
 
 
 def test_message_types_include_document_alias() -> None:
@@ -35,7 +36,8 @@ def test_message_types_include_document_alias() -> None:
         content_type=None,
     )
 
-    types = _message_types("", [attachment])
+    categories = [_attachment_category(attachment)]
+    types = _message_types("", [attachment], categories)
 
     assert "file" in types
     assert "document" in types

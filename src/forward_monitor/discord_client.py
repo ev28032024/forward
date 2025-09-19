@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Mapping, MutableMapping, Optional
 
 import aiohttp
 
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
+_DEFAULT_HEADERS: Mapping[str, str] = {
+    "User-Agent": "forward-monitor/0.1",
+}
+_RATE_LIMIT_MAX_RETRIES = 5
 
 
 class DiscordAPIError(RuntimeError):
@@ -18,20 +22,36 @@ class DiscordAPIError(RuntimeError):
         self.body = body
 
 
+__all__ = ["DiscordAPIError", "DiscordClient"]
+
+
 class DiscordClient:
     """Simple HTTP client for the Discord REST API."""
 
-    def __init__(self, token: str, session: aiohttp.ClientSession):
-        self._token = token
-        self._session = session
+    __slots__ = ("_session", "_headers")
 
-    async def fetch_messages(self, channel_id: int, *, after: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-        params = {"limit": str(max(1, min(limit, 100)))}
+    def __init__(self, token: str, session: aiohttp.ClientSession):
+        self._session = session
+        self._headers = dict(_DEFAULT_HEADERS)
+        self._headers["Authorization"] = token
+
+    async def fetch_messages(
+        self,
+        channel_id: int,
+        *,
+        after: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: MutableMapping[str, str] = {
+            "limit": str(max(1, min(limit, 100)))
+        }
         if after:
             params["after"] = after
 
         data = await self._request_json(
-            "GET", f"{DISCORD_API_BASE}/channels/{channel_id}/messages", params=params
+            "GET",
+            f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
+            params=params,
         )
         if not isinstance(data, list):
             raise RuntimeError("Unexpected Discord response shape when fetching messages")
@@ -39,24 +59,26 @@ class DiscordClient:
         # Discord returns messages in reverse chronological order.
         return sorted(data, key=lambda item: int(item["id"]))
 
-    async def fetch_pins(self, channel_id: int) -> List[Dict[str, Any]]:
-        data = await self._request_json("GET", f"{DISCORD_API_BASE}/channels/{channel_id}/pins")
-        if not isinstance(data, list):
-            raise RuntimeError("Unexpected Discord response shape when fetching pinned messages")
-        return data
-
     async def _request_json(
-        self, method: str, url: str, *, params: Optional[Dict[str, str]] = None
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[Mapping[str, str]] = None,
+        max_rate_limit_retries: int = _RATE_LIMIT_MAX_RETRIES,
     ) -> Any:
-        headers = {
-            "Authorization": self._token,
-            "User-Agent": "forward-monitor/0.1",
-        }
+        attempts = 0
         while True:
-            async with self._session.request(method, url, headers=headers, params=params) as response:
+            async with self._session.request(
+                method, url, headers=self._headers, params=params
+            ) as response:
                 if response.status == 429:
-                    payload = await response.json()
-                    retry_after = float(payload.get("retry_after", 1))
+                    attempts += 1
+                    if attempts > max_rate_limit_retries:
+                        text = await response.text()
+                        raise DiscordAPIError(response.status, text)
+
+                    retry_after = await _rate_limit_delay_seconds(response)
                     await asyncio.sleep(retry_after)
                     continue
 
@@ -71,3 +93,16 @@ class DiscordClient:
                         f"Unexpected content type '{content_type}' from Discord API: {text[:200]}"
                     )
                 return await response.json()
+
+
+async def _rate_limit_delay_seconds(response: aiohttp.ClientResponse) -> float:
+    try:
+        payload = await response.json()
+    except aiohttp.ContentTypeError:
+        return 1.0
+
+    retry_after = payload.get("retry_after")
+    try:
+        return max(float(retry_after), 0.0)
+    except (TypeError, ValueError):
+        return 1.0

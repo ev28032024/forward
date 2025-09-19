@@ -8,10 +8,14 @@ from typing import Any, Dict, Iterable, Set
 import aiohttp
 
 
+__all__ = ["TelegramClient"]
+
+
 class TelegramClient:
     """Minimal Telegram Bot API client."""
 
-    RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+    RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+    __slots__ = ("_token", "_session")
 
     def __init__(self, token: str, session: aiohttp.ClientSession):
         self._token = token
@@ -145,7 +149,7 @@ class TelegramClient:
     ) -> Dict[str, Any]:
         url = f"https://api.telegram.org/bot{self._token}/{method}"
         statuses = (
-            set(self.RETRYABLE_STATUSES)
+            self.RETRYABLE_STATUSES
             if retry_statuses is None
             else _normalise_retry_statuses(retry_statuses)
         )

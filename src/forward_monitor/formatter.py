@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Mapping, Sequence
 
 
+__all__ = [
+    "AttachmentInfo",
+    "format_announcement_message",
+    "build_attachments",
+    "clean_discord_content",
+]
+
+
 @dataclass(slots=True)
 class AttachmentInfo:
     """Simplified representation of a Discord attachment."""
@@ -36,22 +44,6 @@ def format_announcement_message(
     author_name = _author_name(message)
     jump_url = _build_jump_url(message, channel_id)
     prefix = f"📢 Новое сообщение в канале {channel_id} от {author_name}"
-    return _compose_message(prefix, content, attachments, jump_url)
-
-
-def format_pinned_message(
-    channel_id: int,
-    message: Mapping[str, Any],
-    content: str,
-    attachments: Sequence[AttachmentInfo],
-) -> str:
-    """Build the outgoing text for a pinned Discord message."""
-
-    author_name = _author_name(message)
-    jump_url = _build_jump_url(message, channel_id)
-    prefix = (
-        f"📌 Новая закреплённая запись в канале {channel_id} (автор: {author_name})"
-    )
     return _compose_message(prefix, content, attachments, jump_url)
 
 
@@ -136,36 +128,56 @@ def _clean_discord_content(message: Mapping[str, Any]) -> str:
     if not raw_content:
         return ""
 
-    mentions = {
-        str(user.get("id")): user.get("global_name") or user.get("username")
-        for user in message.get("mentions", [])
-        if user.get("id")
-    }
-    channel_mentions = {
-        str(channel.get("id")): channel.get("name")
-        for channel in message.get("mention_channels", [])
-        if channel.get("id")
-    }
+    content = raw_content
 
-    def replace_user(match: re.Match[str]) -> str:
-        user_id = match.group(1)
-        name = mentions.get(user_id)
-        return f"@{name}" if name else "@пользователь"
+    if "<" in content:
+        mentions: dict[str, str] | None = None
+        channel_mentions: dict[str, str] | None = None
 
-    def replace_role(match: re.Match[str]) -> str:
-        role_id = match.group(1)
-        return f"@роль-{role_id}"
+        if "<@" in content:
+            mentions = {
+                str(user.get("id")): user.get("global_name") or user.get("username")
+                for user in message.get("mentions", [])
+                if user.get("id")
+            }
 
-    def replace_channel(match: re.Match[str]) -> str:
-        channel_id = match.group(1)
-        name = channel_mentions.get(channel_id)
-        return f"#{name}" if name else f"#канал-{channel_id}"
+            def replace_user(match: re.Match[str]) -> str:
+                user_id = match.group(1)
+                if mentions is None:
+                    return "@пользователь"
+                name = mentions.get(user_id)
+                return f"@{name}" if name else "@пользователь"
 
-    content = MENTION_PATTERN.sub(replace_user, raw_content)
-    content = ROLE_PATTERN.sub(replace_role, content)
-    content = CHANNEL_PATTERN.sub(replace_channel, content)
-    content = SIMPLE_MARKDOWN.sub("", content)
-    content = html.unescape(content)
+            content = MENTION_PATTERN.sub(replace_user, content)
+
+        if "<@&" in content:
+            def replace_role(match: re.Match[str]) -> str:
+                role_id = match.group(1)
+                return f"@роль-{role_id}"
+
+            content = ROLE_PATTERN.sub(replace_role, content)
+
+        if "<#" in content:
+            channel_mentions = {
+                str(channel.get("id")): channel.get("name")
+                for channel in message.get("mention_channels", [])
+                if channel.get("id")
+            }
+
+            def replace_channel(match: re.Match[str]) -> str:
+                channel_id = match.group(1)
+                if channel_mentions is None:
+                    return f"#канал-{channel_id}"
+                name = channel_mentions.get(channel_id)
+                return f"#{name}" if name else f"#канал-{channel_id}"
+
+            content = CHANNEL_PATTERN.sub(replace_channel, content)
+
+    if any(char in content for char in "*_`~"):
+        content = SIMPLE_MARKDOWN.sub("", content)
+
+    if "&" in content:
+        content = html.unescape(content)
 
     lines = [line.strip() for line in content.splitlines()]
     # Remove trailing empty lines for tidier messages but preserve intentional blank spacing inside.

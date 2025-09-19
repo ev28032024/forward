@@ -13,6 +13,8 @@ from .config import (
     MessageCustomization,
     MessageFilters,
     MonitorConfig,
+    PreparedCustomization,
+    PreparedFilters,
 )
 from .discord_client import DiscordAPIError, DiscordClient
 from .formatter import (
@@ -20,7 +22,6 @@ from .formatter import (
     build_attachments,
     clean_discord_content,
     format_announcement_message,
-    format_pinned_message,
 )
 from .state import MonitorState
 from .telegram_client import TelegramClient
@@ -33,8 +34,8 @@ class ChannelContext:
     """Pre-computed filters and customisation for a Discord channel."""
 
     mapping: ChannelMapping
-    filters: MessageFilters
-    customization: MessageCustomization
+    filters: PreparedFilters
+    customization: PreparedCustomization
 
 
 def _channel_contexts(
@@ -44,11 +45,15 @@ def _channel_contexts(
 ) -> List[ChannelContext]:
     contexts: List[ChannelContext] = []
     for mapping in channel_mappings:
+        combined_filters = global_filters.combine(mapping.filters).prepare()
+        combined_customization = (
+            global_customization.combine(mapping.customization).prepare()
+        )
         contexts.append(
             ChannelContext(
                 mapping=mapping,
-                filters=global_filters.combine(mapping.filters),
-                customization=global_customization.combine(mapping.customization),
+                filters=combined_filters,
+                customization=combined_customization,
             )
         )
     return contexts
@@ -106,24 +111,14 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
         discord = DiscordClient(config.discord_token, session)
         telegram = TelegramClient(config.telegram_token, session)
 
+        announcement_contexts = _channel_contexts(
+            config.filters, config.customization, config.announcement_channels
+        )
+
         while True:
             try:
-                announcement_contexts = _channel_contexts(
-                    config.filters, config.customization, config.announcement_channels
-                )
                 await _sync_announcements(
                     announcement_contexts,
-                    discord,
-                    telegram,
-                    state,
-                    config.min_message_delay,
-                    config.max_message_delay,
-                )
-                pin_contexts = _channel_contexts(
-                    config.filters, config.customization, config.pinned_channels
-                )
-                await _sync_pins(
-                    pin_contexts,
                     discord,
                     telegram,
                     state,
@@ -179,55 +174,6 @@ async def _sync_announcements(
         state.update_last_message_id(channel_id, messages[-1]["id"])
 
 
-async def _sync_pins(
-    contexts: Sequence[ChannelContext],
-    discord: DiscordClient,
-    telegram: TelegramClient,
-    state: MonitorState,
-    min_delay: float,
-    max_delay: float,
-) -> None:
-    for context in contexts:
-        channel_id = context.mapping.discord_channel_id
-        try:
-            pins = await discord.fetch_pins(channel_id)
-        except DiscordAPIError as exc:
-            if exc.status == 404:
-                LOGGER.error(
-                    "Discord channel %s was not found when fetching pinned messages. "
-                    "Check the configuration for this channel.",
-                    channel_id,
-                )
-                continue
-            raise
-        known_pins = {str(pin_id) for pin_id in state.get_known_pins(channel_id)}
-        message_items: List[tuple[str, dict]] = []
-        current_pin_ids: Set[str] = set()
-        for pin in pins:
-            message_id = pin.get("id")
-            if message_id is None:
-                continue
-            message_id_text = str(message_id)
-            message_items.append((message_id_text, pin))
-            current_pin_ids.add(message_id_text)
-
-        new_pin_ids = current_pin_ids - known_pins
-        if new_pin_ids:
-            for message_id, message in message_items:
-                if message_id in new_pin_ids:
-                    await _forward_message(
-                        context=context,
-                        channel_id=channel_id,
-                        message=message,
-                        telegram=telegram,
-                        formatter=format_pinned_message,
-                        min_delay=min_delay,
-                        max_delay=max_delay,
-                    )
-
-        state.set_known_pins(channel_id, current_pin_ids)
-
-
 async def _forward_message(
     *,
     context: ChannelContext,
@@ -240,8 +186,17 @@ async def _forward_message(
 ) -> None:
     clean_content = clean_discord_content(message)
     attachments = build_attachments(message)
+    attachment_categories = tuple(
+        _attachment_category(attachment) for attachment in attachments
+    )
 
-    if not _should_forward(message, clean_content, attachments, context.filters):
+    if not _should_forward(
+        message,
+        clean_content,
+        attachments,
+        attachment_categories,
+        context.filters,
+    ):
         return
 
     customised_content = context.customization.apply(clean_content)
@@ -249,7 +204,14 @@ async def _forward_message(
     chat_id = context.mapping.telegram_chat_id
     await telegram.send_message(chat_id, text)
     await _sleep_with_jitter(min_delay, max_delay)
-    await _send_attachments(telegram, chat_id, attachments, min_delay, max_delay)
+    await _send_attachments(
+        telegram,
+        chat_id,
+        attachments,
+        attachment_categories,
+        min_delay,
+        max_delay,
+    )
 
 
 async def _sleep_with_jitter(min_delay: float, max_delay: float) -> None:
@@ -266,45 +228,50 @@ def _should_forward(
     message: dict,
     clean_content: str,
     attachments: Sequence[AttachmentInfo],
-    filters: MessageFilters,
+    attachment_categories: Sequence[str],
+    filters: PreparedFilters,
 ) -> bool:
-    text_blocks = [clean_content]
-    text_blocks.extend(attachment.filename or "" for attachment in attachments)
-    aggregate_text = " ".join(block for block in text_blocks if block).casefold()
+    aggregate_text: str | None = None
+    if filters.requires_text:
+        aggregate_text = _aggregate_text(clean_content, attachments)
 
     if filters.whitelist:
-        whitelist = {item.casefold() for item in filters.whitelist}
-        if not any(keyword in aggregate_text for keyword in whitelist):
+        assert aggregate_text is not None
+        if not any(keyword in aggregate_text for keyword in filters.whitelist):
             return False
 
     if filters.blacklist:
-        blacklist = {item.casefold() for item in filters.blacklist}
-        if any(keyword in aggregate_text for keyword in blacklist):
+        if aggregate_text is None:
+            aggregate_text = _aggregate_text(clean_content, attachments)
+        if any(keyword in aggregate_text for keyword in filters.blacklist):
             return False
 
     author = message.get("author") or {}
     author_values = _author_identifiers(author)
 
     if filters.allowed_senders:
-        allowed = {str(item).casefold() for item in filters.allowed_senders}
-        if author_values.isdisjoint(allowed):
+        if author_values.isdisjoint(filters.allowed_senders):
             return False
 
     if filters.blocked_senders:
-        blocked = {str(item).casefold() for item in filters.blocked_senders}
-        if author_values.intersection(blocked):
+        if author_values.intersection(filters.blocked_senders):
             return False
 
-    message_types = _message_types(clean_content, attachments)
+    message_types: Set[str] | None = None
+    if filters.requires_types:
+        message_types = _message_types(clean_content, attachments, attachment_categories)
 
     if filters.allowed_types:
-        allowed_types = {item.casefold() for item in filters.allowed_types}
-        if not message_types.intersection(allowed_types):
+        assert message_types is not None
+        if not message_types.intersection(filters.allowed_types):
             return False
 
     if filters.blocked_types:
-        blocked_types = {item.casefold() for item in filters.blocked_types}
-        if message_types.intersection(blocked_types):
+        if message_types is None:
+            message_types = _message_types(
+                clean_content, attachments, attachment_categories
+            )
+        if message_types.intersection(filters.blocked_types):
             return False
 
     return True
@@ -321,15 +288,24 @@ def _author_identifiers(author: dict) -> Set[str]:
     return identifiers
 
 
-def _message_types(clean_content: str, attachments: Sequence[AttachmentInfo]) -> Set[str]:
+def _aggregate_text(clean_content: str, attachments: Sequence[AttachmentInfo]) -> str:
+    text_blocks = [clean_content]
+    text_blocks.extend(attachment.filename or "" for attachment in attachments)
+    return " ".join(block for block in text_blocks if block).casefold()
+
+
+def _message_types(
+    clean_content: str,
+    attachments: Sequence[AttachmentInfo],
+    attachment_categories: Sequence[str],
+) -> Set[str]:
     types: Set[str] = set()
     if clean_content.strip():
         types.add("text")
 
     if attachments:
         types.add("attachment")
-        for attachment in attachments:
-            category = _attachment_category(attachment)
+        for category in attachment_categories:
             types.add(category)
             types.update(_TYPE_ALIASES.get(category, set()))
 
@@ -357,11 +333,11 @@ async def _send_attachments(
     telegram: TelegramClient,
     chat_id: str,
     attachments: Sequence[AttachmentInfo],
+    attachment_categories: Sequence[str],
     min_delay: float,
     max_delay: float,
 ) -> None:
-    for attachment in attachments:
-        category = _attachment_category(attachment)
+    for attachment, category in zip(attachments, attachment_categories):
         caption = _attachment_caption(attachment)
         try:
             await _send_single_attachment(telegram, chat_id, attachment.url, category, caption)
