@@ -14,7 +14,7 @@ from .config import (
     MessageFilters,
     MonitorConfig,
 )
-from .discord_client import DiscordClient
+from .discord_client import DiscordAPIError, DiscordClient
 from .formatter import (
     AttachmentInfo,
     build_attachments,
@@ -152,7 +152,17 @@ async def _sync_announcements(
     for context in contexts:
         channel_id = context.mapping.discord_channel_id
         last_seen = state.get_last_message_id(channel_id)
-        messages = await discord.fetch_messages(channel_id, after=last_seen)
+        try:
+            messages = await discord.fetch_messages(channel_id, after=last_seen)
+        except DiscordAPIError as exc:
+            if exc.status == 404:
+                LOGGER.error(
+                    "Discord channel %s was not found when fetching messages. "
+                    "Check the configuration for this channel.",
+                    channel_id,
+                )
+                continue
+            raise
         if not messages:
             continue
 
@@ -179,7 +189,17 @@ async def _sync_pins(
 ) -> None:
     for context in contexts:
         channel_id = context.mapping.discord_channel_id
-        pins = await discord.fetch_pins(channel_id)
+        try:
+            pins = await discord.fetch_pins(channel_id)
+        except DiscordAPIError as exc:
+            if exc.status == 404:
+                LOGGER.error(
+                    "Discord channel %s was not found when fetching pinned messages. "
+                    "Check the configuration for this channel.",
+                    channel_id,
+                )
+                continue
+            raise
         known_pins = set(state.get_known_pins(channel_id))
         current_pin_ids = {pin["id"] for pin in pins}
 
