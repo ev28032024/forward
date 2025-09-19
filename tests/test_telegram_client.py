@@ -87,6 +87,22 @@ async def test_post_retries_on_network_errors(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
+async def test_post_raises_on_unsuccessful_payload() -> None:
+    response = _FakeResponse(
+        200, json_payload={"ok": False, "description": "chat not found", "error_code": 400}
+    )
+    session = _FakeSession([response])
+    client = TelegramClient("token", session)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await client.send_message("chat", "hello")
+
+    assert "chat not found" in str(excinfo.value)
+    assert "error_code=400" in str(excinfo.value)
+    assert session.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_post_raises_after_network_error_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _sleep(_: float) -> None:
         return None

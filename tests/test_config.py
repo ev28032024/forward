@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import textwrap
 
+import pytest
+
 from forward_monitor.config import MonitorConfig
 
 
@@ -46,3 +48,38 @@ def test_default_state_file_uses_config_directory(tmp_path: Path) -> None:
     config = MonitorConfig.from_file(config_path)
 
     assert config.state_file == tmp_path / "monitor_state.json"
+
+
+def test_negative_poll_interval_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+
+    _write_config(
+        config_path,
+        """
+        discord_token: discord
+        telegram_token: telegram
+        telegram_chat_id: "@chat"
+        poll_interval: -5
+        """,
+    )
+
+    with pytest.raises(ValueError):
+        MonitorConfig.from_file(config_path)
+
+
+def test_zero_poll_interval_allowed(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+
+    _write_config(
+        config_path,
+        """
+        discord_token: discord
+        telegram_token: telegram
+        telegram_chat_id: "@chat"
+        poll_interval: 0
+        """,
+    )
+
+    config = MonitorConfig.from_file(config_path)
+
+    assert config.poll_interval == 0

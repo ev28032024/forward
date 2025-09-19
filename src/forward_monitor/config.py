@@ -221,6 +221,8 @@ class MonitorConfig:
             telegram_chat_id,
         )
         poll_interval = int(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
+        if poll_interval < 0:
+            raise ValueError("Configuration field 'poll_interval' cannot be negative")
         state_file = _resolve_state_file(path, data.get("state_file"), DEFAULT_STATE_FILE)
         min_message_delay = float(
             data.get("min_message_delay", DEFAULT_MIN_MESSAGE_DELAY)

@@ -32,8 +32,14 @@ class MonitorState:
         if not self._dirty:
             return
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("w", encoding="utf-8") as file:
+        tmp_path = self._path.with_name(self._path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as file:
             json.dump(self._data, file, indent=2)
+        try:
+            tmp_path.replace(self._path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
         self._dirty = False
 
     def _load(self) -> None:
@@ -45,6 +51,8 @@ class MonitorState:
         except json.JSONDecodeError:
             # Corrupted file - start fresh but keep backup of original contents.
             backup_path = self._path.with_suffix(".bak")
+            if backup_path.exists():
+                backup_path.unlink()
             self._path.rename(backup_path)
             return
 
