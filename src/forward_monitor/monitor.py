@@ -19,6 +19,7 @@ from .config import (
 from .discord_client import DiscordAPIError, DiscordClient
 from .formatter import (
     AttachmentInfo,
+    FormattedMessage,
     build_attachments,
     clean_discord_content,
     format_announcement_message,
@@ -180,7 +181,9 @@ async def _forward_message(
     channel_id: int,
     message: dict,
     telegram: TelegramClient,
-    formatter: Callable[[int, dict, str, Sequence[AttachmentInfo]], str],
+    formatter: Callable[
+        [int, dict, str, Sequence[AttachmentInfo]], FormattedMessage
+    ],
     min_delay: float,
     max_delay: float,
 ) -> None:
@@ -200,10 +203,15 @@ async def _forward_message(
         return
 
     customised_content = context.customization.apply(clean_content)
-    text = formatter(channel_id, message, customised_content, attachments)
+    formatted = formatter(channel_id, message, customised_content, attachments)
     chat_id = context.mapping.telegram_chat_id
-    await telegram.send_message(chat_id, text)
+    await telegram.send_message(chat_id, formatted.text)
     await _sleep_with_jitter(min_delay, max_delay)
+    for extra_text in formatted.extra_messages:
+        if not extra_text:
+            continue
+        await telegram.send_message(chat_id, extra_text)
+        await _sleep_with_jitter(min_delay, max_delay)
     await _send_attachments(
         telegram,
         chat_id,
