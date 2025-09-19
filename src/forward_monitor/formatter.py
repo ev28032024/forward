@@ -1,9 +1,11 @@
+"""Helpers for formatting Discord messages for Telegram forwarding."""
+
 from __future__ import annotations
 
 import html
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence
 
 
 @dataclass(slots=True)
@@ -11,11 +13,13 @@ class AttachmentInfo:
     """Simplified representation of a Discord attachment."""
 
     url: str
-    filename: str | None
-    content_type: str | None
+    filename: str | None = None
+    content_type: str | None = None
     size: int | None = None
 
     def display_label(self) -> str:
+        """Return a human-friendly label for the attachment."""
+
         if self.filename:
             return f"{self.filename}: {self.url}"
         return self.url
@@ -23,61 +27,59 @@ class AttachmentInfo:
 
 def format_announcement_message(
     channel_id: int,
-    message: Dict,
+    message: Mapping[str, Any],
     content: str,
     attachments: Sequence[AttachmentInfo],
 ) -> str:
+    """Build the outgoing text for a regular Discord message."""
+
     author_name = _author_name(message)
     jump_url = _build_jump_url(message, channel_id)
-
-    lines: List[str] = [
-        f"📢 Новое сообщение в канале {channel_id} от {author_name}",
-    ]
-    if content:
-        lines.append("")
-        lines.append(content)
-
-    if attachments:
-        lines.append("")
-        lines.append("Вложения:")
-        lines.extend(_attachment_lines(attachments))
-
-    if jump_url:
-        lines.append("")
-        lines.append(f"Открыть в Discord: {jump_url}")
-
-    return "\n".join(lines)
+    prefix = f"📢 Новое сообщение в канале {channel_id} от {author_name}"
+    return _compose_message(prefix, content, attachments, jump_url)
 
 
 def format_pinned_message(
     channel_id: int,
-    message: Dict,
+    message: Mapping[str, Any],
     content: str,
     attachments: Sequence[AttachmentInfo],
 ) -> str:
+    """Build the outgoing text for a pinned Discord message."""
+
     author_name = _author_name(message)
     jump_url = _build_jump_url(message, channel_id)
+    prefix = (
+        f"📌 Новая закреплённая запись в канале {channel_id} (автор: {author_name})"
+    )
+    return _compose_message(prefix, content, attachments, jump_url)
 
-    lines: List[str] = [
-        f"📌 Новая закреплённая запись в канале {channel_id} (автор: {author_name})",
-    ]
+
+def _compose_message(
+    prefix: str,
+    content: str,
+    attachments: Sequence[AttachmentInfo],
+    jump_url: str | None,
+) -> str:
+    """Compose the multi-line text that will be forwarded to Telegram."""
+
+    lines: List[str] = [prefix]
     if content:
-        lines.append("")
-        lines.append(content)
+        lines.extend(["", content])
 
     if attachments:
-        lines.append("")
-        lines.append("Вложения:")
+        lines.extend(["", "Вложения:"])
         lines.extend(_attachment_lines(attachments))
 
     if jump_url:
-        lines.append("")
-        lines.append(f"Открыть в Discord: {jump_url}")
+        lines.extend(["", f"Открыть в Discord: {jump_url}"])
 
     return "\n".join(lines)
 
 
 def _attachment_lines(attachments: Iterable[AttachmentInfo]) -> List[str]:
+    """Represent attachments as a list of human-readable lines."""
+
     lines: List[str] = []
     for attachment in attachments:
         if attachment.url:
@@ -85,7 +87,9 @@ def _attachment_lines(attachments: Iterable[AttachmentInfo]) -> List[str]:
     return lines
 
 
-def build_attachments(message: Dict) -> List[AttachmentInfo]:
+def build_attachments(message: Mapping[str, Any]) -> List[AttachmentInfo]:
+    """Convert the raw Discord payload into AttachmentInfo objects."""
+
     attachments: List[AttachmentInfo] = []
     for raw in message.get("attachments", []):
         url = raw.get("url")
@@ -102,11 +106,13 @@ def build_attachments(message: Dict) -> List[AttachmentInfo]:
     return attachments
 
 
-def clean_discord_content(message: Dict) -> str:
+def clean_discord_content(message: Mapping[str, Any]) -> str:
+    """Normalise Discord message text for forwarding."""
+
     return _clean_discord_content(message)
 
 
-def _build_jump_url(message: Dict, channel_id: int) -> str | None:
+def _build_jump_url(message: Mapping[str, Any], channel_id: int) -> str | None:
     guild_id = message.get("guild_id")
     message_id = message.get("id")
     if guild_id and message_id:
@@ -120,12 +126,12 @@ CHANNEL_PATTERN = re.compile(r"<#(\d+)>")
 SIMPLE_MARKDOWN = re.compile(r"([*_`~])+")
 
 
-def _author_name(message: Dict) -> str:
+def _author_name(message: Mapping[str, Any]) -> str:
     author = message.get("author", {})
     return author.get("global_name") or author.get("username") or "Unknown user"
 
 
-def _clean_discord_content(message: Dict) -> str:
+def _clean_discord_content(message: Mapping[str, Any]) -> str:
     raw_content = message.get("content") or ""
     if not raw_content:
         return ""
