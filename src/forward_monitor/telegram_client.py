@@ -170,7 +170,21 @@ class TelegramClient:
                         raise RuntimeError(
                             f"Telegram API request failed with status {response.status}: {detail}"
                         )
-                    return await response.json()
+
+                    payload = await response.json()
+                    if isinstance(payload, dict) and payload.get("ok") is False:
+                        description = payload.get("description")
+                        error_code = payload.get("error_code")
+                        extra_details = []
+                        if description:
+                            extra_details.append(str(description))
+                        if error_code is not None:
+                            extra_details.append(f"error_code={error_code}")
+                        detail = "; ".join(extra_details) if extra_details else "no details"
+                        raise RuntimeError(
+                            f"Telegram API method '{method}' reported failure: {detail}"
+                        )
+                    return payload
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 if attempt <= retry_attempts:
                     await asyncio.sleep(backoff)
