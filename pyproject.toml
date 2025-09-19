@@ -27,6 +27,7 @@ build-backend = "setuptools.build_meta"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
@@ -46,4 +47,4 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 allow_redefinition = false
 show_error_codes = true
-
+mypy_path = ["stubs"]

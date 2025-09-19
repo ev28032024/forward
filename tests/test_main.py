@@ -9,7 +9,11 @@ import pytest
 import forward_monitor.__main__ as cli
 
 
-def test_main_reports_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_main_reports_missing_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     missing_path = tmp_path / "absent.yml"
 
     def fake_parse_args() -> argparse.Namespace:

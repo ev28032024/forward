@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, Iterator, List, Tuple
+from typing import Any, Dict, FrozenSet, List, Tuple
 
 from yaml import safe_load
-
 
 DEFAULT_POLL_INTERVAL = 300
 DEFAULT_STATE_FILE = Path("monitor_state.json")
@@ -48,9 +48,7 @@ class ChannelMapping:
     telegram_chat_id: str
     display_name: str | None = None
     filters: "MessageFilters" = field(default_factory=lambda: MessageFilters())
-    customization: "MessageCustomization" = field(
-        default_factory=lambda: MessageCustomization()
-    )
+    customization: "MessageCustomization" = field(default_factory=lambda: MessageCustomization())
 
 
 @dataclass(slots=True)
@@ -128,9 +126,7 @@ class MessageCustomization:
     footers: List[str] = field(default_factory=list)
     replacements: Dict[str, str] = field(default_factory=dict)
 
-    _prepared: "PreparedCustomization" | None = field(
-        init=False, default=None, repr=False
-    )
+    _prepared: "PreparedCustomization" | None = field(init=False, default=None, repr=False)
 
     def combine(self, other: "MessageCustomization" | None) -> "MessageCustomization":
         if other is None:
@@ -153,9 +149,7 @@ class MessageCustomization:
         if self._prepared is None:
             header_text = "\n".join(segment for segment in self.headers if segment)
             footer_text = "\n".join(segment for segment in self.footers if segment)
-            replacements = tuple(
-                (find, replace) for find, replace in self.replacements.items()
-            )
+            replacements = tuple((find, replace) for find, replace in self.replacements.items())
             self._prepared = PreparedCustomization(
                 header_text=header_text,
                 footer_text=footer_text,
@@ -245,18 +239,15 @@ class MonitorConfig:
         if poll_interval < 0:
             raise ValueError("Configuration field 'poll_interval' cannot be negative")
         state_file = _resolve_state_file(path, data.get("state_file"), DEFAULT_STATE_FILE)
-        min_message_delay = float(
-            data.get("min_message_delay", DEFAULT_MIN_MESSAGE_DELAY)
-        )
-        max_message_delay = float(
-            data.get("max_message_delay", DEFAULT_MAX_MESSAGE_DELAY)
-        )
+        min_message_delay = float(data.get("min_message_delay", DEFAULT_MIN_MESSAGE_DELAY))
+        max_message_delay = float(data.get("max_message_delay", DEFAULT_MAX_MESSAGE_DELAY))
 
         if min_message_delay < 0:
             raise ValueError("Configuration field 'min_message_delay' cannot be negative")
         if max_message_delay < min_message_delay:
             raise ValueError(
-                "Configuration field 'max_message_delay' must be greater than or equal to 'min_message_delay'"
+                "Configuration field 'max_message_delay' must be greater than or equal to "
+                "'min_message_delay'",
             )
 
         return cls(
@@ -273,7 +264,7 @@ class MonitorConfig:
         )
 
 
-def _load_yaml(path: Path) -> dict:
+def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found: {path}")
 
@@ -282,7 +273,7 @@ def _load_yaml(path: Path) -> dict:
 
     if not isinstance(data, dict):  # pragma: no cover - configuration error path
         raise ValueError("Configuration file must contain a mapping at the top level")
-    return data
+    return dict(data)
 
 
 def _coerce_channel_mappings(
@@ -309,7 +300,8 @@ def _coerce_channel_mappings(
             telegram_chat = str(telegram_chat_source).strip()
             if not telegram_chat:
                 raise ValueError(
-                    f"Configuration field '{field_name}' entries must specify a non-empty 'telegram_chat_id'"
+                    "Configuration field "
+                    f"'{field_name}' entries must specify a non-empty 'telegram_chat_id'",
                 )
             filters = _parse_filters(item.get("filters"))
             customization = _parse_customization(item.get("customization"))
@@ -322,7 +314,8 @@ def _coerce_channel_mappings(
             telegram_chat = str(default_chat_id).strip()
             if not telegram_chat:
                 raise ValueError(
-                    f"Configuration field '{field_name}' requires a non-empty fallback 'telegram_chat_id'"
+                    "Configuration field "
+                    f"'{field_name}' requires a non-empty fallback 'telegram_chat_id'",
                 )
             filters = MessageFilters()
             customization = MessageCustomization()
@@ -342,12 +335,31 @@ def _coerce_channel_mappings(
 
 
 def _coerce_channel_id(value: object, field_name: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:  # pragma: no cover - configuration error path
+    if isinstance(value, bool):  # pragma: no cover - configuration error path
         raise ValueError(
-            f"Configuration field '{field_name}' must contain integers for Discord channel IDs; got {value!r}"
-        ) from exc
+            "Configuration field "
+            f"'{field_name}' must contain integers for Discord channel IDs; got {value!r}",
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(
+                "Configuration field "
+                f"'{field_name}' must contain integers for Discord channel IDs; got {value!r}",
+            )
+        try:
+            return int(text)
+        except ValueError as exc:  # pragma: no cover - configuration error path
+            raise ValueError(
+                "Configuration field "
+                f"'{field_name}' must contain integers for Discord channel IDs; got {value!r}",
+            ) from exc
+    raise ValueError(
+        "Configuration field "
+        f"'{field_name}' must contain integers for Discord channel IDs; got {value!r}",
+    )
 
 
 def _parse_filters(raw: object) -> MessageFilters:
@@ -424,16 +436,13 @@ def _parse_replacements(raw: object) -> Dict[str, str]:
 
 
 def _validate_message_types(values: Iterable[str], field_name: str) -> None:
-    invalid = [
-        value
-        for value in values
-        if value.casefold() not in SUPPORTED_MESSAGE_TYPES
-    ]
+    invalid = [value for value in values if value.casefold() not in SUPPORTED_MESSAGE_TYPES]
     if invalid:
         supported = ", ".join(sorted(SUPPORTED_MESSAGE_TYPES))
         raise ValueError(
-            f"Configuration field '{field_name}' contains unsupported message types: {', '.join(invalid)}. "
-            f"Supported types: {supported}"
+            "Configuration field "
+            f"'{field_name}' contains unsupported message types: {', '.join(invalid)}. "
+            f"Supported types: {supported}",
         )
 
 
@@ -477,9 +486,7 @@ def _casefold_unique(values: Iterable[object]) -> Iterator[str]:
         yield lowered
 
 
-def _resolve_state_file(
-    config_path: Path, raw_value: object, default: Path
-) -> Path:
+def _resolve_state_file(config_path: Path, raw_value: object, default: Path) -> Path:
     candidate = Path(str(raw_value)).expanduser() if raw_value else default.expanduser()
     if not candidate.is_absolute():
         candidate = (config_path.parent / candidate).resolve()

@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import aiohttp
@@ -29,6 +30,76 @@ from .formatter import (
 from .state import MonitorState
 from .telegram_client import TelegramClient
 
+DiscordMessage = dict[str, Any]
+
+
+class AnnouncementFormatter(Protocol):
+    def __call__(
+        self,
+        channel_id: int,
+        message: Mapping[str, Any],
+        content: str,
+        attachments: Sequence[AttachmentInfo],
+        *,
+        embed_text: str | None = None,
+        channel_label: str | None = None,
+    ) -> FormattedMessage:
+        """Format a message ready to be sent to Telegram."""
+
+
+class DiscordService(Protocol):
+    async def fetch_messages(
+        self,
+        channel_id: int,
+        *,
+        after: str | None = ...,
+        limit: int = ...,
+    ) -> list[DiscordMessage]:
+        """Retrieve recent messages from a Discord channel."""
+
+
+class TelegramSender(Protocol):
+    async def send_message(self, chat_id: str, text: str) -> Any: ...
+
+    async def send_photo(
+        self,
+        chat_id: str,
+        photo: str,
+        *,
+        caption: str | None = ...,
+    ) -> Any: ...
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video: str,
+        *,
+        caption: str | None = ...,
+    ) -> Any: ...
+
+    async def send_audio(
+        self,
+        chat_id: str,
+        audio: str,
+        *,
+        caption: str | None = ...,
+    ) -> Any: ...
+
+    async def send_document(
+        self,
+        chat_id: str,
+        document: str,
+        *,
+        caption: str | None = ...,
+    ) -> Any: ...
+
+
+class StateStore(Protocol):
+    def get_last_message_id(self, channel_id: int) -> str | None: ...
+
+    def update_last_message_id(self, channel_id: int, message_id: str) -> None: ...
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -45,13 +116,11 @@ def _channel_contexts(
     global_filters: MessageFilters,
     global_customization: MessageCustomization,
     channel_mappings: Iterable[ChannelMapping],
-) -> List[ChannelContext]:
-    contexts: List[ChannelContext] = []
+) -> list[ChannelContext]:
+    contexts: list[ChannelContext] = []
     for mapping in channel_mappings:
         combined_filters = global_filters.combine(mapping.filters).prepare()
-        combined_customization = (
-            global_customization.combine(mapping.customization).prepare()
-        )
+        combined_customization = global_customization.combine(mapping.customization).prepare()
         contexts.append(
             ChannelContext(
                 mapping=mapping,
@@ -62,18 +131,18 @@ def _channel_contexts(
     return contexts
 
 
-_MIME_PREFIX_CATEGORIES: Dict[str, str] = {
+_MIME_PREFIX_CATEGORIES: dict[str, str] = {
     "image/": "image",
     "video/": "video",
     "audio/": "audio",
 }
 
-_MIME_TYPE_CATEGORIES: Dict[str, str] = {
+_MIME_TYPE_CATEGORIES: dict[str, str] = {
     "application/pdf": "file",
     "text/plain": "file",
 }
 
-_EXTENSION_CATEGORIES: Dict[str, str] = {
+_EXTENSION_CATEGORIES: dict[str, str] = {
     "jpg": "image",
     "jpeg": "image",
     "png": "image",
@@ -99,7 +168,7 @@ _EXTENSION_CATEGORIES: Dict[str, str] = {
     "zip": "file",
 }
 
-_TYPE_ALIASES: Dict[str, Set[str]] = {
+_TYPE_ALIASES: dict[str, set[str]] = {
     "file": {"document"},
 }
 
@@ -144,22 +213,20 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
 
 async def _sync_announcements(
     contexts: Sequence[ChannelContext],
-    discord: DiscordClient,
-    telegram: TelegramClient,
-    state: MonitorState,
+    discord: DiscordService,
+    telegram: TelegramSender,
+    state: StateStore,
     min_delay: float,
     max_delay: float,
 ) -> None:
-    fetch_jobs: List[asyncio.Task[List[dict]]] = []
-    context_meta: List[Tuple[ChannelContext, int]] = []
+    fetch_jobs: list[asyncio.Task[list[DiscordMessage]]] = []
+    context_meta: list[tuple[ChannelContext, int]] = []
 
     for context in contexts:
         channel_id = context.mapping.discord_channel_id
         last_seen = state.get_last_message_id(channel_id)
         fetch_jobs.append(
-            asyncio.create_task(
-                _fetch_all_messages(discord, channel_id, last_seen, limit=100)
-            )
+            asyncio.create_task(_fetch_all_messages(discord, channel_id, last_seen, limit=100))
         )
         context_meta.append((context, channel_id))
 
@@ -168,8 +235,11 @@ async def _sync_announcements(
 
     results = await asyncio.gather(*fetch_jobs, return_exceptions=True)
 
-    for (context, channel_id), result in zip(context_meta, results):
-        if isinstance(result, Exception):
+    gathered: list[list[DiscordMessage] | BaseException]
+    gathered = list(results)
+
+    for (context, channel_id), result in zip(context_meta, gathered, strict=True):
+        if isinstance(result, BaseException):
             if isinstance(result, DiscordAPIError) and result.status == 404:
                 LOGGER.error(
                     "Discord channel %s was not found when fetching messages. "
@@ -179,7 +249,7 @@ async def _sync_announcements(
                 continue
             raise result
 
-        messages = result
+        messages: list[DiscordMessage] = result
         if not messages:
             continue
 
@@ -208,18 +278,16 @@ async def _sync_announcements(
 
 
 async def _fetch_all_messages(
-    discord: DiscordClient,
+    discord: DiscordService,
     channel_id: int,
     last_seen: str | None,
     *,
     limit: int,
-) -> List[dict]:
-    messages: List[dict] = []
+) -> list[DiscordMessage]:
+    messages: list[DiscordMessage] = []
     cursor = last_seen
     while True:
-        batch = await discord.fetch_messages(
-            channel_id, after=cursor, limit=limit
-        )
+        batch = await discord.fetch_messages(channel_id, after=cursor, limit=limit)
         if not batch:
             break
         messages.extend(batch)
@@ -233,22 +301,18 @@ async def _forward_message(
     *,
     context: ChannelContext,
     channel_id: int,
-    message: dict,
-    telegram: TelegramClient,
-    formatter: Callable[..., FormattedMessage],
+    message: Mapping[str, Any],
+    telegram: TelegramSender,
+    formatter: AnnouncementFormatter,
     min_delay: float,
     max_delay: float,
 ) -> None:
     clean_content = clean_discord_content(message)
     embed_text = extract_embed_text(message)
-    combined_content = "\n\n".join(
-        section for section in (clean_content, embed_text) if section
-    )
+    combined_content = "\n\n".join(section for section in (clean_content, embed_text) if section)
 
     attachments = build_attachments(message)
-    attachment_categories = tuple(
-        _attachment_category(attachment) for attachment in attachments
-    )
+    attachment_categories = tuple(_attachment_category(attachment) for attachment in attachments)
 
     should_forward, reason = _should_forward(
         message,
@@ -314,7 +378,7 @@ async def _sleep_with_jitter(min_delay: float, max_delay: float) -> None:
 
 
 def _should_forward(
-    message: dict,
+    message: Mapping[str, Any],
     clean_content: str,
     embed_text: str,
     attachments: Sequence[AttachmentInfo],
@@ -332,9 +396,7 @@ def _should_forward(
 
     if filters.blacklist:
         if aggregate_text is None:
-            aggregate_text = _aggregate_text(
-                clean_content, embed_text, attachments
-            )
+            aggregate_text = _aggregate_text(clean_content, embed_text, attachments)
         if any(keyword in aggregate_text for keyword in filters.blacklist):
             return False, "blacklist"
 
@@ -355,7 +417,7 @@ def _should_forward(
         if author_values.intersection(filters.blocked_senders):
             return False, "blocked_senders"
 
-    message_types: Set[str] | None = None
+    message_types: set[str] | None = None
     if filters.requires_types:
         message_types = _message_types(
             clean_content, embed_text, attachments, attachment_categories
@@ -377,8 +439,8 @@ def _should_forward(
     return True, None
 
 
-def _author_identifiers(author: dict) -> Set[str]:
-    identifiers = set()
+def _author_identifiers(author: Mapping[str, Any]) -> set[str]:
+    identifiers: set[str] = set()
     for key in ("id", "username", "global_name"):
         value = author.get(key)
         if value is not None:
@@ -393,7 +455,7 @@ def _aggregate_text(
     embed_text: str,
     attachments: Sequence[AttachmentInfo],
 ) -> str:
-    text_blocks: List[str] = [clean_content, embed_text]
+    text_blocks: list[str] = [clean_content, embed_text]
     for attachment in attachments:
         if attachment.filename:
             text_blocks.append(attachment.filename)
@@ -410,8 +472,8 @@ def _message_types(
     embed_text: str,
     attachments: Sequence[AttachmentInfo],
     attachment_categories: Sequence[str],
-) -> Set[str]:
-    types: Set[str] = set()
+) -> set[str]:
+    types: set[str] = set()
     if clean_content.strip() or embed_text.strip():
         types.add("text")
 
@@ -419,7 +481,7 @@ def _message_types(
         types.add("attachment")
         for category in attachment_categories:
             types.add(category)
-            types.update(_TYPE_ALIASES.get(category, set()))
+            types.update(_TYPE_ALIASES.get(category, set[str]()))
 
     return types
 
@@ -442,7 +504,7 @@ def _attachment_category(attachment: AttachmentInfo) -> str:
 
 
 async def _send_attachments(
-    telegram: TelegramClient,
+    telegram: TelegramSender,
     chat_id: str,
     attachments: Sequence[AttachmentInfo],
     attachment_categories: Sequence[str],
@@ -458,7 +520,7 @@ async def _send_attachments(
 
 
 async def _send_single_attachment(
-    telegram: TelegramClient,
+    telegram: TelegramSender,
     chat_id: str,
     url: str,
     category: str,

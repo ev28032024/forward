@@ -162,7 +162,9 @@ def _chunk_text(text: str, limit: int) -> List[str]:
             flush()
 
         current_lines.append(line)
-        current_length = line_length if len(current_lines) == 1 else current_length + 1 + line_length
+        current_length = (
+            line_length if len(current_lines) == 1 else current_length + 1 + line_length
+        )
 
     flush()
 
@@ -237,9 +239,7 @@ def _clean_discord_content(message: Mapping[str, Any]) -> str:
     return _clean_text_fragment(raw_content, message)
 
 
-def _clean_text_fragment(
-    raw_text: str | None, message: Mapping[str, Any]
-) -> str:
+def _clean_text_fragment(raw_text: str | None, message: Mapping[str, Any]) -> str:
     if not raw_text:
         return ""
 
@@ -403,9 +403,7 @@ def _format_embeds(message: Mapping[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
-def _build_embed_attachments(
-    embed: Mapping[str, Any], seen_urls: set[str]
-) -> List[AttachmentInfo]:
+def _build_embed_attachments(embed: Mapping[str, Any], seen_urls: set[str]) -> List[AttachmentInfo]:
     attachments: List[AttachmentInfo] = []
 
     for key, category in (

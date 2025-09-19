@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 import pytest
 
 from forward_monitor.config import ChannelMapping, MessageCustomization, MessageFilters
 from forward_monitor.formatter import AttachmentInfo, FormattedMessage, format_announcement_message
-from forward_monitor.monitor import ChannelContext, _forward_message, _sync_announcements
+from forward_monitor.monitor import (
+    AnnouncementFormatter,
+    ChannelContext,
+    _forward_message,
+    _sync_announcements,
+)
 
 
 class StubTelegram:
@@ -16,6 +21,28 @@ class StubTelegram:
 
     async def send_message(self, chat_id: str, text: str) -> None:
         self.sent.append((chat_id, text))
+
+    async def send_photo(self, chat_id: str, photo: str, *, caption: str | None = None) -> None:
+        self.sent.append((chat_id, f"photo:{photo}"))
+        if caption:
+            self.sent.append((chat_id, caption))
+
+    async def send_video(self, chat_id: str, video: str, *, caption: str | None = None) -> None:
+        self.sent.append((chat_id, f"video:{video}"))
+        if caption:
+            self.sent.append((chat_id, caption))
+
+    async def send_audio(self, chat_id: str, audio: str, *, caption: str | None = None) -> None:
+        self.sent.append((chat_id, f"audio:{audio}"))
+        if caption:
+            self.sent.append((chat_id, caption))
+
+    async def send_document(
+        self, chat_id: str, document: str, *, caption: str | None = None
+    ) -> None:
+        self.sent.append((chat_id, f"document:{document}"))
+        if caption:
+            self.sent.append((chat_id, caption))
 
 
 class DummyState:
@@ -45,7 +72,7 @@ async def test_forward_message_sends_extra_messages() -> None:
 
     def formatter(
         channel_id: int,
-        payload: dict,
+        payload: Mapping[str, Any],
         content: str,
         attachments: Sequence[AttachmentInfo],
         *,
@@ -67,7 +94,7 @@ async def test_forward_message_sends_extra_messages() -> None:
         channel_id=1,
         message=message,
         telegram=telegram,
-        formatter=formatter,
+        formatter=cast(AnnouncementFormatter, formatter),
         min_delay=0,
         max_delay=0,
     )
@@ -282,7 +309,7 @@ async def test_sync_announcements_continues_after_forward_error(
     forwarded: list[str] = []
     error_triggered = False
 
-    async def failing_forward(**kwargs):  # type: ignore[no-untyped-def]
+    async def failing_forward(**kwargs: Any) -> None:
         nonlocal error_triggered
         message = kwargs["message"]
         if not error_triggered:

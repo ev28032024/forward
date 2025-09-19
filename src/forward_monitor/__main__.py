@@ -11,7 +11,9 @@ from .monitor import run_monitor
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Monitor Discord channels and forward updates to Telegram")
+    parser = argparse.ArgumentParser(
+        description="Monitor Discord channels and forward updates to Telegram",
+    )
     parser.add_argument(
         "--config",
         required=True,

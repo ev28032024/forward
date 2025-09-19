@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
-
 import asyncio
+from collections.abc import Iterable, Mapping
+from types import TracebackType
+from typing import Any, cast
+
 import aiohttp
 import pytest
 
@@ -26,7 +28,12 @@ class _FakeResponse:
     async def __aenter__(self) -> "_FakeResponse":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - protocol
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:  # pragma: no cover - protocol
         return None
 
     async def json(self) -> Any:
@@ -56,7 +63,9 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_fetch_messages_sorts_results_and_passes_params(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_messages_sorts_results_and_passes_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _sleep(_: float) -> None:
         return None
 
@@ -67,7 +76,7 @@ async def test_fetch_messages_sorts_results_and_passes_params(monkeypatch: pytes
         json_payload=[{"id": "3"}, {"id": "1"}, {"id": "2"}],
     )
     session = _FakeSession([response])
-    client = DiscordClient("token", session)  # type: ignore[arg-type]
+    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
 
     result = await client.fetch_messages(123, after="5", limit=10)
 
@@ -96,7 +105,7 @@ async def test_fetch_messages_waits_for_rate_limit(monkeypatch: pytest.MonkeyPat
             _FakeResponse(200, json_payload=[{"id": "1"}]),
         ]
     )
-    client = DiscordClient("token", session)  # type: ignore[arg-type]
+    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
 
     messages = await client.fetch_messages(42)
 
@@ -132,7 +141,7 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
             return _FakeResponse(200, json_payload={"ok": True})
 
     session = FlakySession()
-    client = DiscordClient("token", session)  # type: ignore[arg-type]
+    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
 
     result = await client._request_json(  # pylint: disable=protected-access
         "GET",
@@ -146,7 +155,9 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_request_json_raises_after_rate_limit_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_request_json_raises_after_rate_limit_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def _sleep(_: float) -> None:
         return None
 
@@ -158,7 +169,7 @@ async def test_request_json_raises_after_rate_limit_retries(monkeypatch: pytest.
             _FakeResponse(429, json_payload={"retry_after": 0}, text="retry"),
         ]
     )
-    client = DiscordClient("token", session)  # type: ignore[arg-type]
+    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
 
     with pytest.raises(DiscordAPIError):
         await client._request_json("GET", "https://example.com", max_rate_limit_retries=1)

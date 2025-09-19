@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Any
 
 
 class MonitorState:
@@ -13,7 +13,7 @@ class MonitorState:
 
     def __init__(self, path: Path):
         self._path = path
-        self._data = {
+        self._data: dict[str, dict[str, str]] = {
             "last_message_ids": {},
         }
         self._dirty = False
@@ -50,7 +50,7 @@ class MonitorState:
             return
         try:
             with self._path.open("r", encoding="utf-8") as file:
-                data: Dict[str, dict[str, list[str]]] = json.load(file)
+                raw_data: Any = json.load(file)
         except json.JSONDecodeError:
             # Corrupted file - start fresh but keep backup of original contents.
             backup_path = self._path.with_suffix(".bak")
@@ -59,13 +59,17 @@ class MonitorState:
             self._path.rename(backup_path)
             return
 
-        if not isinstance(data, dict):
+        if not isinstance(raw_data, dict):
             return
 
-        self._data["last_message_ids"].update(
-            {
-                str(key): str(value)
-                for key, value in data.get("last_message_ids", {}).items()
-                if value
-            }
-        )
+        last_ids = raw_data.get("last_message_ids")
+        if not isinstance(last_ids, dict):
+            return
+
+        for key, value in last_ids.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            self._data["last_message_ids"][str(key)] = text

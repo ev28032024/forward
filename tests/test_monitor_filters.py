@@ -7,6 +7,7 @@ import pytest
 from forward_monitor.config import ChannelMapping, MessageCustomization, MessageFilters
 from forward_monitor.formatter import (
     AttachmentInfo,
+    FormattedMessage,
     build_attachments,
     clean_discord_content,
     extract_embed_text,
@@ -198,9 +199,26 @@ async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixtu
         async def send_message(self, chat_id: str, text: str) -> None:
             self.sent.append((chat_id, text))
 
+        async def send_photo(self, chat_id: str, photo: str, *, caption: str | None = None) -> None:
+            raise AssertionError("send_photo should not be called")
+
+        async def send_video(self, chat_id: str, video: str, *, caption: str | None = None) -> None:
+            raise AssertionError("send_video should not be called")
+
+        async def send_audio(self, chat_id: str, audio: str, *, caption: str | None = None) -> None:
+            raise AssertionError("send_audio should not be called")
+
+        async def send_document(
+            self, chat_id: str, document: str, *, caption: str | None = None
+        ) -> None:
+            raise AssertionError("send_document should not be called")
+
     telegram = DummyTelegram()
 
-    def unused_formatter(*_args, **_kwargs):  # pragma: no cover - formatter unused
+    def unused_formatter(
+        *_args: object,
+        **_kwargs: object,
+    ) -> FormattedMessage:  # pragma: no cover - formatter unused
         raise RuntimeError("formatter should not be called")
 
     with caplog.at_level(logging.DEBUG, logger="forward_monitor.monitor"):

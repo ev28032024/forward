@@ -25,10 +25,7 @@ def test_clean_discord_content_preserves_literal_backticks() -> None:
 def test_clean_discord_content_strips_markdown_wrappers() -> None:
     message = {"content": "Look at **bold** and `code` with _italics_"}
 
-    assert (
-        clean_discord_content(message)
-        == "Look at bold and code with italics"
-    )
+    assert clean_discord_content(message) == "Look at bold and code with italics"
 
 
 def test_clean_discord_content_preserves_indentation() -> None:
@@ -36,10 +33,7 @@ def test_clean_discord_content_preserves_indentation() -> None:
         "content": "Line one\n  - Nested item\n    Code block",
     }
 
-    assert (
-        clean_discord_content(message)
-        == "Line one\n  - Nested item\n    Code block"
-    )
+    assert clean_discord_content(message) == "Line one\n  - Nested item\n    Code block"
 
 
 def test_format_includes_embed_data() -> None:
@@ -114,7 +108,10 @@ def test_build_jump_url_supports_direct_messages() -> None:
 
     formatted = format_announcement_message(888, message, "Body", [])
 
-    assert any("https://discord.com/channels/@me/888/555" in chunk for chunk in (formatted.text, *formatted.extra_messages))
+    assert any(
+        "https://discord.com/channels/@me/888/555" in chunk
+        for chunk in (formatted.text, *formatted.extra_messages)
+    )
 
 
 def test_build_attachments_includes_embed_urls() -> None:
