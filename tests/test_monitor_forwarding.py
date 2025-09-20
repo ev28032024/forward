@@ -13,6 +13,7 @@ from forward_monitor.monitor import (
     _forward_message,
     _sync_announcements,
 )
+from forward_monitor.types import DiscordMessage
 
 
 class StubTelegram:
@@ -64,11 +65,14 @@ async def test_forward_message_sends_extra_messages() -> None:
         customization=MessageCustomization().prepare(),
     )
 
-    message = {
-        "content": "Hello",
-        "author": {"id": "123"},
-        "id": "456",
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "content": "Hello",
+            "author": {"id": "123"},
+            "id": "456",
+        },
+    )
 
     def formatter(
         channel_id: int,
@@ -112,21 +116,24 @@ async def test_forward_message_applies_customisation_to_embed_text() -> None:
         mapping=ChannelMapping(discord_channel_id=2, telegram_chat_id="room"),
         filters=MessageFilters().prepare(),
         customization=MessageCustomization(
-            headers=["Header"],
-            footers=["Footer"],
-            replacements={"Secret": "Visible"},
+            headers=("Header",),
+            footers=("Footer",),
+            replacements=(("Secret", "Visible"),),
         ).prepare(),
     )
 
-    message = {
-        "content": "",
-        "author": {"username": "Author"},
-        "guild_id": 99,
-        "id": 100,
-        "embeds": [
-            {"description": "Secret embed text"},
-        ],
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "content": "",
+            "author": {"username": "Author"},
+            "guild_id": 99,
+            "id": 100,
+            "embeds": [
+                {"description": "Secret embed text"},
+            ],
+        },
+    )
 
     telegram = StubTelegram()
 
@@ -159,17 +166,26 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
         customization=MessageCustomization().prepare(),
     )
 
-    first_batch = [
-        {"id": str(index), "author": {"id": "1"}, "content": f"Message {index}"}
+    first_batch: list[DiscordMessage] = [
+        cast(
+            DiscordMessage,
+            {"id": str(index), "author": {"id": "1"}, "content": f"Message {index}"},
+        )
         for index in range(1, 101)
     ]
-    second_batch = [
-        {"id": "101", "author": {"id": "1"}, "content": "After backlog"},
-        {"id": "102", "author": {"id": "1"}, "content": "Newest"},
+    second_batch: list[DiscordMessage] = [
+        cast(
+            DiscordMessage,
+            {"id": "101", "author": {"id": "1"}, "content": "After backlog"},
+        ),
+        cast(
+            DiscordMessage,
+            {"id": "102", "author": {"id": "1"}, "content": "Newest"},
+        ),
     ]
 
     class FakeDiscord:
-        def __init__(self, batches: list[list[dict[str, Any]]]) -> None:
+        def __init__(self, batches: list[list[DiscordMessage]]) -> None:
             self._batches = batches
             self.calls: list[tuple[int, str | None, int]] = []
 
@@ -179,7 +195,7 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
             *,
             after: str | None = None,
             limit: int = 100,
-        ) -> list[dict[str, Any]]:
+        ) -> list[DiscordMessage]:
             self.calls.append((channel_id, after, limit))
             if self._batches:
                 return self._batches.pop(0)
@@ -238,18 +254,24 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
             *,
             after: str | None = None,
             limit: int = 100,
-        ) -> list[dict[str, Any]]:
+        ) -> list[DiscordMessage]:
             self.calls.append(channel_id)
             if channel_id == 11:
                 slow_started.set()
                 await release_slow.wait()
                 return [
-                    {"id": "21", "author": {"id": "1"}, "content": "slow news"},
+                    cast(
+                        DiscordMessage,
+                        {"id": "21", "author": {"id": "1"}, "content": "slow news"},
+                    )
                 ]
             await slow_started.wait()
             fast_completed.set()
             return [
-                {"id": "12", "author": {"id": "2"}, "content": "fast update"},
+                cast(
+                    DiscordMessage,
+                    {"id": "12", "author": {"id": "2"}, "content": "fast update"},
+                )
             ]
 
     discord = ParallelDiscord()
@@ -291,9 +313,9 @@ async def test_sync_announcements_continues_after_forward_error(
         customization=MessageCustomization().prepare(),
     )
 
-    messages = [
-        {"id": "31", "author": {"id": "1"}, "content": "first"},
-        {"id": "32", "author": {"id": "1"}, "content": "second"},
+    messages: list[DiscordMessage] = [
+        cast(DiscordMessage, {"id": "31", "author": {"id": "1"}, "content": "first"}),
+        cast(DiscordMessage, {"id": "32", "author": {"id": "1"}, "content": "second"}),
     ]
 
     class FakeDiscord:
@@ -303,7 +325,7 @@ async def test_sync_announcements_continues_after_forward_error(
             *,
             after: str | None = None,
             limit: int = 100,
-        ) -> list[dict[str, Any]]:
+        ) -> list[DiscordMessage]:
             return messages
 
     forwarded: list[str] = []

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from forward_monitor.formatter import (
     AttachmentInfo,
     FormattedMessage,
@@ -8,30 +10,34 @@ from forward_monitor.formatter import (
     extract_embed_text,
     format_announcement_message,
 )
+from forward_monitor.types import DiscordMessage
 
 
 def test_clean_discord_content_preserves_literal_underscores() -> None:
-    message = {"content": "release_candidate"}
+    message = cast(DiscordMessage, {"content": "release_candidate"})
 
     assert clean_discord_content(message) == "release_candidate"
 
 
 def test_clean_discord_content_preserves_literal_backticks() -> None:
-    message = {"content": "literal`backtick"}
+    message = cast(DiscordMessage, {"content": "literal`backtick"})
 
     assert clean_discord_content(message) == "literal`backtick"
 
 
 def test_clean_discord_content_strips_markdown_wrappers() -> None:
-    message = {"content": "Look at **bold** and `code` with _italics_"}
+    message = cast(
+        DiscordMessage, {"content": "Look at **bold** and `code` with _italics_"}
+    )
 
     assert clean_discord_content(message) == "Look at bold and code with italics"
 
 
 def test_clean_discord_content_preserves_indentation() -> None:
-    message = {
-        "content": "Line one\n  - Nested item\n    Code block",
-    }
+    message = cast(
+        DiscordMessage,
+        {"content": "Line one\n  - Nested item\n    Code block"},
+    )
 
     assert clean_discord_content(message) == "Line one\n  - Nested item\n    Code block"
 
@@ -66,15 +72,18 @@ def test_format_includes_embed_data() -> None:
 
 
 def test_extract_embed_text_returns_clean_text() -> None:
-    message = {
-        "embeds": [
-            {
-                "title": "  Title  ",
-                "description": "`Code` block",
-                "url": "https://example.com/details",
-            }
-        ]
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "embeds": [
+                {
+                    "title": "  Title  ",
+                    "description": "`Code` block",
+                    "url": "https://example.com/details",
+                }
+            ]
+        },
+    )
 
     text = extract_embed_text(message)
     assert "Title" in text
@@ -83,10 +92,7 @@ def test_extract_embed_text_returns_clean_text() -> None:
 
 
 def test_format_announcement_uses_channel_label() -> None:
-    message = {
-        "author": {"username": "Tester"},
-        "id": 999,
-    }
+    message = cast(DiscordMessage, {"author": {"username": "Tester"}, "id": 999})
 
     result = format_announcement_message(
         123,
@@ -115,23 +121,26 @@ def test_build_jump_url_supports_direct_messages() -> None:
 
 
 def test_build_attachments_includes_embed_urls() -> None:
-    message = {
-        "attachments": [
-            {
-                "url": "https://example.com/file.txt",
-                "filename": "file.txt",
-                "content_type": "text/plain",
-            }
-        ],
-        "embeds": [
-            {
-                "image": {"url": "https://example.com/image.png"},
-                "thumbnail": {"url": "https://example.com/thumb.png"},
-                "video": {"url": "https://example.com/video.mp4"},
-                "provider": {"url": "https://example.com/provider"},
-            }
-        ],
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "attachments": [
+                {
+                    "url": "https://example.com/file.txt",
+                    "filename": "file.txt",
+                    "content_type": "text/plain",
+                }
+            ],
+            "embeds": [
+                {
+                    "image": {"url": "https://example.com/image.png"},
+                    "thumbnail": {"url": "https://example.com/thumb.png"},
+                    "video": {"url": "https://example.com/video.mp4"},
+                    "provider": {"url": "https://example.com/provider"},
+                }
+            ],
+        },
+    )
 
     attachments = build_attachments(message)
     urls = {attachment.url for attachment in attachments}
@@ -144,11 +153,9 @@ def test_build_attachments_includes_embed_urls() -> None:
 
 
 def test_format_keeps_small_attachment_summary_inline() -> None:
-    message = {
-        "author": {"username": "Tester"},
-        "guild_id": 1,
-        "id": 2,
-    }
+    message = cast(
+        DiscordMessage, {"author": {"username": "Tester"}, "guild_id": 1, "id": 2}
+    )
     attachments = [
         AttachmentInfo(
             url="https://example.com/file.txt",
@@ -164,11 +171,9 @@ def test_format_keeps_small_attachment_summary_inline() -> None:
 
 
 def test_format_splits_oversized_attachment_summary() -> None:
-    message = {
-        "author": {"username": "Tester"},
-        "guild_id": 1,
-        "id": 2,
-    }
+    message = cast(
+        DiscordMessage, {"author": {"username": "Tester"}, "guild_id": 1, "id": 2}
+    )
     long_name = "a" * 500
     attachments = [
         AttachmentInfo(

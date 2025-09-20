@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import pytest
 
@@ -19,6 +20,7 @@ from forward_monitor.monitor import (
     _message_types,
     _should_forward,
 )
+from forward_monitor.types import DiscordMessage
 
 
 def test_attachment_category_supports_file_alias() -> None:
@@ -38,7 +40,7 @@ def test_should_forward_respects_file_alias_in_filters() -> None:
         content_type=None,
     )
 
-    filters = MessageFilters(allowed_types=["file"]).prepare()
+    filters = MessageFilters(allowed_types=("file",)).prepare()
     message = {"author": {"id": "42"}}
 
     categories = [_attachment_category(attachment)]
@@ -62,17 +64,20 @@ def test_message_types_include_document_alias() -> None:
 
 
 def test_should_forward_whitelist_matches_embed_text() -> None:
-    message = {
-        "content": "",
-        "author": {"id": "99"},
-        "embeds": [
-            {
-                "description": "Important Keyword present",
-            }
-        ],
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "content": "",
+            "author": {"id": "99"},
+            "embeds": [
+                {
+                    "description": "Important Keyword present",
+                }
+            ],
+        },
+    )
 
-    filters = MessageFilters(whitelist=["keyword"]).prepare()
+    filters = MessageFilters(whitelist=("keyword",)).prepare()
     attachments: list[AttachmentInfo] = []
     categories: list[str] = []
     embed_text = extract_embed_text(message)
@@ -90,17 +95,20 @@ def test_should_forward_whitelist_matches_embed_text() -> None:
 
 
 def test_should_forward_allowed_types_accepts_embed_text() -> None:
-    message = {
-        "content": "",
-        "author": {"id": "77"},
-        "embeds": [
-            {
-                "description": "Only embed content",
-            }
-        ],
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "content": "",
+            "author": {"id": "77"},
+            "embeds": [
+                {
+                    "description": "Only embed content",
+                }
+            ],
+        },
+    )
 
-    filters = MessageFilters(allowed_types=["text"]).prepare()
+    filters = MessageFilters(allowed_types=("text",)).prepare()
     embed_text = extract_embed_text(message)
     attachments: list[AttachmentInfo] = []
     categories: list[str] = []
@@ -118,17 +126,20 @@ def test_should_forward_allowed_types_accepts_embed_text() -> None:
 
 
 def test_should_forward_allows_embed_image_attachment() -> None:
-    message = {
-        "content": "",
-        "author": {"id": "55"},
-        "embeds": [
-            {
-                "image": {"url": "https://example.com/picture.png"},
-            }
-        ],
-    }
+    message = cast(
+        DiscordMessage,
+        {
+            "content": "",
+            "author": {"id": "55"},
+            "embeds": [
+                {
+                    "image": {"url": "https://example.com/picture.png"},
+                }
+            ],
+        },
+    )
 
-    filters = MessageFilters(allowed_types=["image"]).prepare()
+    filters = MessageFilters(allowed_types=("image",)).prepare()
     attachments = build_attachments(message)
     categories = [_attachment_category(attachment) for attachment in attachments]
 
@@ -146,10 +157,28 @@ def test_should_forward_allows_embed_image_attachment() -> None:
 
 def test_whitelist_matches_attachment_domain() -> None:
     attachment = AttachmentInfo(url="https://cdn.example.net/path/to/file.png")
-    filters = MessageFilters(whitelist=["cdn.example.net"]).prepare()
+    filters = MessageFilters(whitelist=("cdn.example.net",)).prepare()
     categories = [_attachment_category(attachment)]
     allowed, reason = _should_forward(
-        {"author": {"id": "1"}},
+        cast(DiscordMessage, {"author": {"id": "1"}}),
+        "",
+        "",
+        [attachment],
+        categories,
+        filters,
+    )
+    assert allowed
+    assert reason is None
+
+
+def test_whitelist_uses_attachment_url_when_domain_missing() -> None:
+    attachment = AttachmentInfo(
+        url="https://static.example.org/files/manual.pdf", domain=None
+    )
+    filters = MessageFilters(whitelist=("static.example.org",)).prepare()
+    categories = [_attachment_category(attachment)]
+    allowed, reason = _should_forward(
+        cast(DiscordMessage, {"author": {"id": "1"}}),
         "",
         "",
         [attachment],
@@ -161,11 +190,11 @@ def test_whitelist_matches_attachment_domain() -> None:
 
 
 def test_allowed_senders_accepts_member_nick() -> None:
-    filters = MessageFilters(allowed_senders=["Project Lead"]).prepare()
-    message = {
-        "author": {"id": "2", "username": "user"},
-        "member": {"nick": "Project Lead"},
-    }
+    filters = MessageFilters(allowed_senders=("Project Lead",)).prepare()
+    message = cast(
+        DiscordMessage,
+        {"author": {"id": "2", "username": "user"}, "member": {"nick": "Project Lead"}},
+    )
     allowed, reason = _should_forward(
         message,
         "",
@@ -182,15 +211,14 @@ def test_allowed_senders_accepts_member_nick() -> None:
 async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixture) -> None:
     context = ChannelContext(
         mapping=ChannelMapping(discord_channel_id=10, telegram_chat_id="chat"),
-        filters=MessageFilters(blacklist=["deny"]).prepare(),
+        filters=MessageFilters(blacklist=("deny",)).prepare(),
         customization=MessageCustomization().prepare(),
     )
 
-    message = {
-        "id": "123",
-        "author": {"id": "42"},
-        "content": "should deny",
-    }
+    message = cast(
+        DiscordMessage,
+        {"id": "123", "author": {"id": "42"}, "content": "should deny"},
+    )
 
     class DummyTelegram:
         def __init__(self) -> None:
