@@ -5,6 +5,7 @@ import logging
 import random
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -28,9 +29,13 @@ from .formatter import (
     format_announcement_message,
 )
 from .state import MonitorState
+from .structured_logging import log_event
 from .telegram_client import TelegramClient
+from .types import DiscordMessage
 
-DiscordMessage = dict[str, Any]
+DiscordMessageMapping = DiscordMessage
+
+MODULE_LOGGER = logging.getLogger(__name__)
 
 
 class AnnouncementFormatter(Protocol):
@@ -100,16 +105,27 @@ class StateStore(Protocol):
     def update_last_message_id(self, channel_id: int, message_id: str) -> None: ...
 
 
-LOGGER = logging.getLogger(__name__)
+_DISCORD_FETCH_LIMIT = 100
+_MAX_MESSAGES_PER_CHANNEL = 1000
+_MAX_FETCH_SECONDS = 5.0
+_DEFAULT_DISCORD_CONCURRENCY = 8
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ChannelContext:
     """Pre-computed filters and customisation for a Discord channel."""
 
     mapping: ChannelMapping
     filters: PreparedFilters
     customization: PreparedCustomization
+
+
+@dataclass(slots=True)
+class _ChannelFetchResult:
+    context: ChannelContext
+    messages: list[DiscordMessage]
+    truncated: bool
+    timed_out: bool
 
 
 def _channel_contexts(
@@ -120,7 +136,9 @@ def _channel_contexts(
     contexts: list[ChannelContext] = []
     for mapping in channel_mappings:
         combined_filters = global_filters.combine(mapping.filters).prepare()
-        combined_customization = global_customization.combine(mapping.customization).prepare()
+        combined_customization = (
+            global_customization.combine(mapping.customization).prepare()
+        )
         contexts.append(
             ChannelContext(
                 mapping=mapping,
@@ -131,63 +149,32 @@ def _channel_contexts(
     return contexts
 
 
-_MIME_PREFIX_CATEGORIES: dict[str, str] = {
-    "image/": "image",
-    "video/": "video",
-    "audio/": "audio",
-}
-
-_MIME_TYPE_CATEGORIES: dict[str, str] = {
-    "application/pdf": "file",
-    "text/plain": "file",
-}
-
-_EXTENSION_CATEGORIES: dict[str, str] = {
-    "jpg": "image",
-    "jpeg": "image",
-    "png": "image",
-    "gif": "image",
-    "bmp": "image",
-    "webp": "image",
-    "mp4": "video",
-    "mov": "video",
-    "mkv": "video",
-    "webm": "video",
-    "mp3": "audio",
-    "wav": "audio",
-    "ogg": "audio",
-    "flac": "audio",
-    "m4a": "audio",
-    "pdf": "file",
-    "txt": "file",
-    "doc": "file",
-    "docx": "file",
-    "xls": "file",
-    "xlsx": "file",
-    "csv": "file",
-    "zip": "file",
-}
-
-_TYPE_ALIASES: dict[str, set[str]] = {
-    "file": {"document"},
-}
-
-
 async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
     """Start the monitoring loop."""
 
     state = MonitorState(config.state_file)
 
     timeout = aiohttp.ClientTimeout(total=60)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        discord = DiscordClient(config.discord_token, session)
+    connector = aiohttp.TCPConnector(limit=64, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        try:
+            discord = DiscordClient(
+                config.discord_token,
+                session,
+                max_concurrency=_DEFAULT_DISCORD_CONCURRENCY,
+            )
+        except TypeError:
+            discord = DiscordClient(config.discord_token, session)
         telegram = TelegramClient(config.telegram_token, session)
 
         announcement_contexts = _channel_contexts(
             config.filters, config.customization, config.announcement_channels
         )
 
+        iteration = 0
         while True:
+            iteration += 1
+            iteration_start = perf_counter()
             try:
                 await _sync_announcements(
                     announcement_contexts,
@@ -197,11 +184,37 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     config.min_message_delay,
                     config.max_message_delay,
                 )
+                log_event(
+                    "monitor_iteration_complete",
+                    level=logging.DEBUG,
+                    discord_channel_id=None,
+                    discord_message_id=None,
+                    telegram_chat_id=None,
+                    attempt=iteration,
+                    outcome="success",
+                    latency_ms=(perf_counter() - iteration_start) * 1000,
+                    extra={"context_count": len(announcement_contexts)},
+                )
             except asyncio.CancelledError:
                 state.save()
                 raise
-            except Exception:  # pragma: no cover - runtime error path
-                LOGGER.exception("Monitoring iteration failed")
+            except (
+                DiscordAPIError,
+                RuntimeError,
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+            ) as exc:
+                log_event(
+                    "monitor_iteration_failed",
+                    level=logging.ERROR,
+                    discord_channel_id=None,
+                    discord_message_id=None,
+                    telegram_chat_id=None,
+                    attempt=iteration,
+                    outcome="failure",
+                    latency_ms=(perf_counter() - iteration_start) * 1000,
+                    extra={"error": type(exc).__name__},
+                )
             finally:
                 state.save()
 
@@ -219,37 +232,32 @@ async def _sync_announcements(
     min_delay: float,
     max_delay: float,
 ) -> None:
-    fetch_jobs: list[asyncio.Task[list[DiscordMessage]]] = []
-    context_meta: list[tuple[ChannelContext, int]] = []
-
-    for context in contexts:
-        channel_id = context.mapping.discord_channel_id
-        last_seen = state.get_last_message_id(channel_id)
-        fetch_jobs.append(
-            asyncio.create_task(_fetch_all_messages(discord, channel_id, last_seen, limit=100))
-        )
-        context_meta.append((context, channel_id))
-
-    if not fetch_jobs:
+    if not contexts:
         return
 
-    results = await asyncio.gather(*fetch_jobs, return_exceptions=True)
-
-    gathered: list[list[DiscordMessage] | BaseException]
-    gathered = list(results)
-
-    for (context, channel_id), result in zip(context_meta, gathered, strict=True):
-        if isinstance(result, BaseException):
-            if isinstance(result, DiscordAPIError) and result.status == 404:
-                LOGGER.error(
-                    "Discord channel %s was not found when fetching messages. "
-                    "Check the configuration for this channel.",
-                    channel_id,
+    tasks: list[asyncio.Task[_ChannelFetchResult]] = []
+    async with asyncio.TaskGroup() as group:
+        for context in contexts:
+            channel_id = context.mapping.discord_channel_id
+            last_seen = state.get_last_message_id(channel_id)
+            tasks.append(
+                group.create_task(
+                    _fetch_channel_messages(
+                        context,
+                        discord,
+                        last_seen,
+                        limit=_DISCORD_FETCH_LIMIT,
+                        max_messages=_MAX_MESSAGES_PER_CHANNEL,
+                        max_duration=_MAX_FETCH_SECONDS,
+                    )
                 )
-                continue
-            raise result
+            )
 
-        messages: list[DiscordMessage] = result
+    for task in tasks:
+        result = task.result()
+        context = result.context
+        channel_id = context.mapping.discord_channel_id
+        messages = result.messages
         if not messages:
             continue
 
@@ -266,15 +274,65 @@ async def _sync_announcements(
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                LOGGER.exception(
-                    "Failed to forward message %s from channel %s",
-                    message.get("id"),
-                    channel_id,
-                )
+            except RuntimeError:
                 continue
 
         state.update_last_message_id(channel_id, messages[-1]["id"])
+
+
+async def _fetch_channel_messages(
+    context: ChannelContext,
+    discord: DiscordService,
+    last_seen: str | None,
+    *,
+    limit: int,
+    max_messages: int,
+    max_duration: float,
+) -> _ChannelFetchResult:
+    channel_id = context.mapping.discord_channel_id
+    start = perf_counter()
+    try:
+        messages, truncated, timed_out = await _fetch_all_messages(
+            discord,
+            channel_id,
+            last_seen,
+            limit=limit,
+            max_messages=max_messages,
+            max_duration=max_duration,
+        )
+    except DiscordAPIError as exc:
+        if exc.status == 404:
+            log_event(
+                "discord_channel_not_found",
+                level=logging.ERROR,
+                discord_channel_id=channel_id,
+                discord_message_id=None,
+                telegram_chat_id=context.mapping.telegram_chat_id,
+                attempt=1,
+                outcome="missing",
+                latency_ms=(perf_counter() - start) * 1000,
+                extra={},
+            )
+            return _ChannelFetchResult(context, [], False, False)
+        raise
+
+    latency_ms = (perf_counter() - start) * 1000
+    log_event(
+        "discord_fetch_complete",
+        level=logging.DEBUG,
+        discord_channel_id=channel_id,
+        discord_message_id=None,
+        telegram_chat_id=context.mapping.telegram_chat_id,
+        attempt=1,
+        outcome="success",
+        latency_ms=latency_ms,
+        extra={
+            "message_count": len(messages),
+            "truncated": truncated,
+            "timed_out": timed_out,
+        },
+    )
+    return _ChannelFetchResult(context, messages, truncated, timed_out)
 
 
 async def _fetch_all_messages(
@@ -283,36 +341,60 @@ async def _fetch_all_messages(
     last_seen: str | None,
     *,
     limit: int,
-) -> list[DiscordMessage]:
+    max_messages: int,
+    max_duration: float,
+) -> tuple[list[DiscordMessage], bool, bool]:
     messages: list[DiscordMessage] = []
     cursor = last_seen
+    truncated = False
+    timed_out = False
+    start = perf_counter()
+
     while True:
+        if len(messages) >= max_messages:
+            truncated = True
+            break
+
+        if perf_counter() - start >= max_duration:
+            timed_out = True
+            break
+
         batch = await discord.fetch_messages(channel_id, after=cursor, limit=limit)
         if not batch:
             break
+
         messages.extend(batch)
+        if len(messages) >= max_messages:
+            truncated = True
+            messages[:] = messages[:max_messages]
+            break
+
         if len(batch) < limit:
             break
+
         cursor = batch[-1]["id"]
-    return messages
+
+    return messages, truncated, timed_out
 
 
 async def _forward_message(
     *,
     context: ChannelContext,
     channel_id: int,
-    message: Mapping[str, Any],
+    message: DiscordMessageMapping,
     telegram: TelegramSender,
     formatter: AnnouncementFormatter,
     min_delay: float,
     max_delay: float,
 ) -> None:
+    start = perf_counter()
+    message_id = str(message.get("id", "")) or None
     clean_content = clean_discord_content(message)
     embed_text = extract_embed_text(message)
-    combined_content = "\n\n".join(section for section in (clean_content, embed_text) if section)
-
     attachments = build_attachments(message)
-    attachment_categories = tuple(_attachment_category(attachment) for attachment in attachments)
+    attachment_categories = tuple(
+        _attachment_category(attachment) for attachment in attachments
+    )
 
     should_forward, reason = _should_forward(
         message,
@@ -323,24 +405,31 @@ async def _forward_message(
         context.filters,
     )
     if not should_forward:
-        message_id = message.get("id")
-        if reason:
-            LOGGER.debug(
-                "Skipping message %s from channel %s because of %s",
-                message_id,
-                channel_id,
-                reason,
-            )
-        else:
-            LOGGER.debug(
-                "Skipping message %s from channel %s due to filters",
-                message_id,
-                channel_id,
-            )
+        log_event(
+            "message_filtered",
+            level=logging.DEBUG,
+            discord_channel_id=channel_id,
+            discord_message_id=message_id,
+            telegram_chat_id=context.mapping.telegram_chat_id,
+            attempt=1,
+            outcome="skipped",
+            latency_ms=(perf_counter() - start) * 1000,
+            extra={"reason": reason},
+        )
+        MODULE_LOGGER.debug(
+            "Skipping message %s from channel %s because of %s",
+            message_id,
+            channel_id,
+            reason or "filters",
+        )
         return
 
+    combined_content = "\n\n".join(
+        section for section in (clean_content, embed_text) if section
+    )
     customised_content = context.customization.apply(combined_content)
     channel_label = context.mapping.display_name
+
     formatted = formatter(
         channel_id,
         message,
@@ -349,21 +438,51 @@ async def _forward_message(
         embed_text="",
         channel_label=channel_label,
     )
+
     chat_id = context.mapping.telegram_chat_id
-    await telegram.send_message(chat_id, formatted.text)
-    await _sleep_with_jitter(min_delay, max_delay)
-    for extra_text in formatted.extra_messages:
-        if not extra_text:
-            continue
-        await telegram.send_message(chat_id, extra_text)
+    try:
+        await telegram.send_message(chat_id, formatted.text)
         await _sleep_with_jitter(min_delay, max_delay)
-    await _send_attachments(
-        telegram,
-        chat_id,
-        attachments,
-        attachment_categories,
-        min_delay,
-        max_delay,
+        for extra_text in formatted.extra_messages:
+            if not extra_text:
+                continue
+            await telegram.send_message(chat_id, extra_text)
+            await _sleep_with_jitter(min_delay, max_delay)
+        await _send_attachments(
+            telegram,
+            chat_id,
+            attachments,
+            attachment_categories,
+            min_delay,
+            max_delay,
+        )
+    except RuntimeError as exc:
+        log_event(
+            "telegram_forward_failed",
+            level=logging.ERROR,
+            discord_channel_id=channel_id,
+            discord_message_id=message_id,
+            telegram_chat_id=chat_id,
+            attempt=1,
+            outcome="failure",
+            latency_ms=(perf_counter() - start) * 1000,
+            extra={"error": str(exc)},
+        )
+        raise
+
+    log_event(
+        "message_forwarded",
+        level=logging.INFO,
+        discord_channel_id=channel_id,
+        discord_message_id=message_id,
+        telegram_chat_id=chat_id,
+        attempt=1,
+        outcome="success",
+        latency_ms=(perf_counter() - start) * 1000,
+        extra={
+            "attachment_count": len(attachments),
+            "extra_messages": len(formatted.extra_messages),
+        },
     )
 
 
@@ -459,11 +578,9 @@ def _aggregate_text(
     for attachment in attachments:
         if attachment.filename:
             text_blocks.append(attachment.filename)
-        if attachment.url:
-            parsed = urlparse(attachment.url)
-            domain = parsed.netloc or parsed.path or attachment.url
-            if domain:
-                text_blocks.append(domain)
+        domain = _attachment_domain(attachment)
+        if domain:
+            text_blocks.append(domain)
     return " ".join(block for block in text_blocks if block).casefold()
 
 
@@ -484,6 +601,48 @@ def _message_types(
             types.update(_TYPE_ALIASES.get(category, set[str]()))
 
     return types
+
+
+_MIME_PREFIX_CATEGORIES: dict[str, str] = {
+    "image/": "image",
+    "video/": "video",
+    "audio/": "audio",
+}
+
+_MIME_TYPE_CATEGORIES: dict[str, str] = {
+    "application/pdf": "file",
+    "text/plain": "file",
+}
+
+_EXTENSION_CATEGORIES: dict[str, str] = {
+    "jpg": "image",
+    "jpeg": "image",
+    "png": "image",
+    "gif": "image",
+    "bmp": "image",
+    "webp": "image",
+    "mp4": "video",
+    "mov": "video",
+    "mkv": "video",
+    "webm": "video",
+    "mp3": "audio",
+    "wav": "audio",
+    "ogg": "audio",
+    "flac": "audio",
+    "m4a": "audio",
+    "pdf": "file",
+    "txt": "file",
+    "doc": "file",
+    "docx": "file",
+    "xls": "file",
+    "xlsx": "file",
+    "csv": "file",
+    "zip": "file",
+}
+
+_TYPE_ALIASES: dict[str, set[str]] = {
+    "file": {"document"},
+}
 
 
 def _attachment_category(attachment: AttachmentInfo) -> str:
@@ -514,7 +673,9 @@ async def _send_attachments(
     for attachment, category in zip(attachments, attachment_categories):
         caption = _attachment_caption(attachment)
         try:
-            await _send_single_attachment(telegram, chat_id, attachment.url, category, caption)
+            await _send_single_attachment(
+                telegram, chat_id, attachment.url, category, caption
+            )
         finally:
             await _sleep_with_jitter(min_delay, max_delay)
 
@@ -545,3 +706,14 @@ def _attachment_caption(attachment: AttachmentInfo) -> str | None:
         return filename
 
     return filename[:1021] + "..."
+
+
+def _attachment_domain(attachment: AttachmentInfo) -> str | None:
+    if attachment.domain:
+        return attachment.domain
+    if attachment.url:
+        parsed = urlparse(attachment.url)
+        domain = parsed.netloc or parsed.path
+        if domain:
+            return domain
+    return None

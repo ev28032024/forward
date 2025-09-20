@@ -40,7 +40,7 @@ class MonitorState:
             os.fsync(file.fileno())
         try:
             tmp_path.replace(self._path)
-        except Exception:
+        except OSError:
             tmp_path.unlink(missing_ok=True)
             raise
         self._dirty = False

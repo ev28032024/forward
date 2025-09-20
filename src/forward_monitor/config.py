@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Tuple
+from typing import Any, Final
 
 from yaml import safe_load
 
-DEFAULT_POLL_INTERVAL = 300
-DEFAULT_STATE_FILE = Path("monitor_state.json")
-DEFAULT_MIN_MESSAGE_DELAY = 0.5
-DEFAULT_MAX_MESSAGE_DELAY = 2.0
+DEFAULT_POLL_INTERVAL: Final[int] = 300
+DEFAULT_STATE_FILE: Final[Path] = Path("monitor_state.json")
+DEFAULT_MIN_MESSAGE_DELAY: Final[float] = 0.5
+DEFAULT_MAX_MESSAGE_DELAY: Final[float] = 2.0
 
-SUPPORTED_MESSAGE_TYPES: FrozenSet[str] = frozenset(
+SUPPORTED_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "text",
         "attachment",
@@ -40,49 +40,50 @@ __all__ = [
 ]
 
 
-@dataclass(slots=True)
-class ChannelMapping:
-    """Relationship between a Discord channel and a Telegram chat."""
-
-    discord_channel_id: int
-    telegram_chat_id: str
-    display_name: str | None = None
-    filters: "MessageFilters" = field(default_factory=lambda: MessageFilters())
-    customization: "MessageCustomization" = field(default_factory=lambda: MessageCustomization())
-
-
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class MessageFilters:
     """Keyword and sender based filters for forwarded messages."""
 
-    whitelist: List[str] = field(default_factory=list)
-    blacklist: List[str] = field(default_factory=list)
-    allowed_senders: List[str] = field(default_factory=list)
-    blocked_senders: List[str] = field(default_factory=list)
-    allowed_types: List[str] = field(default_factory=list)
-    blocked_types: List[str] = field(default_factory=list)
+    whitelist: Sequence[str] = ()
+    blacklist: Sequence[str] = ()
+    allowed_senders: Sequence[str] = ()
+    blocked_senders: Sequence[str] = ()
+    allowed_types: Sequence[str] = ()
+    blocked_types: Sequence[str] = ()
 
-    def combine(self, other: "MessageFilters" | None) -> "MessageFilters":
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "whitelist", _freeze_sequence(self.whitelist))
+        object.__setattr__(self, "blacklist", _freeze_sequence(self.blacklist))
+        object.__setattr__(
+            self, "allowed_senders", _freeze_sequence(self.allowed_senders)
+        )
+        object.__setattr__(
+            self, "blocked_senders", _freeze_sequence(self.blocked_senders)
+        )
+        object.__setattr__(self, "allowed_types", _freeze_sequence(self.allowed_types))
+        object.__setattr__(self, "blocked_types", _freeze_sequence(self.blocked_types))
+
+    def combine(self, other: MessageFilters | None) -> MessageFilters:
         if other is None:
             return MessageFilters(
-                whitelist=list(self.whitelist),
-                blacklist=list(self.blacklist),
-                allowed_senders=list(self.allowed_senders),
-                blocked_senders=list(self.blocked_senders),
-                allowed_types=list(self.allowed_types),
-                blocked_types=list(self.blocked_types),
+                whitelist=self.whitelist,
+                blacklist=self.blacklist,
+                allowed_senders=self.allowed_senders,
+                blocked_senders=self.blocked_senders,
+                allowed_types=self.allowed_types,
+                blocked_types=self.blocked_types,
             )
 
         return MessageFilters(
-            whitelist=_merge_lists(self.whitelist, other.whitelist),
-            blacklist=_merge_lists(self.blacklist, other.blacklist),
-            allowed_senders=_merge_lists(self.allowed_senders, other.allowed_senders),
-            blocked_senders=_merge_lists(self.blocked_senders, other.blocked_senders),
-            allowed_types=_merge_lists(self.allowed_types, other.allowed_types),
-            blocked_types=_merge_lists(self.blocked_types, other.blocked_types),
+            whitelist=_merge_sequences(self.whitelist, other.whitelist),
+            blacklist=_merge_sequences(self.blacklist, other.blacklist),
+            allowed_senders=_merge_sequences(self.allowed_senders, other.allowed_senders),
+            blocked_senders=_merge_sequences(self.blocked_senders, other.blocked_senders),
+            allowed_types=_merge_sequences(self.allowed_types, other.allowed_types),
+            blocked_types=_merge_sequences(self.blocked_types, other.blocked_types),
         )
 
-    def prepare(self) -> "PreparedFilters":
+    def prepare(self) -> PreparedFilters:
         """Materialise frequently used filter data in an efficient form."""
 
         whitelist = tuple(_casefold_unique(self.whitelist))
@@ -104,70 +105,70 @@ class MessageFilters:
         )
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PreparedFilters:
     """Immutable, case-folded filters ready for matching."""
 
-    whitelist: Tuple[str, ...]
-    blacklist: Tuple[str, ...]
-    allowed_senders: FrozenSet[str]
-    blocked_senders: FrozenSet[str]
-    allowed_types: FrozenSet[str]
-    blocked_types: FrozenSet[str]
+    whitelist: tuple[str, ...]
+    blacklist: tuple[str, ...]
+    allowed_senders: frozenset[str]
+    blocked_senders: frozenset[str]
+    allowed_types: frozenset[str]
+    blocked_types: frozenset[str]
     requires_text: bool
     requires_types: bool
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class MessageCustomization:
     """Rules that customise the textual part of forwarded messages."""
 
-    headers: List[str] = field(default_factory=list)
-    footers: List[str] = field(default_factory=list)
-    replacements: Dict[str, str] = field(default_factory=dict)
+    headers: Sequence[str] = ()
+    footers: Sequence[str] = ()
+    replacements: Sequence[tuple[str, str]] = ()
 
-    _prepared: "PreparedCustomization" | None = field(init=False, default=None, repr=False)
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "headers", _freeze_sequence(self.headers))
+        object.__setattr__(self, "footers", _freeze_sequence(self.footers))
+        object.__setattr__(self, "replacements", _freeze_replacements(self.replacements))
 
-    def combine(self, other: "MessageCustomization" | None) -> "MessageCustomization":
+    def combine(self, other: MessageCustomization | None) -> MessageCustomization:
         if other is None:
             return MessageCustomization(
-                headers=list(self.headers),
-                footers=list(self.footers),
-                replacements=dict(self.replacements),
+                headers=self.headers,
+                footers=self.footers,
+                replacements=self.replacements,
             )
 
-        combined_replacements: Dict[str, str] = dict(self.replacements)
-        combined_replacements.update(other.replacements)
+        merged_replacements: dict[str, str] = dict(self.replacements)
+        merged_replacements.update(dict(other.replacements))
 
         return MessageCustomization(
-            headers=_merge_lists(self.headers, other.headers),
-            footers=_merge_lists(self.footers, other.footers),
-            replacements=combined_replacements,
+            headers=_merge_sequences(self.headers, other.headers),
+            footers=_merge_sequences(self.footers, other.footers),
+            replacements=tuple(merged_replacements.items()),
         )
 
-    def prepare(self) -> "PreparedCustomization":
-        if self._prepared is None:
-            header_text = "\n".join(segment for segment in self.headers if segment)
-            footer_text = "\n".join(segment for segment in self.footers if segment)
-            replacements = tuple((find, replace) for find, replace in self.replacements.items())
-            self._prepared = PreparedCustomization(
-                header_text=header_text,
-                footer_text=footer_text,
-                replacements=replacements,
-            )
-        return self._prepared
+    def prepare(self) -> PreparedCustomization:
+        header_text = "\n".join(segment for segment in self.headers if segment)
+        footer_text = "\n".join(segment for segment in self.footers if segment)
+        return PreparedCustomization(
+            header_text=header_text,
+            footer_text=footer_text,
+            replacements=tuple(self.replacements),
+        )
 
     def apply(self, content: str) -> str:
         return self.prepare().apply(content)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PreparedCustomization:
     """Pre-processed representation of customisation rules."""
 
     header_text: str
     footer_text: str
-    replacements: Tuple[Tuple[str, str], ...]
+    replacements: tuple[tuple[str, str], ...]
 
     def apply(self, content: str) -> str:
         if not (self.header_text or self.footer_text or self.replacements):
@@ -175,31 +176,53 @@ class PreparedCustomization:
 
         result = content or ""
         for find, replace in self.replacements:
+            if not find:
+                continue
             result = result.replace(find, replace)
 
-        parts: List[str] = []
+        segments: list[str] = []
         if self.header_text:
-            parts.append(self.header_text)
+            segments.append(self.header_text)
         if result:
-            parts.append(result)
+            segments.append(result)
         if self.footer_text:
-            parts.append(self.footer_text)
+            segments.append(self.footer_text)
 
-        if not parts:
+        if not segments:
             return ""
-        if len(parts) == 1:
-            return parts[0]
-        return "\n\n".join(parts)
+        if len(segments) == 1:
+            return segments[0]
+        return "\n\n".join(segments)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
+class ChannelMapping:
+    """Relationship between a Discord channel and a Telegram chat."""
+
+    discord_channel_id: int
+    telegram_chat_id: str
+    display_name: str | None = None
+    filters: MessageFilters = field(default_factory=MessageFilters)
+    customization: MessageCustomization = field(default_factory=MessageCustomization)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "telegram_chat_id", self.telegram_chat_id.strip())
+        if self.display_name is not None:
+            object.__setattr__(
+                self,
+                "display_name",
+                self.display_name.strip() or None,
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorConfig:
     """Configuration for the Discord to Telegram monitor."""
 
     discord_token: str
     telegram_token: str
     telegram_chat_id: str
-    announcement_channels: List[ChannelMapping] = field(default_factory=list)
+    announcement_channels: Sequence[ChannelMapping] = ()
     poll_interval: int = DEFAULT_POLL_INTERVAL
     state_file: Path = DEFAULT_STATE_FILE
     min_message_delay: float = DEFAULT_MIN_MESSAGE_DELAY
@@ -207,8 +230,18 @@ class MonitorConfig:
     filters: MessageFilters = field(default_factory=MessageFilters)
     customization: MessageCustomization = field(default_factory=MessageCustomization)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "discord_token", self.discord_token.strip())
+        object.__setattr__(self, "telegram_token", self.telegram_token.strip())
+        object.__setattr__(self, "telegram_chat_id", self.telegram_chat_id.strip())
+        object.__setattr__(
+            self,
+            "announcement_channels",
+            tuple(self.announcement_channels),
+        )
+
     @classmethod
-    def from_file(cls, path: Path) -> "MonitorConfig":
+    def from_file(cls, path: Path) -> MonitorConfig:
         path = path.expanduser()
         data = _load_yaml(path)
         path = path.resolve()
@@ -230,11 +263,14 @@ class MonitorConfig:
         filters = _parse_filters(data.get("filters"))
         customization = _parse_customization(data.get("customization"))
 
-        announcement_channels = _coerce_channel_mappings(
-            data.get("announcement_channels", []),
-            "announcement_channels",
-            telegram_chat_id,
+        announcement_channels = tuple(
+            _coerce_channel_mappings(
+                data.get("announcement_channels", []),
+                "announcement_channels",
+                telegram_chat_id,
+            )
         )
+
         poll_interval = int(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
         if poll_interval < 0:
             raise ValueError("Configuration field 'poll_interval' cannot be negative")
@@ -271,23 +307,23 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as file:
         data = safe_load(file) or {}
 
-    if not isinstance(data, dict):  # pragma: no cover - configuration error path
+    if not isinstance(data, Mapping):  # pragma: no cover - configuration error path
         raise ValueError("Configuration file must contain a mapping at the top level")
     return dict(data)
 
 
 def _coerce_channel_mappings(
     value: Iterable[object], field_name: str, default_chat_id: str
-) -> List[ChannelMapping]:
+) -> list[ChannelMapping]:
     if value is None:
         return []
 
     if not isinstance(value, list):
         raise ValueError(f"Configuration field '{field_name}' must be a list")
 
-    mappings: List[ChannelMapping] = []
+    mappings: list[ChannelMapping] = []
     for item in value:
-        if isinstance(item, dict):
+        if isinstance(item, Mapping):
             discord_raw = item.get("discord_channel_id") or item.get("discord")
             telegram_raw = item.get("telegram_chat_id") or item.get("telegram")
             if discord_raw is None:
@@ -366,7 +402,7 @@ def _parse_filters(raw: object) -> MessageFilters:
     if raw is None:
         return MessageFilters()
 
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         raise ValueError("Configuration field 'filters' must be a mapping if provided")
 
     allowed_types = _to_string_list(raw.get("allowed_types"))
@@ -375,12 +411,12 @@ def _parse_filters(raw: object) -> MessageFilters:
     _validate_message_types(blocked_types, "filters.blocked_types")
 
     return MessageFilters(
-        whitelist=_to_string_list(raw.get("whitelist")),
-        blacklist=_to_string_list(raw.get("blacklist")),
-        allowed_senders=_to_string_list(raw.get("allowed_senders")),
-        blocked_senders=_to_string_list(raw.get("blocked_senders")),
-        allowed_types=allowed_types,
-        blocked_types=blocked_types,
+        whitelist=tuple(_to_string_list(raw.get("whitelist"))),
+        blacklist=tuple(_to_string_list(raw.get("blacklist"))),
+        allowed_senders=tuple(_to_string_list(raw.get("allowed_senders"))),
+        blocked_senders=tuple(_to_string_list(raw.get("blocked_senders"))),
+        allowed_types=tuple(allowed_types),
+        blocked_types=tuple(blocked_types),
     )
 
 
@@ -388,23 +424,27 @@ def _parse_customization(raw: object) -> MessageCustomization:
     if raw is None:
         return MessageCustomization()
 
-    if not isinstance(raw, dict):
+    if not isinstance(raw, Mapping):
         raise ValueError("Configuration field 'customization' must be a mapping if provided")
 
     headers = _to_string_list(raw.get("header")) + _to_string_list(raw.get("headers"))
     footers = _to_string_list(raw.get("footer")) + _to_string_list(raw.get("footers"))
     replacements = _parse_replacements(raw.get("replace") or raw.get("replacements"))
 
-    return MessageCustomization(headers=headers, footers=footers, replacements=replacements)
+    return MessageCustomization(
+        headers=tuple(headers),
+        footers=tuple(footers),
+        replacements=tuple(replacements.items()),
+    )
 
 
-def _parse_replacements(raw: object) -> Dict[str, str]:
+def _parse_replacements(raw: object) -> dict[str, str]:
     if raw is None:
         return {}
 
-    replacements: Dict[str, str] = {}
+    replacements: dict[str, str] = {}
 
-    if isinstance(raw, dict):
+    if isinstance(raw, Mapping):
         for key, value in raw.items():
             if value is None:
                 continue
@@ -413,7 +453,7 @@ def _parse_replacements(raw: object) -> Dict[str, str]:
 
     if isinstance(raw, list):
         for item in raw:
-            if not isinstance(item, dict):
+            if not isinstance(item, Mapping):
                 continue
             find_value = None
             for candidate in ("find", "from", "search"):
@@ -446,7 +486,7 @@ def _validate_message_types(values: Iterable[str], field_name: str) -> None:
         )
 
 
-def _to_string_list(raw: object) -> List[str]:
+def _to_string_list(raw: object) -> list[str]:
     if raw is None:
         return []
 
@@ -455,7 +495,7 @@ def _to_string_list(raw: object) -> List[str]:
         return [value] if value else []
 
     if isinstance(raw, list):
-        items: List[str] = []
+        items: list[str] = []
         for entry in raw:
             if entry is None:
                 continue
@@ -467,12 +507,12 @@ def _to_string_list(raw: object) -> List[str]:
     raise ValueError("List configuration values must be strings or lists of strings")
 
 
-def _merge_lists(first: Iterable[str], second: Iterable[str]) -> List[str]:
-    return list(dict.fromkeys(str(item) for item in chain(first, second)))
+def _merge_sequences(first: Iterable[str], second: Iterable[str]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(item) for item in chain(first, second)))
 
 
 def _casefold_unique(values: Iterable[object]) -> Iterator[str]:
-    seen: Dict[str, None] = {}
+    seen: dict[str, None] = {}
     for value in values:
         if value is None:
             continue
@@ -491,3 +531,14 @@ def _resolve_state_file(config_path: Path, raw_value: object, default: Path) -> 
     if not candidate.is_absolute():
         candidate = (config_path.parent / candidate).resolve()
     return candidate
+
+
+def _freeze_sequence(values: Iterable[str]) -> tuple[str, ...]:
+    return tuple(str(value) for value in values if value is not None)
+
+
+def _freeze_replacements(values: Iterable[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
+    frozen: list[tuple[str, str]] = []
+    for find, replace in values:
+        frozen.append((str(find), str(replace)))
+    return tuple(frozen)

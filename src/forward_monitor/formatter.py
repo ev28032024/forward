@@ -5,8 +5,10 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Mapping, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence, cast
 from urllib.parse import urlparse
+
+from .types import DiscordMessage
 
 __all__ = [
     "AttachmentInfo",
@@ -23,8 +25,21 @@ MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
 ROLE_PATTERN = re.compile(r"<@&(\d+)>")
 CHANNEL_PATTERN = re.compile(r"<#(\d+)>")
 
+_MARKDOWN_PATTERNS = [
+    re.compile(r"```([\s\S]+?)```"),
+    re.compile(r"(?<!\\)`([^`]+?)`"),
+    re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"),
+    re.compile(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*"),
+    re.compile(r"___(?=\S)(.+?)(?<=\S)___"),
+    re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*"),
+    re.compile(r"__(?=\S)(.+?)(?<=\S)__"),
+    re.compile(r"(?<!\*)\*(?=\S)(.+?)(?<=\S)\*(?!\*)"),
+    re.compile(r"(?<!\w)_(?=\S)(.+?)(?<=\S)_(?!\w)"),
+    re.compile(r"~(?=\S)(.+?)(?<=\S)~"),
+]
 
-@dataclass(slots=True)
+
+@dataclass(slots=True, frozen=True)
 class AttachmentInfo:
     """Simplified representation of a Discord attachment."""
 
@@ -32,6 +47,7 @@ class AttachmentInfo:
     filename: str | None = None
     content_type: str | None = None
     size: int | None = None
+    domain: str | None = None
 
     def display_label(self) -> str:
         """Return a human-friendly label for the attachment."""
@@ -41,7 +57,7 @@ class AttachmentInfo:
         return self.url
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, frozen=True)
 class FormattedMessage:
     """Container describing the textual parts of a forwarded message."""
 
@@ -64,7 +80,7 @@ def format_announcement_message(
     label = (channel_label or "").strip() or str(channel_id)
     prefix = f"📢 Новое сообщение в канале {label} от {author_name}"
     if embed_text is None:
-        embed_text = extract_embed_text(message)
+        embed_text = extract_embed_text(cast(DiscordMessage, message))
     combined_content = _combine_content_sections([content, embed_text])
     jump_url = _build_jump_url(message, channel_id)
     return _compose_message(prefix, combined_content, attachments, jump_url)
@@ -183,25 +199,18 @@ def _attachment_lines(attachments: Iterable[AttachmentInfo]) -> List[str]:
     return lines
 
 
-def build_attachments(message: Mapping[str, Any]) -> List[AttachmentInfo]:
+def build_attachments(message: DiscordMessage) -> List[AttachmentInfo]:
     """Convert the raw Discord payload into AttachmentInfo objects."""
 
     attachments: List[AttachmentInfo] = []
     seen_urls: set[str] = set()
 
     for raw in message.get("attachments", []):
-        url = raw.get("url")
-        if not url or url in seen_urls:
+        if not isinstance(raw, Mapping):
             continue
-        seen_urls.add(url)
-        attachments.append(
-            AttachmentInfo(
-                url=url,
-                filename=raw.get("filename"),
-                content_type=raw.get("content_type"),
-                size=raw.get("size"),
-            )
-        )
+        info = _attachment_from_payload(raw, seen_urls)
+        if info is not None:
+            attachments.append(info)
 
     embeds = message.get("embeds") or []
     if isinstance(embeds, Sequence):
@@ -211,6 +220,39 @@ def build_attachments(message: Mapping[str, Any]) -> List[AttachmentInfo]:
             attachments.extend(_build_embed_attachments(embed, seen_urls))
 
     return attachments
+
+
+def _attachment_from_payload(
+    raw: Mapping[str, Any], seen_urls: set[str]
+) -> AttachmentInfo | None:
+    url = raw.get("url")
+    if not url or not isinstance(url, str) or url in seen_urls:
+        return None
+
+    seen_urls.add(url)
+    filename = raw.get("filename")
+    content_type = raw.get("content_type")
+    size = raw.get("size")
+
+    filename_text = str(filename) if filename else None
+    content_type_text = str(content_type) if content_type else None
+    if isinstance(size, (int, float)):
+        size_value = int(size)
+    elif isinstance(size, str):
+        try:
+            size_value = int(size)
+        except ValueError:
+            size_value = None
+    else:
+        size_value = None
+
+    return AttachmentInfo(
+        url=url,
+        filename=filename_text,
+        content_type=content_type_text,
+        size=size_value,
+        domain=_domain_from_url(url),
+    )
 
 
 def clean_discord_content(message: Mapping[str, Any]) -> str:
@@ -311,24 +353,11 @@ def _strip_simple_markdown(content: str) -> str:
     if not content or not any(char in content for char in "*_`~"):
         return content
 
-    patterns = [
-        re.compile(r"```([\s\S]+?)```"),
-        re.compile(r"(?<!\\)`([^`]+?)`"),
-        re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"),
-        re.compile(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*"),
-        re.compile(r"___(?=\S)(.+?)(?<=\S)___"),
-        re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*"),
-        re.compile(r"__(?=\S)(.+?)(?<=\S)__"),
-        re.compile(r"(?<!\*)\*(?=\S)(.+?)(?<=\S)\*(?!\*)"),
-        re.compile(r"(?<!\w)_(?=\S)(.+?)(?<=\S)_(?!\w)"),
-        re.compile(r"~(?=\S)(.+?)(?<=\S)~"),
-    ]
-
     previous = None
     stripped = content
     while previous != stripped:
         previous = stripped
-        for pattern in patterns:
+        for pattern in _MARKDOWN_PATTERNS:
             stripped, _ = pattern.subn(r"\1", stripped)
     return stripped
 
@@ -340,13 +369,13 @@ def _combine_content_sections(sections: Sequence[str]) -> str:
     return "\n\n".join(parts)
 
 
-def extract_embed_text(message: Mapping[str, Any]) -> str:
+def extract_embed_text(message: DiscordMessage) -> str:
     """Return cleaned textual content from embeds."""
 
     return _format_embeds(message)
 
 
-def _format_embeds(message: Mapping[str, Any]) -> str:
+def _format_embeds(message: DiscordMessage) -> str:
     embeds = message.get("embeds") or []
     if not isinstance(embeds, Sequence):
         return ""
@@ -442,7 +471,12 @@ def _attachment_from_embed_item(
     if attachment_content_type is None:
         attachment_content_type = _guess_content_type_from_filename(filename)
 
-    return AttachmentInfo(url=url, filename=filename, content_type=attachment_content_type)
+    return AttachmentInfo(
+        url=url,
+        filename=filename,
+        content_type=attachment_content_type,
+        domain=_domain_from_url(url),
+    )
 
 
 def _filename_from_url(url: str) -> str | None:
@@ -454,6 +488,14 @@ def _filename_from_url(url: str) -> str | None:
     if not filename:
         return None
     return filename
+
+
+def _domain_from_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    domain = parsed.netloc or parsed.path
+    if domain:
+        return domain
+    return url or None
 
 
 def _guess_content_type_from_filename(filename: str | None) -> str | None:
