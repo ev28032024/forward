@@ -18,11 +18,11 @@
 4. Запустите бота, передав путь к конфигурации.
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip3 install -e .[dev]
 cp config.example.yml config.yml
-python -m forward_monitor --config config.yml
+python3 -m forward_monitor --config config.yml
 ```
 
 ## Быстрый старт
