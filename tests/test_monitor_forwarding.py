@@ -205,7 +205,7 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
     telegram = StubTelegram()
     state = DummyState()
 
-    await _sync_announcements(
+    fetched, forwarded_count = await _sync_announcements(
         [context],
         discord,
         telegram,
@@ -217,6 +217,8 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
     # 102 messages should have been forwarded once.
     assert len(telegram.sent) == 102
     assert state._values[5] == "102"
+    assert fetched == 102
+    assert forwarded_count == 102
     assert discord.calls == [
         (5, None, 100),
         (5, "100", 100),
@@ -294,13 +296,15 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
     assert not sync_task.done(), "Expected slow fetch to still be pending"
 
     release_slow.set()
-    await sync_task
+    fetched, forwarded_count = await sync_task
 
     assert {call for call in discord.calls} == {11, 12}
     assert any("slow news" in text for _, text in telegram.sent)
     assert any("fast update" in text for _, text in telegram.sent)
     assert state._values[11] == "21"
     assert state._values[12] == "12"
+    assert fetched == 2
+    assert forwarded_count == 2
 
 
 @pytest.mark.asyncio
@@ -344,7 +348,7 @@ async def test_sync_announcements_continues_after_forward_error(
     telegram = StubTelegram()
     state = DummyState()
 
-    await _sync_announcements(
+    fetched, forwarded_count = await _sync_announcements(
         [context],
         FakeDiscord(),
         telegram,
@@ -355,3 +359,5 @@ async def test_sync_announcements_continues_after_forward_error(
 
     assert forwarded == ["second"]
     assert state._values[7] == "32"
+    assert fetched == 2
+    assert forwarded_count == 1

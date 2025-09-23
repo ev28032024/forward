@@ -176,7 +176,7 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
             iteration += 1
             iteration_start = perf_counter()
             try:
-                await _sync_announcements(
+                fetched_messages, forwarded_messages = await _sync_announcements(
                     announcement_contexts,
                     discord,
                     telegram,
@@ -186,14 +186,18 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                 )
                 log_event(
                     "monitor_iteration_complete",
-                    level=logging.DEBUG,
+                    level=logging.INFO,
                     discord_channel_id=None,
                     discord_message_id=None,
                     telegram_chat_id=None,
                     attempt=iteration,
                     outcome="success",
                     latency_ms=(perf_counter() - iteration_start) * 1000,
-                    extra={"context_count": len(announcement_contexts)},
+                    extra={
+                        "context_count": len(announcement_contexts),
+                        "fetched_messages": fetched_messages,
+                        "forwarded_messages": forwarded_messages,
+                    },
                 )
             except asyncio.CancelledError:
                 state.save()
@@ -231,11 +235,13 @@ async def _sync_announcements(
     state: StateStore,
     min_delay: float,
     max_delay: float,
-) -> None:
+) -> tuple[int, int]:
     if not contexts:
-        return
+        return 0, 0
 
     tasks: list[asyncio.Task[_ChannelFetchResult]] = []
+    total_fetched = 0
+    total_forwarded = 0
     async with asyncio.TaskGroup() as group:
         for context in contexts:
             channel_id = context.mapping.discord_channel_id
@@ -261,6 +267,8 @@ async def _sync_announcements(
         if not messages:
             continue
 
+        total_fetched += len(messages)
+
         for message in messages:
             try:
                 await _forward_message(
@@ -272,12 +280,15 @@ async def _sync_announcements(
                     min_delay=min_delay,
                     max_delay=max_delay,
                 )
+                total_forwarded += 1
             except asyncio.CancelledError:
                 raise
             except RuntimeError:
                 continue
 
         state.update_last_message_id(channel_id, messages[-1]["id"])
+
+    return total_fetched, total_forwarded
 
 
 async def _fetch_channel_messages(
