@@ -5,7 +5,11 @@ from typing import Any, Mapping
 import pytest
 from yaml import safe_dump
 
-from forward_monitor.config import MonitorConfig
+from forward_monitor.config import (
+    ConfigOverride,
+    MonitorConfig,
+    parse_override_expression,
+)
 
 
 def _write_config(path: Path, content: str | Mapping[str, Any]) -> None:
@@ -396,3 +400,89 @@ def test_proxy_credentials_and_rotation_parsing(tmp_path: Path) -> None:
     assert telegram_proxy.username == "tg-user"
     assert telegram_proxy.password == "tg-pass"
     assert telegram_proxy.rotate_url == "https://rotate.telegram"
+
+
+def test_named_profile_merges_before_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+
+    _write_config(config_path, _base_config())
+    _write_config(profiles_dir / "nightly.yml", {"runtime": {"poll_every": 42}})
+
+    config = MonitorConfig.from_file(config_path, profiles=["nightly"])
+    assert config.runtime.poll_interval == 42
+
+
+def test_environment_profiles_are_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = tmp_path / "forward.yml"
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+
+    _write_config(config_path, _base_config())
+    _write_config(profiles_dir / "slow.yaml", {"runtime": {"poll_every": 600}})
+
+    monkeypatch.setenv("FORWARD_MONITOR_PROFILE", "slow")
+
+    config = MonitorConfig.from_file(config_path)
+    assert config.runtime.poll_interval == 600
+
+
+def test_override_priority_cli_over_env_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "forward.yml"
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+
+    _write_config(
+        config_path,
+        _base_config(
+            """
+            runtime:
+              poll_every: 15
+            """
+        ),
+    )
+    _write_config(profiles_dir / "fast.yml", {"runtime": {"poll_every": 30}})
+
+    monkeypatch.setenv("FORWARD_MONITOR_PROFILE", "fast")
+    monkeypatch.setenv("FORWARD_MONITOR__RUNTIME__POLL_EVERY", "45")
+
+    override = parse_override_expression("runtime.poll_every=60")
+    config = MonitorConfig.from_file(config_path, overrides=[override])
+
+    assert config.runtime.poll_interval == 60
+
+
+def test_environment_override_updates_nested_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(config_path, _base_config())
+
+    monkeypatch.setenv("FORWARD_MONITOR__TELEGRAM__TOKEN", "env-token")
+    monkeypatch.setenv("FORWARD_MONITOR__FORWARD__CHANNELS__0__TELEGRAM", "\"@env\"")
+
+    config = MonitorConfig.from_file(config_path)
+    assert config.telegram.token == "env-token"
+    assert config.channels[0].telegram_chat_id == "@env"
+
+
+def test_override_invalid_path_raises(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(config_path, _base_config())
+
+    with pytest.raises(ValueError):
+        MonitorConfig.from_file(
+            config_path,
+            overrides=[ConfigOverride(path=("forward", "channels", 5, "telegram"), value="@bad")],
+        )
+
+
+def test_missing_profile_raises_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(config_path, _base_config())
+
+    with pytest.raises(FileNotFoundError):
+        MonitorConfig.from_file(config_path, profiles=["absent"])

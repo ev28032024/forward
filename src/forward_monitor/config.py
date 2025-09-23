@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
+import os
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
-from yaml import safe_load
+from yaml import YAMLError, safe_load
 
 TokenType = Literal["auto", "bot", "user", "bearer"]
 
@@ -56,6 +58,7 @@ __all__ = [
     "DEFAULT_MAX_MESSAGE_DELAY",
     "DEFAULT_MAX_MESSAGES_PER_CHANNEL",
     "DEFAULT_MAX_FETCH_SECONDS",
+    "ConfigOverride",
     "TokenType",
     "MessageFilters",
     "PreparedFilters",
@@ -73,7 +76,20 @@ __all__ = [
     "TelegramSettings",
     "NetworkSettings",
     "MonitorConfig",
+    "parse_override_expression",
 ]
+
+_ENV_PREFIX: Final[str] = "FORWARD_MONITOR"
+_ENV_OVERRIDE_PREFIX: Final[str] = f"{_ENV_PREFIX}__"
+_PROFILE_EXTENSIONS: Final[tuple[str, ...]] = (".yml", ".yaml")
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigOverride:
+    """A single configuration override expressed as a path and value."""
+
+    path: tuple[str | int, ...]
+    value: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,15 +497,28 @@ class MonitorConfig:
     network: NetworkSettings
 
     @classmethod
-    def from_file(cls, path: Path) -> MonitorConfig:
+    def from_file(
+        cls,
+        path: Path,
+        *,
+        profiles: Sequence[str] | None = None,
+        overrides: Iterable[ConfigOverride] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> MonitorConfig:
         raw = _load_yaml(path)
         path = path.expanduser().resolve()
 
-        discord_section = _expect_mapping(raw.get("discord"), "discord")
-        telegram_section = _expect_mapping(raw.get("telegram"), "telegram")
-        forward_section = _expect_mapping(raw.get("forward"), "forward", default={})
-        runtime_section = _expect_mapping(raw.get("runtime"), "runtime", default={})
-        network_section = _expect_mapping(raw.get("network"), "network", default={})
+        environment = env or os.environ
+        merged = _merge_profiles(raw, path, environment, profiles or ())
+        merged = _apply_override_values(merged, _parse_env_overrides(environment))
+        if overrides:
+            merged = _apply_override_values(merged, tuple(overrides))
+
+        discord_section = _expect_mapping(merged.get("discord"), "discord")
+        telegram_section = _expect_mapping(merged.get("telegram"), "telegram")
+        forward_section = _expect_mapping(merged.get("forward"), "forward", default={})
+        runtime_section = _expect_mapping(merged.get("runtime"), "runtime", default={})
+        network_section = _expect_mapping(merged.get("network"), "network", default={})
 
         discord = _parse_discord_settings(discord_section)
         telegram = _parse_telegram_settings(telegram_section)
@@ -503,7 +532,9 @@ class MonitorConfig:
 
         channels = tuple(
             _parse_channel_mapping(entry, telegram.default_chat, defaults)
-            for entry in _expect_sequence(forward_section.get("channels"), "forward.channels")
+            for entry in _expect_sequence(
+                forward_section.get("channels"), "forward.channels"
+            )
         )
 
         runtime = _parse_runtime(runtime_section, path)
@@ -1162,3 +1193,246 @@ def _to_string_list(raw: Any) -> list[str]:
 
 def _first_non_null(candidate: Any, default: Any) -> Any:
     return candidate if candidate is not None else default
+
+
+def parse_override_expression(expression: str) -> ConfigOverride:
+    """Parse a CLI override expression of the form ``path=value``."""
+
+    path_text, sep, value_text = expression.partition("=")
+    if not sep:
+        raise ValueError("Override expressions must use '=' to separate path and value")
+    path = _parse_override_path(path_text.strip())
+    value = _parse_override_value(value_text)
+    return ConfigOverride(path=path, value=value)
+
+
+def _merge_profiles(
+    base: Mapping[str, Any],
+    config_path: Path,
+    env: Mapping[str, str],
+    explicit_profiles: Sequence[str],
+) -> MutableMapping[str, Any]:
+    merged: MutableMapping[str, Any] = copy.deepcopy(dict(base))
+    profile_names = list(_profiles_from_env(env))
+    profile_names.extend(profile for profile in explicit_profiles if profile)
+
+    if not profile_names:
+        return merged
+
+    for profile_name in profile_names:
+        profile_mapping = _load_profile_mapping(config_path, profile_name)
+        merged = _deep_merge_mappings(merged, profile_mapping)
+    return merged
+
+
+def _profiles_from_env(env: Mapping[str, str]) -> Iterator[str]:
+    keys = (f"{_ENV_PREFIX}_PROFILE", f"{_ENV_PREFIX}_PROFILES")
+    for key in keys:
+        raw = env.get(key)
+        if not raw:
+            continue
+        for part in raw.split(","):
+            name = part.strip()
+            if name:
+                yield name
+
+
+def _load_profile_mapping(config_path: Path, selector: str) -> MutableMapping[str, Any]:
+    resolved = _resolve_profile_path(config_path, selector)
+    data = _load_yaml(resolved)
+    return data
+
+
+def _resolve_profile_path(config_path: Path, selector: str) -> Path:
+    candidate = Path(selector)
+    search_order: list[Path] = []
+    base_dir = config_path.parent
+    cwd = Path.cwd()
+
+    if candidate.is_absolute():
+        search_order.append(candidate)
+    else:
+        search_order.append((base_dir / candidate).resolve())
+        search_order.append((cwd / candidate).resolve())
+
+    possible_dirs = [base_dir / "profiles", cwd / "profiles"]
+
+    if candidate.suffix in _PROFILE_EXTENSIONS:
+        for directory in possible_dirs:
+            search_order.append((directory / candidate.name).resolve())
+    else:
+        for extension in _PROFILE_EXTENSIONS:
+            name_with_ext = candidate.name + extension
+            search_order.append((base_dir / name_with_ext).resolve())
+            for directory in possible_dirs:
+                search_order.append((directory / name_with_ext).resolve())
+
+    seen: dict[Path, None] = {}
+    for option in search_order:
+        if option in seen or not option.name:
+            continue
+        seen[option] = None
+        if option.exists():
+            return option
+    raise FileNotFoundError(
+        f"Configuration profile '{selector}' was not found. Checked: "
+        + ", ".join(str(path) for path in seen)
+    )
+
+
+def _deep_merge_mappings(
+    base: MutableMapping[str, Any],
+    override: Mapping[str, Any],
+) -> MutableMapping[str, Any]:
+    result: MutableMapping[str, Any] = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key in result
+            and isinstance(result[key], MutableMapping)
+            and isinstance(value, Mapping)
+        ):
+            result[key] = _deep_merge_mappings(result[key], value)
+            continue
+        result[key] = copy.deepcopy(value) if isinstance(value, (list, dict)) else value
+    return result
+
+
+def _parse_env_overrides(env: Mapping[str, str]) -> tuple[ConfigOverride, ...]:
+    overrides: list[ConfigOverride] = []
+    reserved = {f"{_ENV_PREFIX}_PROFILE", f"{_ENV_PREFIX}_PROFILES"}
+    for key, value in env.items():
+        if key in reserved or not key.startswith(_ENV_OVERRIDE_PREFIX):
+            continue
+        suffix = key[len(_ENV_OVERRIDE_PREFIX) :]
+        if not suffix:
+            continue
+        path = _parse_override_path(_convert_env_key_to_path(suffix))
+        overrides.append(ConfigOverride(path=path, value=_parse_override_value(value)))
+    return tuple(overrides)
+
+
+def _convert_env_key_to_path(key: str) -> str:
+    parts = [segment.strip().lower() for segment in key.split("__") if segment.strip()]
+    return ".".join(parts)
+
+
+def _apply_override_values(
+    raw: Mapping[str, Any],
+    overrides: Sequence[ConfigOverride],
+) -> MutableMapping[str, Any]:
+    if not overrides:
+        return cast(MutableMapping[str, Any], copy.deepcopy(dict(raw)))
+
+    result: MutableMapping[str, Any] = copy.deepcopy(dict(raw))
+    for override in overrides:
+        _assign_path_value(result, override.path, copy.deepcopy(override.value))
+    return result
+
+
+def _assign_path_value(container: Any, path: Sequence[str | int], value: Any) -> None:
+    if not path:
+        raise ValueError("Override path cannot be empty")
+
+    current = container
+    for index, step in enumerate(path[:-1]):
+        next_step = path[index + 1]
+        if isinstance(step, int):
+            if not isinstance(current, list):
+                raise ValueError("Encountered non-list while traversing list index override")
+            if step < 0 or step >= len(current):
+                raise ValueError("Override list index is out of range")
+            current = current[step]
+            continue
+
+        if not isinstance(current, MutableMapping):
+            raise ValueError("Override path traverses through non-mapping value")
+
+        if step not in current or current[step] is None:
+            if isinstance(next_step, int):
+                raise ValueError(
+                    "Cannot create list containers implicitly for override path"
+                )
+            current[step] = {}
+        next_value = current[step]
+
+        if isinstance(next_step, int):
+            if not isinstance(next_value, list):
+                raise ValueError("Override path expects a list but found another type")
+        elif not isinstance(next_value, MutableMapping):
+            raise ValueError("Override path expects a mapping but found another type")
+
+        current = current[step]
+
+    final_step = path[-1]
+    if isinstance(final_step, int):
+        if not isinstance(current, list):
+            raise ValueError("Override final step expects a list container")
+        if final_step < 0 or final_step >= len(current):
+            raise ValueError("Override list index is out of range")
+        current[final_step] = value
+        return
+
+    if not isinstance(current, MutableMapping):
+        raise ValueError("Override final step expects a mapping container")
+    current[final_step] = value
+
+
+def _parse_override_path(path: str) -> tuple[str | int, ...]:
+    text = path.strip()
+    if not text:
+        raise ValueError("Override path must be a non-empty string")
+
+    tokens: list[str | int] = []
+    buffer = ""
+    i = 0
+    length = len(text)
+    while i < length:
+        char = text[i]
+        if char == ".":
+            if not buffer:
+                raise ValueError("Override path contains empty segment")
+            tokens.append(_coerce_path_token(buffer))
+            buffer = ""
+            i += 1
+            continue
+        if char == "[":
+            if buffer:
+                tokens.append(_coerce_path_token(buffer))
+                buffer = ""
+            end = text.find("]", i + 1)
+            if end == -1:
+                raise ValueError("Override path contains '[' without closing '']'")
+            index_text = text[i + 1 : end].strip()
+            if not index_text:
+                raise ValueError("Override path contains empty list index")
+            if not index_text.isdigit():
+                raise ValueError("Override list index must be an integer")
+            tokens.append(int(index_text))
+            i = end + 1
+            continue
+        buffer += char
+        i += 1
+
+    if buffer:
+        tokens.append(_coerce_path_token(buffer))
+    if not tokens:
+        raise ValueError("Override path must specify at least one segment")
+    return tuple(tokens)
+
+
+def _coerce_path_token(token: str) -> str | int:
+    cleaned = token.strip()
+    if not cleaned:
+        raise ValueError("Override path contains empty segment")
+    if cleaned.isdigit():
+        return int(cleaned)
+    return cleaned
+
+
+def _parse_override_value(value: Any) -> Any:
+    text = str(value)
+    try:
+        loaded = safe_load(text)
+    except YAMLError as exc:
+        raise ValueError(f"Unable to parse override value: {value}") from exc
+    return loaded

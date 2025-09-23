@@ -6,7 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import MonitorConfig
+from .config import ConfigOverride, MonitorConfig, parse_override_expression
 from .monitor import run_monitor
 from .structured_logging import configure_bridge_logging, log_event
 
@@ -30,6 +30,21 @@ def parse_args() -> argparse.Namespace:
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
     )
+    parser.add_argument(
+        "--profile",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Merge the specified configuration profile before applying overrides",
+    )
+    parser.add_argument(
+        "--override",
+        action="append",
+        dest="overrides",
+        default=[],
+        metavar="PATH=VALUE",
+        help="Override configuration values using dotted paths (e.g. runtime.poll_every=30)",
+    )
     return parser.parse_args()
 
 
@@ -40,7 +55,20 @@ def main() -> None:
 
     config_path = Path(args.config)
     try:
-        config = MonitorConfig.from_file(config_path)
+        overrides: list[ConfigOverride] = [
+            parse_override_expression(spec)
+            for spec in (args.overrides or [])
+        ]
+    except ValueError as exc:
+        logging.getLogger(__name__).error("Invalid override: %s", exc)
+        sys.exit(1)
+
+    try:
+        config = MonitorConfig.from_file(
+            config_path,
+            profiles=args.profile or [],
+            overrides=overrides,
+        )
         asyncio.run(run_monitor(config, once=args.once))
     except (FileNotFoundError, ValueError, OSError) as exc:
         logging.getLogger(__name__).error("Failed to start monitor: %s", exc)
