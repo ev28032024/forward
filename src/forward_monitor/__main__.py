@@ -56,6 +56,20 @@ def main() -> None:
             extra={"reason": str(exc)},
         )
         sys.exit(1)
+    except RuntimeError as exc:
+        logging.getLogger(__name__).error("Monitor terminated: %s", exc)
+        log_event(
+            "startup_failed",
+            level=logging.ERROR,
+            discord_channel_id=None,
+            discord_message_id=None,
+            telegram_chat_id=None,
+            attempt=1,
+            outcome="failure",
+            latency_ms=None,
+            extra={"reason": str(exc)},
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
