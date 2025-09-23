@@ -149,7 +149,7 @@ runtime:
 Установите инструменты разработки и активируйте git-hook'и:
 
 ```bash
-pip install -U ruff mypy pytest pytest-asyncio aresponses pre-commit
+pip3 install -U ruff mypy pytest pytest-asyncio aresponses pre-commit
 pre-commit install
 pre-commit install --hook-type pre-push
 ```
