@@ -149,6 +149,46 @@ def test_zero_poll_interval_allowed(tmp_path: Path) -> None:
     assert config.runtime.poll_interval == 0
 
 
+def test_runtime_caps_parsed(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(
+        config_path,
+        _base_config(
+            """
+            runtime:
+              max_messages: 250
+              max_fetch_seconds: 12.5
+            """
+        ),
+    )
+
+    config = MonitorConfig.from_file(config_path)
+    assert config.runtime.max_messages_per_channel == 250
+    assert config.runtime.max_fetch_seconds == pytest.approx(12.5)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("max_messages", 0), ("max_fetch_seconds", 0)],
+)
+def test_runtime_caps_must_be_positive(
+    tmp_path: Path, field: str, value: int
+) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(
+        config_path,
+        _base_config(
+            f"""
+            runtime:
+              {field}: {value}
+            """
+        ),
+    )
+
+    with pytest.raises(ValueError):
+        MonitorConfig.from_file(config_path)
+
+
 @pytest.mark.parametrize(
     "content",
     [

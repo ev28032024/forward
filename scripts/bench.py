@@ -1,113 +1,201 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
+import asyncio
+import sys
+from pathlib import Path
 from time import perf_counter
 from typing import cast
 
-from forward_monitor.config import ChannelMapping, MessageFilters
-from forward_monitor.formatter import (
+ROOT = Path(__file__).resolve().parent.parent
+SRC_PATH = ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.append(str(SRC_PATH))
+
+from forward_monitor.config import (  # noqa: E402
+    ChannelMapping,
+    FormattingProfile,
+    MessageCustomization,
+    MessageFilters,
+)
+from forward_monitor.formatter import (  # noqa: E402
+    CustomisedText,
     build_attachments,
-    clean_discord_content,
-    extract_embed_text,
     format_announcement_message,
 )
-from forward_monitor.monitor import _attachment_category, _should_forward
-from forward_monitor.types import DiscordMessage
-
-_SAMPLE_AUTHOR = {"id": "123", "username": "Benchmark"}
-_SAMPLE_CHANNEL = ChannelMapping(discord_channel_id=1, telegram_chat_id="chat")
-_SAMPLE_FILTERS = MessageFilters().prepare()
+from forward_monitor.monitor import ChannelContext, _forward_message  # noqa: E402
+from forward_monitor.types import DiscordMessage  # noqa: E402
 
 
-def _synthetic_message(length: int, attachments: int) -> DiscordMessage:
-    base = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. "
-    repeated = (base * ((length // len(base)) + 1))[:length]
-    payload: dict[str, object] = {
-        "id": "9001",
-        "content": repeated,
-        "author": _SAMPLE_AUTHOR,
-        "embeds": [
-            {
-                "title": "Benchmark",
-                "description": repeated[: max(0, length // 2)],
-                "fields": [
-                    {"name": "Field", "value": "Value"},
-                ],
-            }
-        ],
-        "attachments": [
-            {
-                "url": f"https://example.com/file{index}.png",
-                "filename": f"file{index}.png",
-                "content_type": "image/png",
-                "size": 1024 * (index + 1),
-            }
-            for index in range(attachments)
-        ],
-    }
-    return cast(DiscordMessage, payload)
+def _make_sample_message() -> DiscordMessage:
+    return cast(
+        DiscordMessage,
+        {
+            "id": "100",
+            "channel_id": 42,
+            "guild_id": 999,
+            "content": "Update for <@123> in <#456> with attachment",
+            "author": {"id": "7", "username": "Reporter", "global_name": "Reporter"},
+            "mentions": [{"id": "123", "username": "Alice"}],
+            "mention_channels": [{"id": "456", "name": "announcements"}],
+            "attachments": [
+                {
+                    "url": "https://cdn.example.com/image.png",
+                    "filename": "image.png",
+                    "content_type": "image/png",
+                    "size": 2048,
+                },
+                {
+                    "url": "https://cdn.example.com/file.pdf",
+                    "filename": "report.pdf",
+                    "content_type": "application/pdf",
+                    "size": 8192,
+                },
+            ],
+            "embeds": [
+                {
+                    "title": "Highlights",
+                    "description": "Key details of the announcement",
+                    "fields": [
+                        {"name": "Status", "value": "Ready"},
+                        {"name": "Priority", "value": "High"},
+                    ],
+                }
+            ],
+        },
+    )
 
 
-def benchmark_formatter(iterations: int, *, length: int = 4000, attachments: int = 4) -> float:
-    message = _synthetic_message(length, attachments)
-    cleaned = clean_discord_content(message)
-    embed_text = extract_embed_text(message)
-    attachment_infos = build_attachments(message)
+class _NullTelegram:
+    __slots__ = ()
+
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> None:
+        return None
+
+    async def send_photo(
+        self,
+        chat_id: str,
+        photo: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
+        return None
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
+        return None
+
+    async def send_audio(
+        self,
+        chat_id: str,
+        audio: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
+        return None
+
+    async def send_document(
+        self,
+        chat_id: str,
+        document: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
+        return None
+
+
+def benchmark_formatter(iterations: int) -> None:
+    message = _make_sample_message()
+    attachments = build_attachments(message)
+    customization = MessageCustomization(
+        chips=("Alert", "Production"),
+        headers=("Header line",),
+        footers=("Footer line",),
+    ).prepare()
+    customised: CustomisedText = customization.render(message["content"])
+    context_formatting = FormattingProfile()
     start = perf_counter()
     for _ in range(iterations):
         format_announcement_message(
-            _SAMPLE_CHANNEL.discord_channel_id,
+            message["channel_id"],
             message,
-            cleaned,
-            attachment_infos,
-            embed_text=embed_text,
-            channel_label="Bench",
+            customised,
+            attachments,
+            channel_label="Status",
+            formatting=context_formatting,
         )
-    return perf_counter() - start
+    elapsed = perf_counter() - start
+    throughput = iterations / elapsed if elapsed else float("inf")
+    print(f"formatter: {iterations} iterations in {elapsed:.3f}s ({throughput:.1f} msg/s)")
 
 
-def benchmark_processing(iterations: int, *, length: int = 4000, attachments: int = 4) -> float:
-    message = _synthetic_message(length, attachments)
+async def benchmark_forwarding(iterations: int) -> None:
+    message_template = _make_sample_message()
+    context = ChannelContext(
+        mapping=ChannelMapping(discord_channel_id=42, telegram_chat_id="@target"),
+        filters=MessageFilters().prepare(),
+        customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
+    )
+    telegram = _NullTelegram()
     start = perf_counter()
-    for _ in range(iterations):
-        cleaned = clean_discord_content(message)
-        embed_text = extract_embed_text(message)
-        attachment_infos = build_attachments(message)
-        categories = tuple(_attachment_category(attachment) for attachment in attachment_infos)
-        _should_forward(
-            message,
-            cleaned,
-            embed_text,
-            attachment_infos,
-            categories,
-            _SAMPLE_FILTERS,
+    for index in range(iterations):
+        message = dict(message_template)
+        message["id"] = str(1000 + index)
+        await _forward_message(
+            context=context,
+            channel_id=context.mapping.discord_channel_id,
+            message=cast(DiscordMessage, message),
+            telegram=telegram,
+            formatter=format_announcement_message,
+            min_delay=0.0,
+            max_delay=0.0,
         )
-    return perf_counter() - start
+    elapsed = perf_counter() - start
+    throughput = iterations / elapsed if elapsed else float("inf")
+    print(f"forwarding: {iterations} iterations in {elapsed:.3f}s ({throughput:.1f} msg/s)")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Benchmark formatting and forwarding hot paths",
+    )
+    parser.add_argument(
+        "--format-count",
+        type=int,
+        default=1000,
+        help="Number of formatting iterations",
+    )
+    parser.add_argument(
+        "--forward-count",
+        type=int,
+        default=300,
+        help="Number of forwarding iterations",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark formatter and processing paths.")
-    parser.add_argument("--iterations", type=int, default=500, help="Iterations per benchmark")
-    parser.add_argument("--length", type=int, default=4000, help="Synthetic message length")
-    parser.add_argument("--attachments", type=int, default=4, help="Synthetic attachment count")
-    args = parser.parse_args()
-
-    fmt_duration = benchmark_formatter(
-        args.iterations, length=args.length, attachments=args.attachments
-    )
-    proc_duration = benchmark_processing(
-        args.iterations, length=args.length, attachments=args.attachments
-    )
-
-    fmt_ms = fmt_duration * 1000 / max(args.iterations, 1)
-    proc_ms = proc_duration * 1000 / max(args.iterations, 1)
-
-    print(
-        "formatter: {:.2f} ms/iter ({:.2f} s total)".format(fmt_ms, fmt_duration)
-    )
-    print(
-        "processing: {:.2f} ms/iter ({:.2f} s total)".format(proc_ms, proc_duration)
-    )
+    args = parse_args()
+    benchmark_formatter(args.format_count)
+    asyncio.run(benchmark_forwarding(args.forward_count))
 
 
 if __name__ == "__main__":

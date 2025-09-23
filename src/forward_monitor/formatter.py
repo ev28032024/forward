@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import html
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from .config import CustomisedText, FormattingProfile
@@ -150,7 +151,7 @@ def _attachment_from_payload(
 
     filename_text = str(filename) if filename else None
     content_type_text = str(content_type) if content_type else None
-    if isinstance(size, (int, float)):
+    if isinstance(size, int | float):
         size_value = int(size)
     elif isinstance(size, str):
         try:
@@ -499,12 +500,14 @@ def _attachment_summary(
     if not attachments:
         return None
     domains: list[str] = []
+    seen_domains: set[str] = set()
     for attachment in attachments:
         domain = attachment.domain or attachment.url
         if not domain:
             continue
-        cleaned = domain.split("/", 1)[0]
-        if cleaned not in domains:
+        cleaned, _, _ = domain.partition("/")
+        if cleaned and cleaned not in seen_domains:
+            seen_domains.add(cleaned)
             domains.append(cleaned)
 
     summary = ""

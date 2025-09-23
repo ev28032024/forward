@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import deque
+from collections.abc import Iterable
 from types import TracebackType
-from typing import Iterable
 
 import aiohttp
 
@@ -40,7 +40,7 @@ class SoftRateLimiter:
         self._cooldown_until = 0.0
         self.name = name
 
-    async def __aenter__(self) -> "SoftRateLimiter":
+    async def __aenter__(self) -> SoftRateLimiter:
         await self.acquire()
         return self
 
@@ -197,7 +197,7 @@ class ProxyPool:
                 if response.status >= 400:
                     raise aiohttp.ClientError(f"status={response.status}")
         # pragma: no cover - network failure paths exercised via integration tests.
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
             await self.mark_bad(
                 proxy,
                 reason=f"health_check_failed:{exc}",
@@ -280,7 +280,7 @@ class ProxyPool:
                 ) as response:
                     if response.status >= 400:
                         raise aiohttp.ClientError(f"status={response.status}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 log_event(
                     "proxy_rotation",
                     level=30,

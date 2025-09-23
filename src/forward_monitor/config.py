@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal, MutableMapping, cast
+from typing import Any, Final, Literal, cast
 
 from yaml import safe_load
 
@@ -13,6 +13,8 @@ DEFAULT_POLL_INTERVAL: Final[int] = 300
 DEFAULT_STATE_FILE: Final[Path] = Path("monitor_state.json")
 DEFAULT_MIN_MESSAGE_DELAY: Final[float] = 0.5
 DEFAULT_MAX_MESSAGE_DELAY: Final[float] = 2.0
+DEFAULT_MAX_MESSAGES_PER_CHANNEL: Final[int] = 1000
+DEFAULT_MAX_FETCH_SECONDS: Final[float] = 5.0
 
 _DEFAULT_TELEGRAM_MESSAGE_LIMIT: Final[int] = 3500
 _TELEGRAM_MAX_LIMIT: Final[int] = 4096
@@ -52,6 +54,8 @@ __all__ = [
     "DEFAULT_STATE_FILE",
     "DEFAULT_MIN_MESSAGE_DELAY",
     "DEFAULT_MAX_MESSAGE_DELAY",
+    "DEFAULT_MAX_MESSAGES_PER_CHANNEL",
+    "DEFAULT_MAX_FETCH_SECONDS",
     "TokenType",
     "MessageFilters",
     "PreparedFilters",
@@ -205,44 +209,45 @@ class FormattingProfile:
     def merge(self, other: FormattingProfile | None) -> FormattingProfile:
         if other is None:
             return self
-        values = {
-            "parse_mode": self.parse_mode,
-            "disable_link_preview": self.disable_link_preview,
-            "max_length": self.max_length,
-            "ellipsis": self.ellipsis,
-            "attachments_style": self.attachments_style,
-        }
+        parse_mode = self.parse_mode
+        disable_preview = self.disable_link_preview
+        max_length = self.max_length
+        ellipsis = self.ellipsis
+        attachments_style = self.attachments_style
         explicit = set(self.provided)
 
         if "parse_mode" in other.provided:
-            values["parse_mode"] = (other.parse_mode or self.parse_mode or "").strip() or "HTML"
+            parse_mode = (other.parse_mode or parse_mode or "").strip() or "HTML"
             explicit.add("parse_mode")
         if "disable_link_preview" in other.provided:
-            disable = bool(
-                _first_non_null(other.disable_link_preview, self.disable_link_preview)
+            disable_preview = bool(
+                _first_non_null(other.disable_link_preview, disable_preview)
             )
-            values["disable_link_preview"] = disable
             explicit.add("disable_link_preview")
         if "max_length" in other.provided:
             max_length = max(
                 100,
                 min(
-                    int(_first_non_null(other.max_length, self.max_length)),
+                    int(_first_non_null(other.max_length, max_length)),
                     _TELEGRAM_MAX_LIMIT,
                 ),
             )
-            values["max_length"] = max_length
             explicit.add("max_length")
         if "ellipsis" in other.provided:
-            ellipsis = (other.ellipsis or self.ellipsis or "").strip() or "…"
-            values["ellipsis"] = ellipsis
+            ellipsis = (other.ellipsis or ellipsis or "").strip() or "…"
             explicit.add("ellipsis")
         if "attachments_style" in other.provided:
-            values["attachments_style"] = other.attachments_style or self.attachments_style
+            attachments_style = other.attachments_style or attachments_style
             explicit.add("attachments_style")
 
-        typed_values: dict[str, Any] = {**values}
-        return FormattingProfile(**typed_values, provided=frozenset(explicit))
+        return FormattingProfile(
+            parse_mode=parse_mode,
+            disable_link_preview=disable_preview,
+            max_length=max_length,
+            ellipsis=ellipsis,
+            attachments_style=attachments_style,
+            provided=frozenset(explicit),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +430,8 @@ class MonitorRuntime:
     state_file: Path = DEFAULT_STATE_FILE
     min_delay: float = DEFAULT_MIN_MESSAGE_DELAY
     max_delay: float = DEFAULT_MAX_MESSAGE_DELAY
+    max_messages_per_channel: int = DEFAULT_MAX_MESSAGES_PER_CHANNEL
+    max_fetch_seconds: float = DEFAULT_MAX_FETCH_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,11 +620,33 @@ def _parse_runtime(raw: Mapping[str, Any], config_path: Path) -> MonitorRuntime:
         )
     state_raw = raw.get("state_file")
     state_file = _resolve_state_file(config_path, state_raw, DEFAULT_STATE_FILE)
+    max_messages_raw = raw.get("max_messages")
+    if max_messages_raw is None:
+        max_messages_raw = raw.get("max_messages_per_channel")
+    max_messages = int(
+        _first_non_null(max_messages_raw, DEFAULT_MAX_MESSAGES_PER_CHANNEL)
+    )
+    if max_messages <= 0:
+        raise ValueError(
+            "Configuration field 'runtime.max_messages' must be positive"
+        )
+    max_fetch_raw = raw.get("max_fetch_seconds")
+    if max_fetch_raw is None:
+        max_fetch_raw = raw.get("max_fetch_duration")
+    max_fetch_seconds = float(
+        _first_non_null(max_fetch_raw, DEFAULT_MAX_FETCH_SECONDS)
+    )
+    if max_fetch_seconds <= 0:
+        raise ValueError(
+            "Configuration field 'runtime.max_fetch_seconds' must be positive"
+        )
     return MonitorRuntime(
         poll_interval=poll_interval,
         state_file=state_file,
         min_delay=min_delay,
         max_delay=max_delay,
+        max_messages_per_channel=max_messages,
+        max_fetch_seconds=max_fetch_seconds,
     )
 
 
@@ -852,30 +881,50 @@ def _parse_formatting(raw: Any) -> FormattingProfile | None:
         raw.get("attachments_style") or raw.get("attachments")
     )
 
-    kwargs: dict[str, Any] = {}
+    parse_mode_value: str | None = None
+    disable_preview_value: bool | None = None
+    max_length_value: int | None = None
+    ellipsis_value: str | None = None
+    attachments_style_value: Literal["compact", "minimal"] | None = None
+    provided: set[str] = set()
     if parse_mode is not None:
-        kwargs["parse_mode"] = parse_mode
+        parse_mode_value = parse_mode
+        provided.add("parse_mode")
     if disable_preview is not None:
-        kwargs["disable_link_preview"] = bool(disable_preview)
+        disable_preview_value = bool(disable_preview)
+        provided.add("disable_link_preview")
     if max_length is not None:
-        kwargs["max_length"] = int(max_length)
+        max_length_value = int(max_length)
+        provided.add("max_length")
     if ellipsis is not None:
-        kwargs["ellipsis"] = ellipsis
+        ellipsis_value = ellipsis
+        provided.add("ellipsis")
     if attachments is not None:
         normalised = attachments.lower()
         if normalised not in {"compact", "minimal"}:
             raise ValueError(
                 "Formatting attachments style must be either 'compact' or 'minimal'"
             )
-        style_literal: Literal["compact", "minimal"] = cast(
-            Literal["compact", "minimal"], normalised
-        )
-        kwargs["attachments_style"] = style_literal
+        attachments_style_value = cast(Literal["compact", "minimal"], normalised)
+        provided.add("attachments_style")
 
-    if not kwargs:
+    if not provided:
         return None
-    provided = frozenset(kwargs.keys())
-    return FormattingProfile(**kwargs, provided=provided)
+    defaults = FormattingProfile()
+    return FormattingProfile(
+        parse_mode=parse_mode_value or defaults.parse_mode,
+        disable_link_preview=(
+            disable_preview_value
+            if disable_preview_value is not None
+            else defaults.disable_link_preview
+        ),
+        max_length=max_length_value or defaults.max_length,
+        ellipsis=ellipsis_value or defaults.ellipsis,
+        attachments_style=(
+            attachments_style_value or defaults.attachments_style
+        ),
+        provided=frozenset(provided),
+    )
 
 
 def _validate_message_types(values: Sequence[str], label: str) -> tuple[str, ...]:
@@ -925,7 +974,7 @@ def _parse_replacements(raw: Any) -> dict[str, str]:
     raise ValueError("Replacement rules must be a mapping or list of mappings")
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
+def _load_yaml(path: Path) -> MutableMapping[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found: {path}")
     with path.open("r", encoding="utf-8") as file:
