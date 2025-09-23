@@ -1,5 +1,5 @@
-# Пример конфигурации для forward_monitor
-# Переименуйте файл и заполните токены/ID перед запуском
+# Forward Monitor — пример минималистичной конфигурации
+# Скопируйте файл в config.yml и заполните обязательные поля.
 
 telegram:
   token: "TELEGRAM_BOT_TOKEN"
@@ -11,11 +11,53 @@ telegram:
 
 discord:
   token: "DISCORD_USER_TOKEN"
-  token_type: auto  # варианты: auto, user, bot, bearer
+  token_type: auto  # допустимые значения: auto, user, bot, bearer
   rate_limit:
     per_second: 3.5
     per_minute: 60
     concurrency: 4
+    jitter_min_ms: 40
+    jitter_max_ms: 160
+    cooldown_seconds: 30
+
+forward:
+  defaults:
+    text:
+      headers:
+        - "📢 Новости"
+      chips:
+        - "🔥"
+      footers:
+        - "Forward Bot"
+      replacements:
+        "[скрыть]": ""
+        OG: "Original"
+    filters:
+      whitelist:
+        - "airdrop"
+      blocked_senders:
+        - "spammer123"
+      allowed_types:
+        - text
+        - image
+    formatting:
+      attachments: compact
+  channels:
+    - name: "#announcements"
+      discord: 123456789012345678
+      telegram: "-1001234567890"
+      filters:
+        blacklist:
+          - "maintenance"
+      text:
+        headers:
+          - "📢 Анонсы"
+        replacements:
+          - find: "LFG"
+            replace: "Let's go"
+          - find: "[link]"
+            replace: ""
+    - discord: 223456789012345678  # fallback-чат будет использован автоматически
 
 network:
   user_agents:
@@ -30,44 +72,6 @@ network:
       url: "https://www.google.com/generate_204"
       timeout: 5
       cooldown: 180
-
-forward:
-  defaults:
-    filters:
-      whitelist:
-        - "airdrop"
-      blocked_senders:
-        - "spammer123"
-      allowed_types:
-        - text
-        - image
-    text:
-      chips:
-        - "🔥"
-      headers:
-        - "Важные новости"
-      footers:
-        - "Forward Bot"
-      replacements:
-        OG: "Original"
-        "[скрыть]": ""
-    formatting:
-      attachments: compact
-  channels:
-    - discord: 123456789012345678
-      telegram: "-1001234567890"
-      name: "Основной канал"
-      filters:
-        blacklist:
-          - "maintenance"
-      text:
-        headers: ["📢 Анонсы"]
-        replacements:
-          - find: "LFG"
-            replace: "Let's go"
-          - find: "[link]"
-            replace: ""
-    - discord: 223456789012345678  # будет использовать chat по умолчанию
 
 runtime:
   poll_every: 300

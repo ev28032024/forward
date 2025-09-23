@@ -226,7 +226,8 @@ class FormattingProfile:
             values["attachments_style"] = other.attachments_style or self.attachments_style
             explicit.add("attachments_style")
 
-        return FormattingProfile(**values, provided=frozenset(explicit))
+        typed_values: dict[str, Any] = {**values}
+        return FormattingProfile(**typed_values, provided=frozenset(explicit))
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,7 +423,13 @@ class DiscordSettings:
 class TelegramSettings:
     token: str
     default_chat: str
-    rate_limit: RateLimitSettings = field(default_factory=lambda: RateLimitSettings(per_second=0.9, per_minute=25, concurrency=1))
+    rate_limit: RateLimitSettings = field(
+        default_factory=lambda: RateLimitSettings(
+            per_second=0.9,
+            per_minute=25,
+            concurrency=1,
+        )
+    )
     formatting: FormattingProfile = field(default_factory=FormattingProfile)
 
 
@@ -493,7 +500,10 @@ class MonitorConfig:
 def _parse_discord_settings(raw: Mapping[str, Any]) -> DiscordSettings:
     token = _require_string(raw, "discord.token", raw.get("token"))
     token_type = _normalize_token_type(raw.get("token_type"))
-    rate_limit = _parse_rate_limit(raw.get("rate_limit"), fallback=RateLimitSettings(per_second=4.0, per_minute=60, concurrency=4))
+    rate_limit = _parse_rate_limit(
+        raw.get("rate_limit"),
+        fallback=RateLimitSettings(per_second=4.0, per_minute=60, concurrency=4),
+    )
     return DiscordSettings(token=token, token_type=token_type, rate_limit=rate_limit)
 
 
@@ -501,9 +511,23 @@ def _parse_telegram_settings(raw: Mapping[str, Any]) -> TelegramSettings:
     token = _require_string(raw, "telegram.token", raw.get("token"))
     chat = _require_string(raw, "telegram.chat", raw.get("chat") or raw.get("chat_id"))
     base_formatting = _parse_formatting(raw.get("formatting"))
-    rate_limit = _parse_rate_limit(raw.get("rate_limit"), fallback=RateLimitSettings(per_second=0.8, per_minute=25, concurrency=1, jitter_min_ms=60, jitter_max_ms=200))
+    rate_limit = _parse_rate_limit(
+        raw.get("rate_limit"),
+        fallback=RateLimitSettings(
+            per_second=0.8,
+            per_minute=25,
+            concurrency=1,
+            jitter_min_ms=60,
+            jitter_max_ms=200,
+        ),
+    )
     formatting = FormattingProfile().merge(base_formatting)
-    return TelegramSettings(token=token, default_chat=chat, rate_limit=rate_limit, formatting=formatting)
+    return TelegramSettings(
+        token=token,
+        default_chat=chat,
+        rate_limit=rate_limit,
+        formatting=formatting,
+    )
 
 
 def _parse_defaults(raw: Any) -> ChannelDefaults:
@@ -568,7 +592,10 @@ def _parse_runtime(raw: Mapping[str, Any], config_path: Path) -> MonitorRuntime:
     if min_delay < 0:
         raise ValueError("Configuration field 'runtime.delays.min' cannot be negative")
     if max_delay < min_delay:
-        raise ValueError("Configuration field 'runtime.delays.max' must be greater than or equal to runtime.delays.min")
+        raise ValueError(
+            "Configuration field 'runtime.delays.max' must be greater than or equal "
+            "to runtime.delays.min"
+        )
     state_raw = raw.get("state_file")
     state_file = _resolve_state_file(config_path, state_raw, DEFAULT_STATE_FILE)
     return MonitorRuntime(
@@ -656,6 +683,8 @@ def _parse_rate_limit(raw: Any, *, fallback: RateLimitSettings) -> RateLimitSett
     per_minute = raw.get("per_minute") or raw.get("rpm")
     concurrency = raw.get("concurrency")
     jitter = raw.get("jitter_ms") or raw.get("jitter")
+    jitter_min: float | None
+    jitter_max: float | None
     if isinstance(jitter, Sequence) and not isinstance(jitter, str):
         jitter_min, jitter_max = (float(jitter[0]), float(jitter[-1]))
     else:
@@ -814,7 +843,12 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return dict(data)
 
 
-def _expect_mapping(raw: Any, field: str, *, default: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+def _expect_mapping(
+    raw: Any,
+    field: str,
+    *,
+    default: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
     if raw is None:
         return default or {}
     if not isinstance(raw, Mapping):
@@ -856,23 +890,22 @@ def _normalize_token_type(raw: Any) -> TokenType:
 
 
 def _coerce_channel_id(value: Any, field: str) -> int:
+    error = (
+        f"Configuration field '{field}' must contain integers for Discord channel IDs"
+    )
     if isinstance(value, bool):
-        raise ValueError(f"Configuration field '{field}' must contain integers for Discord channel IDs")
+        raise ValueError(error)
     if isinstance(value, int):
         return value
     if isinstance(value, str):
         text = value.strip()
         if not text:
-            raise ValueError(f"Configuration field '{field}' must contain integers for Discord channel IDs")
+            raise ValueError(error)
         try:
             return int(text)
         except ValueError as exc:
-            raise ValueError(
-                f"Configuration field '{field}' must contain integers for Discord channel IDs"
-            ) from exc
-    raise ValueError(
-        f"Configuration field '{field}' must contain integers for Discord channel IDs"
-    )
+            raise ValueError(error) from exc
+    raise ValueError(error)
 
 
 def _resolve_state_file(config_path: Path, raw_value: Any, default: Path) -> Path:
@@ -957,7 +990,15 @@ def _normalise_multiline(text: str) -> tuple[str, ...]:
 def _deduplicate(values: Sequence[str], *, fallback: tuple[str, ...]) -> tuple[str, ...]:
     if not values:
         return fallback
-    return tuple(dict.fromkeys(str(value).strip() for value in values if value and str(value).strip()))
+    unique: dict[str, None] = {}
+    for value in values:
+        if not value:
+            continue
+        text = str(value).strip()
+        if not text or text in unique:
+            continue
+        unique[text] = None
+    return tuple(unique.keys())
 
 
 def _to_string_list(raw: Any) -> list[str]:

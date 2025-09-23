@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import pytest
-from yaml import safe_dump, safe_load
+from yaml import safe_dump
 
 from forward_monitor.config import MonitorConfig
 

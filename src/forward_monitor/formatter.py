@@ -476,7 +476,7 @@ def _assemble_sections(customised: CustomisedText) -> List[str]:
         if lines:
             lines.append("")
         lines.extend(cleaned)
-    return lines
+    return _deduplicate_consecutive(lines)
 
 
 def _build_chip_line(
@@ -543,6 +543,30 @@ def _collapse_blank_lines(lines: Sequence[str]) -> List[str]:
     while result and not result[-1]:
         result.pop()
     return result
+
+
+def _deduplicate_consecutive(lines: Sequence[str]) -> List[str]:
+    trimmed: List[str] = []
+    previous_key: str | None = None
+    for line in lines:
+        if not line:
+            if trimmed and trimmed[-1] == "":
+                continue
+            trimmed.append("")
+            previous_key = None
+            continue
+
+        key = line.casefold()
+        if key == previous_key:
+            continue
+
+        trimmed.append(line)
+        previous_key = key
+
+    while trimmed and not trimmed[-1]:
+        trimmed.pop()
+
+    return trimmed
 
 
 def _chunk_html(text: str, limit: int, ellipsis: str) -> List[str]:
