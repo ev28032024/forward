@@ -118,9 +118,14 @@ network:
   user_agents:
     mobile_ratio: 0.35
   proxies:
+    username: "proxy_user"
+    password: "proxy_pass"
+    rotate_url: "https://proxy.example/api/rotate"
     pool:
       - "http://proxy.example:8080"
     telegram:
+      auth: "tg-user:tg-pass"
+      rotate: "https://proxy.example/api/rotate?service=telegram"
       pool:
         - "socks5://tg-proxy.example:9050"
     healthcheck:
@@ -128,6 +133,13 @@ network:
       timeout: 5
       cooldown: 180
 ```
+
+`username` и `password` добавляются ко всем прокси из пула, если провайдер
+требует HTTP-аутентификацию. Внутри конкретных секций (`telegram`, `discord`)
+можно переопределить пары логин/пароль через поля `username`/`password` или
+указать их одной строкой `auth: "user:pass"`. Поле `rotate_url` (и его синоним
+`rotate`) задаёт URL для смены IP — Forward Monitor будет запрашивать его при
+обнаружении неполадок с прокси, чтобы ускорить восстановление пула.
 
 ### Runtime
 ```yaml

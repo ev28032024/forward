@@ -186,6 +186,7 @@ class DiscordClient:
                         headers=headers,
                         params=params,
                         proxy=proxy,
+                        proxy_auth=self._proxy_pool.auth,
                     ) as response:
                         elapsed_ms = (perf_counter() - start) * 1000
                         network_attempts = 0
@@ -215,7 +216,9 @@ class DiscordClient:
                             )
                             if proxy:
                                 await self._proxy_pool.mark_bad(
-                                    proxy, reason=f"status_{response.status}"
+                                    proxy,
+                                    reason=f"status_{response.status}",
+                                    session=self._session,
                                 )
                             log_event(
                                 "discord_rate_limited",
@@ -247,7 +250,9 @@ class DiscordClient:
                                 await self._rate_limiter.impose_cooldown(cooldown)
                                 if proxy:
                                     await self._proxy_pool.mark_bad(
-                                        proxy, reason=f"suspicious_{response.status}"
+                                        proxy,
+                                        reason=f"suspicious_{response.status}",
+                                        session=self._session,
                                     )
                                 log_event(
                                     "discord_suspicious_response",
@@ -313,7 +318,11 @@ class DiscordClient:
                 network_attempts += 1
                 elapsed_ms = (perf_counter() - start) * 1000
                 if proxy:
-                    await self._proxy_pool.mark_bad(proxy, reason=type(exc).__name__)
+                    await self._proxy_pool.mark_bad(
+                        proxy,
+                        reason=type(exc).__name__,
+                        session=self._session,
+                    )
                 if network_attempts > max_network_retries:
                     log_event(
                         "discord_network_failure",

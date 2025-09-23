@@ -234,7 +234,11 @@ class TelegramClient:
 
                 async with self._rate_limiter:
                     async with self._session.post(
-                        url, json=payload, proxy=proxy, headers=headers
+                        url,
+                        json=payload,
+                        proxy=proxy,
+                        proxy_auth=self._proxy_pool.auth,
+                        headers=headers,
                     ) as response:
                         if response.status in statuses and attempt <= retry_attempts:
                             retry_after = await _retry_after_seconds(response)
@@ -245,7 +249,9 @@ class TelegramClient:
                             )
                             if proxy:
                                 await self._proxy_pool.mark_bad(
-                                    proxy, reason=f"status_{response.status}"
+                                    proxy,
+                                    reason=f"status_{response.status}",
+                                    session=self._session,
                                 )
                             log_event(
                                 "telegram_rate_limited",
@@ -277,7 +283,9 @@ class TelegramClient:
                                 )
                                 if proxy:
                                     await self._proxy_pool.mark_bad(
-                                        proxy, reason=f"suspicious_{response.status}"
+                                        proxy,
+                                        reason=f"suspicious_{response.status}",
+                                        session=self._session,
                                     )
                                 log_event(
                                     "telegram_suspicious_response",

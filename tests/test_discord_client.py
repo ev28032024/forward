@@ -68,6 +68,7 @@ class _FakeSession:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
         proxy: str | None = None,
+        proxy_auth: aiohttp.BasicAuth | None = None,
     ) -> _FakeResponse:
         self.calls.append(
             {
@@ -75,6 +76,7 @@ class _FakeSession:
                 "url": url,
                 "params": dict(params or {}),
                 "proxy": proxy,
+                "proxy_auth": proxy_auth,
             }
         )
         if not self._responses:
@@ -133,6 +135,7 @@ async def test_fetch_messages_sorts_results_and_passes_params(
             "url": f"{DISCORD_API_BASE}/channels/123/messages",
             "params": {"limit": "10", "after": "5"},
             "proxy": None,
+            "proxy_auth": None,
         }
     ]
 
@@ -212,6 +215,7 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
             headers: Mapping[str, str] | None = None,
             params: Mapping[str, str] | None = None,
             proxy: str | None = None,
+            proxy_auth: aiohttp.BasicAuth | None = None,
         ) -> _FakeResponse:
             self.call_count += 1
             if self.call_count == 1:
