@@ -38,6 +38,7 @@ from .types import DiscordMessage
 
 DiscordMessageMapping = DiscordMessage
 
+
 class AnnouncementFormatter(Protocol):
     def __call__(
         self,
@@ -121,6 +122,8 @@ _DISCORD_FETCH_LIMIT = 100
 _DISCORD_CONCURRENCY_LIMIT = 8
 _MAX_MESSAGES_PER_CHANNEL = 1000
 _MAX_FETCH_SECONDS = 5.0
+
+
 @dataclass(frozen=True, slots=True)
 class ChannelContext:
     """Pre-computed filters and customisation for a Discord channel."""
@@ -162,7 +165,7 @@ class _FilterContext:
             )
         return self._aggregate_text
 
-    def text_contains_any(self, keywords: set[str]) -> bool:
+    def text_contains_any(self, keywords: Iterable[str]) -> bool:
         text = self.aggregate_text()
         return any(keyword in text for keyword in keywords)
 
@@ -202,9 +205,7 @@ def _channel_contexts(
     contexts: list[ChannelContext] = []
     for mapping in channel_mappings:
         combined_filters = global_filters.combine(mapping.filters).prepare()
-        combined_customization = (
-            global_customization.combine(mapping.customization).prepare()
-        )
+        combined_customization = global_customization.combine(mapping.customization).prepare()
         combined_formatting = global_formatting.merge(mapping.formatting)
         contexts.append(
             ChannelContext(
@@ -225,22 +226,14 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
     timeout = aiohttp.ClientTimeout(total=60)
     connector = aiohttp.TCPConnector(limit=64, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-        discord_rate_limiter = SoftRateLimiter(
-            config.discord.rate_limit, name="discord"
-        )
+        discord_rate_limiter = SoftRateLimiter(config.discord.rate_limit, name="discord")
         discord_api_semaphore = asyncio.Semaphore(_DISCORD_CONCURRENCY_LIMIT)
-        telegram_rate_limiter = SoftRateLimiter(
-            config.telegram.rate_limit, name="telegram"
-        )
+        telegram_rate_limiter = SoftRateLimiter(config.telegram.rate_limit, name="telegram")
         user_agents = config.network.user_agents
         discord_user_agents = UserAgentProvider(user_agents)
         telegram_user_agents = UserAgentProvider(user_agents)
-        discord_proxy = ProxyPool(
-            config.network.proxy_for_service("discord"), name="discord"
-        )
-        telegram_proxy = ProxyPool(
-            config.network.proxy_for_service("telegram"), name="telegram"
-        )
+        discord_proxy = ProxyPool(config.network.proxy_for_service("discord"), name="discord")
+        telegram_proxy = ProxyPool(config.network.proxy_for_service("telegram"), name="telegram")
 
         discord = DiscordClient(
             config.discord.token,
@@ -526,9 +519,7 @@ async def _forward_message(
     clean_content = clean_discord_content(message)
     embed_text = extract_embed_text(message)
     attachments = build_attachments(message)
-    attachment_categories = tuple(
-        _attachment_category(attachment) for attachment in attachments
-    )
+    attachment_categories = tuple(_attachment_category(attachment) for attachment in attachments)
 
     should_forward, reason = _should_forward(
         message,
@@ -552,9 +543,7 @@ async def _forward_message(
         )
         return False
 
-    combined_content = "\n\n".join(
-        section for section in (clean_content, embed_text) if section
-    )
+    combined_content = "\n\n".join(section for section in (clean_content, embed_text) if section)
     customised_content = context.customization.render(combined_content)
     channel_label = context.mapping.display_name
 
