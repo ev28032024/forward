@@ -3,7 +3,7 @@
 
 telegram:
   token: "TELEGRAM_BOT_TOKEN"            # обязательный токен бота
-  chat: "@fallback_channel"             # чат по умолчанию для пересылки
+  chat: "@fallback_channel"              # чат по умолчанию для пересылки
   rate_limit:
     per_second: 0.8                      # сообщения в секунду (None = авто)
     per_minute: 25                       # сообщения в минуту (0 = без лимита)
@@ -19,8 +19,8 @@ telegram:
     attachments_style: minimal           # compact или minimal
 
 discord:
-  token: "DISCORD_USER_TOKEN"           # токен пользователя или бота
-  token_type: auto                      # auto/user/bot/bearer
+  token: "DISCORD_USER_TOKEN"            # токен пользователя или бота
+  token_type: auto                       # auto/user/bot/bearer
   rate_limit:
     per_second: 4.0                      # запросов в секунду (None = авто)
     per_minute: 60                       # запросов в минуту (0 = без лимита)
