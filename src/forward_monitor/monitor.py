@@ -13,13 +13,13 @@ import aiohttp
 
 from .config import (
     ChannelMapping,
+    CustomisedText,
+    FormattingProfile,
     MessageCustomization,
     MessageFilters,
     MonitorConfig,
     PreparedCustomization,
     PreparedFilters,
-    FormattingProfile,
-    CustomisedText,
 )
 from .discord_client import DiscordAPIError, DiscordClient
 from .formatter import (

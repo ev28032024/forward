@@ -32,6 +32,8 @@ class TelegramClient:
         "_current_proxy",
     )
 
+    _current_proxy: str | None
+
     def __init__(
         self,
         token: str,
@@ -178,7 +180,7 @@ class TelegramClient:
         retry_attempts: int,
         retry_statuses: Iterable[int] | None,
     ) -> Dict[str, Any]:
-        payload = {"chat_id": chat_id, media_field: media_value}
+        payload: Dict[str, Any] = {"chat_id": chat_id, media_field: media_value}
         if caption is not None:
             payload["caption"] = caption
         if parse_mode or self._default_parse_mode:
@@ -289,7 +291,8 @@ class TelegramClient:
                                     extra={"status": response.status, "proxy": proxy},
                                 )
                             raise RuntimeError(
-                                f"Telegram API request failed with status {response.status}: {detail}"
+                                "Telegram API request failed with status "
+                                f"{response.status}: {detail}"
                             )
 
                         payload = await response.json()

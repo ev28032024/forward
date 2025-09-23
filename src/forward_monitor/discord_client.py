@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import asyncio
 import logging
 import random
 from collections.abc import Mapping

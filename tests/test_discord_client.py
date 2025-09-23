@@ -199,9 +199,10 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(asyncio, "sleep", _sleep)
 
-    class FlakySession:
+    class FlakySession(_FakeSession):
         def __init__(self) -> None:
-            self.calls = 0
+            super().__init__(responses=())
+            self.call_count = 0
 
         def request(
             self,
@@ -212,8 +213,8 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
             params: Mapping[str, str] | None = None,
             proxy: str | None = None,
         ) -> _FakeResponse:
-            self.calls += 1
-            if self.calls == 1:
+            self.call_count += 1
+            if self.call_count == 1:
                 raise aiohttp.ClientConnectionError()
             return _FakeResponse(200, json_payload={"ok": True})
 
@@ -227,7 +228,7 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
     )
 
     assert result == {"ok": True}
-    assert session.calls == 2
+    assert session.call_count == 2
     assert len(delays) == 1
     assert 0.5 <= delays[0] <= 2.0
 

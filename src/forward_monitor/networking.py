@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import deque
+from types import TracebackType
 from typing import Iterable, Optional
 
 import aiohttp
@@ -43,7 +44,12 @@ class SoftRateLimiter:
         await self.acquire()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.release()
 
     async def acquire(self) -> None:
@@ -173,7 +179,9 @@ class ProxyPool:
             async with session.get(
                 url,
                 proxy=proxy,
-                timeout=self._settings.health_check_timeout,
+                timeout=aiohttp.ClientTimeout(
+                    total=self._settings.health_check_timeout
+                ),
             ) as response:
                 if response.status >= 400:
                     raise aiohttp.ClientError(f"status={response.status}")

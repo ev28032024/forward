@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
+from forward_monitor.config import CustomisedText
 from forward_monitor.formatter import (
     AttachmentInfo,
     FormattedMessage,
@@ -192,3 +193,21 @@ def test_format_splits_oversized_attachment_summary() -> None:
     assert "host0.example.com" in result.text
     assert "+3" in result.text
     assert result.extra_messages == ()
+
+
+def test_format_removes_duplicate_lines() -> None:
+    message = cast(DiscordMessage, {"author": {"username": "Tester"}, "id": 7})
+    customised = CustomisedText(
+        chips=("🔥",),
+        header_lines=("Заголовок", "заголовок"),
+        body_lines=("Повтор", "Повтор", "", "Основной текст", "Основной текст"),
+        footer_lines=("Финал", "Финал"),
+    )
+
+    result = format_announcement_message(123, message, customised, [])
+    lines = [line for line in result.text.splitlines() if line and not line.startswith("📢 ")]
+
+    assert lines.count("Заголовок") == 1
+    assert lines.count("Повтор") == 1
+    assert lines.count("Основной текст") == 1
+    assert lines.count("Финал") == 1
