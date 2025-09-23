@@ -162,9 +162,14 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                 config.discord_token,
                 session,
                 max_concurrency=_DEFAULT_DISCORD_CONCURRENCY,
+                token_type=config.discord_token_type,
             )
         except TypeError:
-            discord = DiscordClient(config.discord_token, session)
+            discord = DiscordClient(
+                config.discord_token,
+                session,
+                token_type=config.discord_token_type,
+            )
         telegram = TelegramClient(config.telegram_token, session)
 
         announcement_contexts = _channel_contexts(

@@ -4,14 +4,31 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from yaml import safe_load
+
+from .discord_client import TokenType
 
 DEFAULT_POLL_INTERVAL: Final[int] = 300
 DEFAULT_STATE_FILE: Final[Path] = Path("monitor_state.json")
 DEFAULT_MIN_MESSAGE_DELAY: Final[float] = 0.5
 DEFAULT_MAX_MESSAGE_DELAY: Final[float] = 2.0
+_ALLOWED_TOKEN_TYPES: tuple[TokenType, ...] = ("auto", "bot", "user", "bearer")
+
+
+def _normalize_token_type(value: object) -> TokenType:
+    candidate = "auto" if value is None else str(value).strip().lower()
+    if not candidate:
+        candidate = "auto"
+
+    if candidate not in _ALLOWED_TOKEN_TYPES:
+        allowed = ", ".join(_ALLOWED_TOKEN_TYPES)
+        raise ValueError(
+            f"Configuration field 'discord_token_type' must be one of: {allowed}"
+        )
+
+    return cast(TokenType, candidate)
 
 SUPPORTED_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
@@ -222,6 +239,7 @@ class MonitorConfig:
     discord_token: str
     telegram_token: str
     telegram_chat_id: str
+    discord_token_type: TokenType = "auto"
     announcement_channels: Sequence[ChannelMapping] = ()
     poll_interval: int = DEFAULT_POLL_INTERVAL
     state_file: Path = DEFAULT_STATE_FILE
@@ -232,6 +250,11 @@ class MonitorConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "discord_token", self.discord_token.strip())
+        object.__setattr__(
+            self,
+            "discord_token_type",
+            _normalize_token_type(self.discord_token_type),
+        )
         object.__setattr__(self, "telegram_token", self.telegram_token.strip())
         object.__setattr__(self, "telegram_chat_id", self.telegram_chat_id.strip())
         object.__setattr__(
@@ -252,6 +275,8 @@ class MonitorConfig:
         except KeyError as exc:  # pragma: no cover - defensive programming
             missing = exc.args[0]
             raise ValueError(f"Missing required configuration key: {missing}") from exc
+
+        token_type = _normalize_token_type(data.get("discord_token_type", "auto"))
 
         if not discord_token:
             raise ValueError("Configuration field 'discord_token' must not be empty")
@@ -288,6 +313,7 @@ class MonitorConfig:
 
         return cls(
             discord_token=discord_token,
+            discord_token_type=token_type,
             telegram_token=telegram_token,
             telegram_chat_id=telegram_chat_id,
             announcement_channels=announcement_channels,

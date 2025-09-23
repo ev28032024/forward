@@ -8,7 +8,12 @@ from typing import Any, cast
 import aiohttp
 import pytest
 
-from forward_monitor.discord_client import DISCORD_API_BASE, DiscordAPIError, DiscordClient
+from forward_monitor.discord_client import (
+    DISCORD_API_BASE,
+    DiscordAPIError,
+    DiscordClient,
+    _normalize_authorization_header,
+)
 
 
 class _FakeResponse:
@@ -88,6 +93,34 @@ async def test_fetch_messages_sorts_results_and_passes_params(
             "params": {"limit": "10", "after": "5"},
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("token", "token_type", "expected"),
+    [
+        ("abc123", "auto", "Bot abc123"),
+        ("abc123", "bot", "Bot abc123"),
+        ("Bot my-token", "bot", "Bot my-token"),
+        ("Bearer something", "auto", "Bearer something"),
+        ("token", "bearer", "Bearer token"),
+        ("mfa.something-long", "auto", "mfa.something-long"),
+        ("part1.part2.part3", "auto", "part1.part2.part3"),
+        (" value ", "user", "value"),
+    ],
+)
+def test_normalize_authorization_header_variants(
+    token: str, token_type: str, expected: str
+) -> None:
+    assert _normalize_authorization_header(token, token_type) == expected
+
+
+def test_normalize_authorization_header_defaults_to_auto() -> None:
+    assert _normalize_authorization_header("abc123") == "Bot abc123"
+
+
+def test_normalize_authorization_header_rejects_unknown_type() -> None:
+    with pytest.raises(ValueError):
+        _normalize_authorization_header("token", "invalid")  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

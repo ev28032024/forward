@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from time import perf_counter
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import aiohttp
 
@@ -19,6 +19,52 @@ _RATE_LIMIT_MAX_RETRIES = 5
 _NETWORK_MAX_RETRIES = 3
 _DEFAULT_MAX_CONCURRENCY = 8
 
+TokenType = Literal["auto", "bot", "user", "bearer"]
+
+
+def _normalize_authorization_header(
+    token: str, token_type: TokenType = "auto"
+) -> str:
+    """Return a Discord-ready Authorization header value.
+
+    The ``token_type`` argument allows callers to explicitly control how the
+    header should be formed.  When set to ``"auto"`` (the default) the function
+    keeps backwards compatibility with historical behaviour: only values that do
+    not resemble user or bearer tokens receive the ``"Bot "`` prefix.
+    """
+
+    normalized = token.strip()
+
+    if token_type == "bot":
+        if normalized.startswith("Bot "):
+            return normalized
+        return f"Bot {normalized}"
+
+    if token_type == "bearer":
+        if normalized.startswith("Bearer "):
+            return normalized
+        return f"Bearer {normalized}"
+
+    if token_type == "user":
+        return normalized
+
+    if token_type != "auto":
+        raise ValueError(f"Unknown Discord token type: {token_type}")
+
+    # User tokens (not recommended) start either with "mfa." or three segments
+    # separated by dots.  Bearer tokens already contain whitespace.  In those
+    # cases we should not force the "Bot " prefix.
+    if normalized.startswith("Bot ") or normalized.startswith("Bearer "):
+        return normalized
+
+    if normalized.startswith("mfa."):
+        return normalized
+
+    if normalized.count(".") == 2:
+        return normalized
+
+    return f"Bot {normalized}"
+
 
 class DiscordAPIError(RuntimeError):
     """Error raised when the Discord API returns a non-success response."""
@@ -29,7 +75,7 @@ class DiscordAPIError(RuntimeError):
         self.body = body
 
 
-__all__ = ["DiscordAPIError", "DiscordClient"]
+__all__ = ["DiscordAPIError", "DiscordClient", "TokenType"]
 
 
 class DiscordClient:
@@ -49,10 +95,13 @@ class DiscordClient:
         session: aiohttp.ClientSession,
         *,
         max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
+        token_type: TokenType = "auto",
     ) -> None:
         self._session = session
         self._headers = dict(_DEFAULT_HEADERS)
-        self._headers["Authorization"] = token
+        self._headers["Authorization"] = _normalize_authorization_header(
+            token, token_type
+        )
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self._rate_limit_lock = asyncio.Lock()
         self._next_request_time = 0.0

@@ -19,6 +19,7 @@ python -m forward_monitor --config config.yml
 
 ```yaml
 discord_token: "DISCORD_USER_TOKEN"
+discord_token_type: user  # auto, user, bot или bearer
 telegram_token: "TELEGRAM_BOT_TOKEN"
 telegram_chat_id: "@fallback_channel"  # используется, если у канала нет собственного чата
 
@@ -28,6 +29,10 @@ announcement_channels:
     display_name: "#announcements"  # человеко-читаемый заголовок в сообщении
   - discord_channel_id: 234567890123456789  # сообщения уйдут в fallback-чат
 ```
+
+Поле `discord_token_type` задаёт формат токена: `user` для пользовательских токенов,
+`bot` для токенов ботов без префикса, `bearer` для OAuth и `auto` (по умолчанию),
+который пытается угадать нужный вариант и сохраняет обратную совместимость.
 
 Опционально доступны глобальные фильтры и кастомизация текста. Их можно переопределять на уровне отдельного канала.
 
