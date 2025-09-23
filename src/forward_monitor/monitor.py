@@ -273,10 +273,14 @@ async def _sync_announcements(
             continue
 
         total_fetched += len(messages)
+        last_processed_id: str | None = None
 
         for message in messages:
+            message_id = str(message.get("id", "")).strip()
+            if not message_id:
+                continue
             try:
-                await _forward_message(
+                forwarded = await _forward_message(
                     context=context,
                     channel_id=channel_id,
                     message=message,
@@ -285,13 +289,17 @@ async def _sync_announcements(
                     min_delay=min_delay,
                     max_delay=max_delay,
                 )
-                total_forwarded += 1
             except asyncio.CancelledError:
                 raise
             except RuntimeError:
-                continue
+                break
+            else:
+                last_processed_id = message_id
+                if forwarded:
+                    total_forwarded += 1
 
-        state.update_last_message_id(channel_id, messages[-1]["id"])
+        if last_processed_id is not None:
+            state.update_last_message_id(channel_id, last_processed_id)
 
     return total_fetched, total_forwarded
 
@@ -402,7 +410,7 @@ async def _forward_message(
     formatter: AnnouncementFormatter,
     min_delay: float,
     max_delay: float,
-) -> None:
+) -> bool:
     start = perf_counter()
     message_id = str(message.get("id", "")) or None
     clean_content = clean_discord_content(message)
@@ -438,7 +446,7 @@ async def _forward_message(
             channel_id,
             reason or "filters",
         )
-        return
+        return False
 
     combined_content = "\n\n".join(
         section for section in (clean_content, embed_text) if section
@@ -500,6 +508,8 @@ async def _forward_message(
             "extra_messages": len(formatted.extra_messages),
         },
     )
+
+    return True
 
 
 async def _sleep_with_jitter(min_delay: float, max_delay: float) -> None:
