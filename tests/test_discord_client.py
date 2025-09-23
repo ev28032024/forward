@@ -8,6 +8,11 @@ from typing import Any, cast
 import aiohttp
 import pytest
 
+from forward_monitor.config import (
+    ProxyPoolSettings,
+    RateLimitSettings,
+    UserAgentSettings,
+)
 from forward_monitor.discord_client import (
     DISCORD_API_BASE,
     DiscordAPIError,
@@ -15,6 +20,7 @@ from forward_monitor.discord_client import (
     TokenType,
     _normalize_authorization_header,
 )
+from forward_monitor.networking import ProxyPool, SoftRateLimiter, UserAgentProvider
 
 
 class _FakeResponse:
@@ -61,11 +67,45 @@ class _FakeSession:
         *,
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, str] | None = None,
+        proxy: str | None = None,
     ) -> _FakeResponse:
-        self.calls.append({"method": method, "url": url, "params": dict(params or {})})
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "params": dict(params or {}),
+                "proxy": proxy,
+            }
+        )
         if not self._responses:
             raise AssertionError("No fake responses left to return")
         return self._responses.pop(0)
+
+
+def _discord_client(session: aiohttp.ClientSession | _FakeSession) -> DiscordClient:
+    settings = RateLimitSettings(
+        per_second=None,
+        per_minute=None,
+        concurrency=1,
+        jitter_min_ms=0,
+        jitter_max_ms=0,
+        cooldown_seconds=0,
+    )
+    limiter = SoftRateLimiter(settings, name="discord-test")
+    proxy_pool = ProxyPool(ProxyPoolSettings(), name="discord-test")
+    agent_settings = UserAgentSettings(
+        desktop=("TestDesktopUA/1.0",),
+        mobile=("TestMobileUA/1.0",),
+        mobile_ratio=0.0,
+    )
+    agents = UserAgentProvider(agent_settings)
+    return DiscordClient(
+        "token",
+        cast(aiohttp.ClientSession, session),
+        rate_limiter=limiter,
+        proxy_pool=proxy_pool,
+        user_agents=agents,
+    )
 
 
 @pytest.mark.asyncio
@@ -82,7 +122,7 @@ async def test_fetch_messages_sorts_results_and_passes_params(
         json_payload=[{"id": "3"}, {"id": "1"}, {"id": "2"}],
     )
     session = _FakeSession([response])
-    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
+    client = _discord_client(session)
 
     result = await client.fetch_messages(123, after="5", limit=10)
 
@@ -92,6 +132,7 @@ async def test_fetch_messages_sorts_results_and_passes_params(
             "method": "GET",
             "url": f"{DISCORD_API_BASE}/channels/123/messages",
             "params": {"limit": "10", "after": "5"},
+            "proxy": None,
         }
     ]
 
@@ -139,12 +180,13 @@ async def test_fetch_messages_waits_for_rate_limit(monkeypatch: pytest.MonkeyPat
             _FakeResponse(200, json_payload=[{"id": "1"}]),
         ]
     )
-    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
+    client = _discord_client(session)
 
     messages = await client.fetch_messages(42)
 
     assert messages == [{"id": "1"}]
-    assert recorded_delays == [pytest.approx(0.25, abs=0.01)]
+    assert len(recorded_delays) == 1
+    assert 0.5 <= recorded_delays[0] <= 2.0
     assert len(session.calls) == 2
 
 
@@ -168,6 +210,7 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
             *,
             headers: Mapping[str, str] | None = None,
             params: Mapping[str, str] | None = None,
+            proxy: str | None = None,
         ) -> _FakeResponse:
             self.calls += 1
             if self.calls == 1:
@@ -175,7 +218,7 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
             return _FakeResponse(200, json_payload={"ok": True})
 
     session = FlakySession()
-    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
+    client = _discord_client(session)
 
     result = await client._request_json(  # pylint: disable=protected-access
         "GET",
@@ -185,7 +228,8 @@ async def test_request_json_retries_on_network_errors(monkeypatch: pytest.Monkey
 
     assert result == {"ok": True}
     assert session.calls == 2
-    assert delays == [1]
+    assert len(delays) == 1
+    assert 0.5 <= delays[0] <= 2.0
 
 
 @pytest.mark.asyncio
@@ -203,7 +247,7 @@ async def test_request_json_raises_after_rate_limit_retries(
             _FakeResponse(429, json_payload={"retry_after": 0}, text="retry"),
         ]
     )
-    client = DiscordClient("token", cast(aiohttp.ClientSession, session))
+    client = _discord_client(session)
 
     with pytest.raises(DiscordAPIError):
         await client._request_json("GET", "https://example.com", max_rate_limit_retries=1)

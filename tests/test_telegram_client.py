@@ -4,12 +4,18 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 import aiohttp
 import pytest
 
 from forward_monitor import telegram_client
+from forward_monitor.config import (
+    ProxyPoolSettings,
+    RateLimitSettings,
+    UserAgentSettings,
+)
+from forward_monitor.networking import ProxyPool, SoftRateLimiter, UserAgentProvider
 from forward_monitor.telegram_client import TelegramClient
 
 
@@ -43,7 +49,14 @@ class _FakeSession:
         self._responses: list[_FakeResponse | Exception] = list(responses)
         self.calls = 0
 
-    def post(self, url: str, *, json: dict[str, Any]) -> _FakeResponse:
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        proxy: str | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> _FakeResponse:
         # aiohttp returns an awaitable context manager; our fake response already
         # implements the async context management protocol, so we simply return it.
         response = self._responses[min(self.calls, len(self._responses) - 1)]
@@ -53,10 +66,38 @@ class _FakeSession:
         return response
 
 
+def _telegram_client(session: aiohttp.ClientSession | _FakeSession) -> TelegramClient:
+    settings = RateLimitSettings(
+        per_second=None,
+        per_minute=None,
+        concurrency=1,
+        jitter_min_ms=0,
+        jitter_max_ms=0,
+        cooldown_seconds=0,
+    )
+    limiter = SoftRateLimiter(settings, name="telegram-test")
+    proxy_pool = ProxyPool(ProxyPoolSettings(), name="telegram-test")
+    agent_settings = UserAgentSettings(
+        desktop=("TestDesktopUA/1.0",),
+        mobile=("TestMobileUA/1.0",),
+        mobile_ratio=0.0,
+    )
+    agents = UserAgentProvider(agent_settings)
+    return TelegramClient(
+        "token",
+        cast(aiohttp.ClientSession, session),
+        rate_limiter=limiter,
+        proxy_pool=proxy_pool,
+        user_agents=agents,
+        default_disable_preview=True,
+        default_parse_mode="HTML",
+    )
+
+
 @pytest.mark.asyncio
 async def test_post_respects_explicit_retry_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession([_FakeResponse(429, text="rate limited")])
-    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
+    client = _telegram_client(session)
 
     async def _unexpected_retry(_: Any) -> float:
         raise AssertionError("retry helper must not be called when retries are disabled")
@@ -81,13 +122,14 @@ async def test_post_retries_on_network_errors(monkeypatch: pytest.MonkeyPatch) -
     session = _FakeSession(
         [aiohttp.ClientOSError(0, "boom"), _FakeResponse(200, json_payload={"ok": True})]
     )
-    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
+    client = _telegram_client(session)
 
     response = await client.send_message("chat", "hello", retry_attempts=2)
 
     assert response == {"ok": True}
     assert session.calls == 2
-    assert delays == [1.0]
+    assert len(delays) == 1
+    assert 0.5 <= delays[0] <= 2.0
 
 
 @pytest.mark.asyncio
@@ -96,7 +138,7 @@ async def test_post_raises_on_unsuccessful_payload() -> None:
         200, json_payload={"ok": False, "description": "chat not found", "error_code": 400}
     )
     session = _FakeSession([response])
-    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
+    client = _telegram_client(session)
 
     with pytest.raises(RuntimeError) as excinfo:
         await client.send_message("chat", "hello")
@@ -114,7 +156,7 @@ async def test_post_raises_after_network_error_retries(monkeypatch: pytest.Monke
     monkeypatch.setattr(telegram_client.asyncio, "sleep", _sleep)
 
     session = _FakeSession([aiohttp.ClientOSError(0, "boom")] * 3)
-    client = TelegramClient("token", cast(aiohttp.ClientSession, session))
+    client = _telegram_client(session)
 
     with pytest.raises(RuntimeError):
         await client.send_message("chat", "hello", retry_attempts=2)

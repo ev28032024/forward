@@ -1,23 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import asyncio
 import logging
+import random
 from collections.abc import Mapping
 from time import perf_counter
 from typing import Any, Literal, Optional
 
 import aiohttp
 
+from .networking import ProxyPool, SoftRateLimiter, UserAgentProvider
 from .structured_logging import log_event
 from .types import DiscordMessage
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 _DEFAULT_HEADERS: Mapping[str, str] = {
-    "User-Agent": "forward-monitor/0.1",
+    "Accept": "application/json",
 }
 _RATE_LIMIT_MAX_RETRIES = 5
 _NETWORK_MAX_RETRIES = 3
-_DEFAULT_MAX_CONCURRENCY = 8
+_SUSPICIOUS_KEYWORDS = (
+    "captcha",
+    "verify",
+    "unusual",
+    "temporary",
+    "suspicious",
+)
 
 TokenType = Literal["auto", "bot", "user", "bearer"]
 
@@ -79,14 +88,16 @@ __all__ = ["DiscordAPIError", "DiscordClient", "TokenType"]
 
 
 class DiscordClient:
-    """Simple HTTP client for the Discord REST API."""
+    """HTTP client for the Discord REST API with adaptive protections."""
 
     __slots__ = (
         "_session",
         "_headers",
-        "_semaphore",
-        "_rate_limit_lock",
-        "_next_request_time",
+        "_rate_limiter",
+        "_proxy_pool",
+        "_user_agents",
+        "_current_proxy",
+        "_suspicion_count",
     )
 
     def __init__(
@@ -94,7 +105,9 @@ class DiscordClient:
         token: str,
         session: aiohttp.ClientSession,
         *,
-        max_concurrency: int = _DEFAULT_MAX_CONCURRENCY,
+        rate_limiter: SoftRateLimiter,
+        proxy_pool: ProxyPool,
+        user_agents: UserAgentProvider,
         token_type: TokenType = "auto",
     ) -> None:
         self._session = session
@@ -102,9 +115,11 @@ class DiscordClient:
         self._headers["Authorization"] = _normalize_authorization_header(
             token, token_type
         )
-        self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
-        self._rate_limit_lock = asyncio.Lock()
-        self._next_request_time = 0.0
+        self._rate_limiter = rate_limiter
+        self._proxy_pool = proxy_pool
+        self._user_agents = user_agents
+        self._current_proxy: str | None = None
+        self._suspicion_count = 0
 
     async def fetch_messages(
         self,
@@ -141,16 +156,42 @@ class DiscordClient:
         attempts = 0
         network_attempts = 0
         while True:
-            await self._respect_rate_limit()
+            proxy = await self._proxy_pool.get_proxy()
+            if not await self._proxy_pool.ensure_healthy(proxy, self._session):
+                await asyncio.sleep(0.5)
+                continue
+
+            if proxy != self._current_proxy:
+                log_event(
+                    "discord_proxy_switch",
+                    level=logging.INFO,
+                    discord_channel_id=discord_channel_id,
+                    discord_message_id=None,
+                    telegram_chat_id=None,
+                    attempt=None,
+                    outcome="switch",
+                    latency_ms=None,
+                    extra={"proxy": proxy or "direct"},
+                )
+                self._current_proxy = proxy
+
+            headers = dict(self._headers)
+            headers["User-Agent"] = self._user_agents.pick()
+
             start = perf_counter()
             try:
-                async with self._semaphore:
+                async with self._rate_limiter:
                     async with self._session.request(
-                        method, url, headers=self._headers, params=params
+                        method,
+                        url,
+                        headers=headers,
+                        params=params,
+                        proxy=proxy,
                     ) as response:
                         elapsed_ms = (perf_counter() - start) * 1000
                         network_attempts = 0
-                        if response.status == 429:
+
+                        if response.status == 429 or response.status >= 500:
                             attempts += 1
                             if attempts > max_rate_limit_retries:
                                 text = await response.text()
@@ -163,14 +204,20 @@ class DiscordClient:
                                     attempt=attempts,
                                     outcome="failure",
                                     latency_ms=elapsed_ms,
-                                    extra={"url": url, "status": response.status},
+                                    extra={"url": url, "status": response.status, "proxy": proxy},
                                 )
                                 raise DiscordAPIError(response.status, text)
 
-                            retry_after = await _rate_limit_delay_seconds(response)
-                            expected_until = await self._register_rate_limit_delay(
-                                retry_after
+                            retry_after = await _retry_after_seconds(response)
+                            backoff = min(2 ** attempts, 60.0)
+                            delay = max(retry_after, random.uniform(0.5, backoff))
+                            await self._rate_limiter.impose_cooldown(
+                                self._rate_limiter.settings.cooldown_seconds
                             )
+                            if proxy:
+                                await self._proxy_pool.mark_bad(
+                                    proxy, reason=f"status_{response.status}"
+                                )
                             log_event(
                                 "discord_rate_limited",
                                 level=logging.WARNING,
@@ -180,14 +227,42 @@ class DiscordClient:
                                 attempt=attempts,
                                 outcome="retry",
                                 latency_ms=elapsed_ms,
-                                extra={"retry_after": retry_after, "url": url},
+                                extra={
+                                    "retry_after": delay,
+                                    "status": response.status,
+                                    "url": url,
+                                    "proxy": proxy,
+                                },
                             )
-                            await asyncio.sleep(retry_after)
-                            await self._mark_rate_limit_consumed(expected_until)
+                            await asyncio.sleep(delay)
                             continue
 
                         if response.status >= 400:
                             text = await response.text()
+                            if response.status in {401, 403} or _looks_suspicious(text):
+                                self._suspicion_count += 1
+                                cooldown = (
+                                    self._rate_limiter.settings.cooldown_seconds
+                                    * min(self._suspicion_count, 3)
+                                )
+                                await self._rate_limiter.impose_cooldown(cooldown)
+                                if proxy:
+                                    await self._proxy_pool.mark_bad(
+                                        proxy, reason=f"suspicious_{response.status}"
+                                    )
+                                log_event(
+                                    "discord_suspicious_response",
+                                    level=logging.WARNING,
+                                    discord_channel_id=discord_channel_id,
+                                    discord_message_id=None,
+                                    telegram_chat_id=None,
+                                    attempt=attempts + 1,
+                                    outcome="cooldown",
+                                    latency_ms=elapsed_ms,
+                                    extra={"status": response.status, "url": url, "proxy": proxy},
+                                )
+                            else:
+                                self._suspicion_count = 0
                             log_event(
                                 "discord_http_error",
                                 level=logging.ERROR,
@@ -197,7 +272,7 @@ class DiscordClient:
                                 attempt=attempts + 1,
                                 outcome="failure",
                                 latency_ms=elapsed_ms,
-                                extra={"status": response.status, "url": url},
+                                extra={"status": response.status, "url": url, "proxy": proxy},
                             )
                             raise DiscordAPIError(response.status, text)
 
@@ -213,13 +288,16 @@ class DiscordClient:
                                 attempt=attempts + 1,
                                 outcome="failure",
                                 latency_ms=elapsed_ms,
-                                extra={"content_type": content_type, "url": url},
+                                extra={"content_type": content_type, "url": url, "proxy": proxy},
                             )
                             raise RuntimeError(
                                 "Unexpected content type "
                                 f"'{content_type}' from Discord API: {text[:200]}"
                             )
+
                         payload = await response.json()
+                        self._suspicion_count = 0
+                        await self._proxy_pool.mark_success(proxy)
                         log_event(
                             "discord_request_succeeded",
                             level=logging.DEBUG,
@@ -229,12 +307,14 @@ class DiscordClient:
                             attempt=attempts + 1,
                             outcome="success",
                             latency_ms=elapsed_ms,
-                            extra={"url": url},
+                            extra={"url": url, "proxy": proxy},
                         )
                         return payload
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 network_attempts += 1
                 elapsed_ms = (perf_counter() - start) * 1000
+                if proxy:
+                    await self._proxy_pool.mark_bad(proxy, reason=type(exc).__name__)
                 if network_attempts > max_network_retries:
                     log_event(
                         "discord_network_failure",
@@ -245,10 +325,11 @@ class DiscordClient:
                         attempt=network_attempts,
                         outcome="failure",
                         latency_ms=elapsed_ms,
-                        extra={"url": url, "error": type(exc).__name__},
+                        extra={"url": url, "error": type(exc).__name__, "proxy": proxy},
                     )
                     raise
-                backoff = min(2 ** (network_attempts - 1), 30)
+                backoff = min(2 ** network_attempts, 30.0)
+                delay = random.uniform(0.5, backoff)
                 log_event(
                     "discord_network_retry",
                     level=logging.WARNING,
@@ -258,45 +339,12 @@ class DiscordClient:
                     attempt=network_attempts,
                     outcome="retry",
                     latency_ms=elapsed_ms,
-                    extra={"url": url, "backoff_seconds": backoff},
+                    extra={"url": url, "backoff_seconds": delay, "proxy": proxy},
                 )
-                await asyncio.sleep(backoff)
-
-    async def _respect_rate_limit(self) -> None:
-        loop = asyncio.get_running_loop()
-        async with self._rate_limit_lock:
-            now = loop.time()
-            target_time = self._next_request_time
-            delay = target_time - now
-            if delay <= 0:
-                self._next_request_time = now
-                return
-
-        await asyncio.sleep(delay)
-
-        async with self._rate_limit_lock:
-            now = loop.time()
-            if self._next_request_time == target_time:
-                self._next_request_time = now
-
-    async def _register_rate_limit_delay(self, retry_after: float) -> float:
-        loop = asyncio.get_running_loop()
-        async with self._rate_limit_lock:
-            now = loop.time()
-            proposed = now + max(retry_after, 0.0)
-            if proposed > self._next_request_time:
-                self._next_request_time = proposed
-            return self._next_request_time
-
-    async def _mark_rate_limit_consumed(self, expected_time: float) -> None:
-        loop = asyncio.get_running_loop()
-        async with self._rate_limit_lock:
-            now = loop.time()
-            if self._next_request_time == expected_time or self._next_request_time < now:
-                self._next_request_time = now
+                await asyncio.sleep(delay)
 
 
-async def _rate_limit_delay_seconds(response: aiohttp.ClientResponse) -> float:
+async def _retry_after_seconds(response: aiohttp.ClientResponse) -> float:
     try:
         payload = await response.json()
     except aiohttp.ContentTypeError:
@@ -307,3 +355,8 @@ async def _rate_limit_delay_seconds(response: aiohttp.ClientResponse) -> float:
         return max(float(retry_after), 0.0)
     except (TypeError, ValueError):
         return 1.0
+
+
+def _looks_suspicious(body: str) -> bool:
+    lower = body.casefold()
+    return any(keyword in lower for keyword in _SUSPICIOUS_KEYWORDS)

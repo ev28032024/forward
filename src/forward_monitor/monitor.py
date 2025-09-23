@@ -18,6 +18,8 @@ from .config import (
     MonitorConfig,
     PreparedCustomization,
     PreparedFilters,
+    FormattingProfile,
+    CustomisedText,
 )
 from .discord_client import DiscordAPIError, DiscordClient
 from .formatter import (
@@ -28,6 +30,7 @@ from .formatter import (
     extract_embed_text,
     format_announcement_message,
 )
+from .networking import ProxyPool, SoftRateLimiter, UserAgentProvider
 from .state import MonitorState
 from .structured_logging import log_event
 from .telegram_client import TelegramClient
@@ -43,11 +46,12 @@ class AnnouncementFormatter(Protocol):
         self,
         channel_id: int,
         message: Mapping[str, Any],
-        content: str,
+        content: CustomisedText,
         attachments: Sequence[AttachmentInfo],
         *,
         embed_text: str | None = None,
         channel_label: str | None = None,
+        formatting: FormattingProfile | None = None,
     ) -> FormattedMessage:
         """Format a message ready to be sent to Telegram."""
 
@@ -64,7 +68,14 @@ class DiscordService(Protocol):
 
 
 class TelegramSender(Protocol):
-    async def send_message(self, chat_id: str, text: str) -> Any: ...
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        parse_mode: str | None = ...,
+        disable_web_page_preview: bool | None = ...,
+    ) -> Any: ...
 
     async def send_photo(
         self,
@@ -72,6 +83,7 @@ class TelegramSender(Protocol):
         photo: str,
         *,
         caption: str | None = ...,
+        parse_mode: str | None = ...,
     ) -> Any: ...
 
     async def send_video(
@@ -80,6 +92,7 @@ class TelegramSender(Protocol):
         video: str,
         *,
         caption: str | None = ...,
+        parse_mode: str | None = ...,
     ) -> Any: ...
 
     async def send_audio(
@@ -88,6 +101,7 @@ class TelegramSender(Protocol):
         audio: str,
         *,
         caption: str | None = ...,
+        parse_mode: str | None = ...,
     ) -> Any: ...
 
     async def send_document(
@@ -96,6 +110,7 @@ class TelegramSender(Protocol):
         document: str,
         *,
         caption: str | None = ...,
+        parse_mode: str | None = ...,
     ) -> Any: ...
 
 
@@ -108,9 +123,6 @@ class StateStore(Protocol):
 _DISCORD_FETCH_LIMIT = 100
 _MAX_MESSAGES_PER_CHANNEL = 1000
 _MAX_FETCH_SECONDS = 5.0
-_DEFAULT_DISCORD_CONCURRENCY = 8
-
-
 @dataclass(frozen=True, slots=True)
 class ChannelContext:
     """Pre-computed filters and customisation for a Discord channel."""
@@ -118,6 +130,7 @@ class ChannelContext:
     mapping: ChannelMapping
     filters: PreparedFilters
     customization: PreparedCustomization
+    formatting: FormattingProfile
 
 
 @dataclass(slots=True)
@@ -131,6 +144,7 @@ class _ChannelFetchResult:
 def _channel_contexts(
     global_filters: MessageFilters,
     global_customization: MessageCustomization,
+    global_formatting: FormattingProfile,
     channel_mappings: Iterable[ChannelMapping],
 ) -> list[ChannelContext]:
     contexts: list[ChannelContext] = []
@@ -139,11 +153,13 @@ def _channel_contexts(
         combined_customization = (
             global_customization.combine(mapping.customization).prepare()
         )
+        combined_formatting = global_formatting.merge(mapping.formatting)
         contexts.append(
             ChannelContext(
                 mapping=mapping,
                 filters=combined_filters,
                 customization=combined_customization,
+                formatting=combined_formatting,
             )
         )
     return contexts
@@ -152,28 +168,50 @@ def _channel_contexts(
 async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
     """Start the monitoring loop."""
 
-    state = MonitorState(config.state_file)
+    state = MonitorState(config.runtime.state_file)
 
     timeout = aiohttp.ClientTimeout(total=60)
     connector = aiohttp.TCPConnector(limit=64, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-        try:
-            discord = DiscordClient(
-                config.discord_token,
-                session,
-                max_concurrency=_DEFAULT_DISCORD_CONCURRENCY,
-                token_type=config.discord_token_type,
-            )
-        except TypeError:
-            discord = DiscordClient(
-                config.discord_token,
-                session,
-                token_type=config.discord_token_type,
-            )
-        telegram = TelegramClient(config.telegram_token, session)
+        discord_rate_limiter = SoftRateLimiter(
+            config.discord.rate_limit, name="discord"
+        )
+        telegram_rate_limiter = SoftRateLimiter(
+            config.telegram.rate_limit, name="telegram"
+        )
+        user_agents = config.network.user_agents
+        discord_user_agents = UserAgentProvider(user_agents)
+        telegram_user_agents = UserAgentProvider(user_agents)
+        discord_proxy = ProxyPool(
+            config.network.proxy_for_service("discord"), name="discord"
+        )
+        telegram_proxy = ProxyPool(
+            config.network.proxy_for_service("telegram"), name="telegram"
+        )
+
+        discord = DiscordClient(
+            config.discord.token,
+            session,
+            rate_limiter=discord_rate_limiter,
+            proxy_pool=discord_proxy,
+            user_agents=discord_user_agents,
+            token_type=config.discord.token_type,
+        )
+        telegram = TelegramClient(
+            config.telegram.token,
+            session,
+            rate_limiter=telegram_rate_limiter,
+            proxy_pool=telegram_proxy,
+            user_agents=telegram_user_agents,
+            default_disable_preview=config.telegram.formatting.disable_link_preview,
+            default_parse_mode=config.telegram.formatting.parse_mode,
+        )
 
         announcement_contexts = _channel_contexts(
-            config.filters, config.customization, config.announcement_channels
+            config.defaults.filters,
+            config.defaults.customization,
+            config.defaults.formatting,
+            config.channels,
         )
 
         iteration = 0
@@ -186,8 +224,8 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     discord,
                     telegram,
                     state,
-                    config.min_message_delay,
-                    config.max_message_delay,
+                    config.runtime.min_delay,
+                    config.runtime.max_delay,
                 )
                 log_event(
                     "monitor_iteration_complete",
@@ -230,7 +268,7 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
             if once:
                 break
 
-            await asyncio.sleep(config.poll_interval)
+            await asyncio.sleep(config.runtime.poll_interval)
 
 
 async def _sync_announcements(
@@ -457,7 +495,7 @@ async def _forward_message(
     combined_content = "\n\n".join(
         section for section in (clean_content, embed_text) if section
     )
-    customised_content = context.customization.apply(combined_content)
+    customised_content = context.customization.render(combined_content)
     channel_label = context.mapping.display_name
 
     formatted = formatter(
@@ -467,16 +505,27 @@ async def _forward_message(
         attachments,
         embed_text="",
         channel_label=channel_label,
+        formatting=context.formatting,
     )
 
     chat_id = context.mapping.telegram_chat_id
     try:
-        await telegram.send_message(chat_id, formatted.text)
+        await telegram.send_message(
+            chat_id,
+            formatted.text,
+            parse_mode=formatted.parse_mode,
+            disable_web_page_preview=formatted.disable_preview,
+        )
         await _sleep_with_jitter(min_delay, max_delay)
         for extra_text in formatted.extra_messages:
             if not extra_text:
                 continue
-            await telegram.send_message(chat_id, extra_text)
+            await telegram.send_message(
+                chat_id,
+                extra_text,
+                parse_mode=formatted.parse_mode,
+                disable_web_page_preview=formatted.disable_preview,
+            )
             await _sleep_with_jitter(min_delay, max_delay)
         await _send_attachments(
             telegram,
@@ -485,6 +534,7 @@ async def _forward_message(
             attachment_categories,
             min_delay,
             max_delay,
+            parse_mode=formatted.parse_mode,
         )
     except RuntimeError as exc:
         log_event(
@@ -701,12 +751,13 @@ async def _send_attachments(
     attachment_categories: Sequence[str],
     min_delay: float,
     max_delay: float,
+    parse_mode: str | None,
 ) -> None:
     for attachment, category in zip(attachments, attachment_categories):
         caption = _attachment_caption(attachment)
         try:
             await _send_single_attachment(
-                telegram, chat_id, attachment.url, category, caption
+                telegram, chat_id, attachment.url, category, caption, parse_mode
             )
         finally:
             await _sleep_with_jitter(min_delay, max_delay)
@@ -718,15 +769,16 @@ async def _send_single_attachment(
     url: str,
     category: str,
     caption: str | None,
+    parse_mode: str | None,
 ) -> None:
     if category == "image":
-        await telegram.send_photo(chat_id, url, caption=caption)
+        await telegram.send_photo(chat_id, url, caption=caption, parse_mode=parse_mode)
     elif category == "video":
-        await telegram.send_video(chat_id, url, caption=caption)
+        await telegram.send_video(chat_id, url, caption=caption, parse_mode=parse_mode)
     elif category == "audio":
-        await telegram.send_audio(chat_id, url, caption=caption)
+        await telegram.send_audio(chat_id, url, caption=caption, parse_mode=parse_mode)
     else:
-        await telegram.send_document(chat_id, url, caption=caption)
+        await telegram.send_document(chat_id, url, caption=caption, parse_mode=parse_mode)
 
 
 def _attachment_caption(attachment: AttachmentInfo) -> str | None:
