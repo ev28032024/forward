@@ -308,7 +308,7 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_announcements_continues_after_forward_error(
+async def test_sync_announcements_stops_after_forward_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = ChannelContext(
@@ -335,13 +335,14 @@ async def test_sync_announcements_continues_after_forward_error(
     forwarded: list[str] = []
     error_triggered = False
 
-    async def failing_forward(**kwargs: Any) -> None:
+    async def failing_forward(**kwargs: Any) -> bool:
         nonlocal error_triggered
         message = kwargs["message"]
         if not error_triggered:
             error_triggered = True
             raise RuntimeError("boom")
         forwarded.append(message["content"])
+        return True
 
     monkeypatch.setattr("forward_monitor.monitor._forward_message", failing_forward)
 
@@ -357,7 +358,53 @@ async def test_sync_announcements_continues_after_forward_error(
         max_delay=0,
     )
 
-    assert forwarded == ["second"]
-    assert state._values[7] == "32"
+    assert forwarded == []
+    assert 7 not in state._values
+    assert fetched == 2
+    assert forwarded_count == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_announcements_counts_only_forwarded_messages() -> None:
+    context = ChannelContext(
+        mapping=ChannelMapping(discord_channel_id=8, telegram_chat_id="chat"),
+        filters=MessageFilters(whitelist=("keep",)).prepare(),
+        customization=MessageCustomization().prepare(),
+    )
+
+    class FilteringDiscord:
+        async def fetch_messages(
+            self,
+            channel_id: int,
+            *,
+            after: str | None = None,
+            limit: int = 100,
+        ) -> list[DiscordMessage]:
+            return [
+                cast(
+                    DiscordMessage,
+                    {"id": "41", "author": {"id": "1"}, "content": "ignore"},
+                ),
+                cast(
+                    DiscordMessage,
+                    {"id": "42", "author": {"id": "1"}, "content": "keep me"},
+                ),
+            ]
+
+    telegram = StubTelegram()
+    state = DummyState()
+
+    fetched, forwarded_count = await _sync_announcements(
+        [context],
+        FilteringDiscord(),
+        telegram,
+        state,
+        min_delay=0,
+        max_delay=0,
+    )
+
     assert fetched == 2
     assert forwarded_count == 1
+    assert state._values[8] == "42"
+    assert any("keep me" in text for _, text in telegram.sent)
+    assert all("ignore" not in text for _, text in telegram.sent)

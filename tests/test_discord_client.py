@@ -12,6 +12,7 @@ from forward_monitor.discord_client import (
     DISCORD_API_BASE,
     DiscordAPIError,
     DiscordClient,
+    TokenType,
     _normalize_authorization_header,
 )
 
@@ -109,7 +110,7 @@ async def test_fetch_messages_sorts_results_and_passes_params(
     ],
 )
 def test_normalize_authorization_header_variants(
-    token: str, token_type: str, expected: str
+    token: str, token_type: TokenType, expected: str
 ) -> None:
     assert _normalize_authorization_header(token, token_type) == expected
 
