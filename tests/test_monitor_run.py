@@ -4,8 +4,9 @@ import asyncio
 import json
 from pathlib import Path
 from types import TracebackType
-from typing import Sequence
+from typing import Sequence, cast
 
+import aiohttp
 import pytest
 
 from forward_monitor import monitor
@@ -20,6 +21,7 @@ from forward_monitor.config import (
     NetworkSettings,
     TelegramSettings,
 )
+from forward_monitor.networking import ProxyPool
 
 
 class DummySession:
@@ -163,7 +165,8 @@ async def test_run_monitor_logs_startup_user_agents(
     events: list[tuple[str, dict[str, object]]] = []
 
     def capture_event(event: str, **payload: object) -> None:
-        events.append((event, payload))
+        payload_copy: dict[str, object] = dict(payload)
+        events.append((event, payload_copy))
 
     monkeypatch.setattr(monitor, "_sync_announcements", fake_sync)
     monkeypatch.setattr(monitor, "_verify_startup_proxies", capture_verify)
@@ -195,11 +198,16 @@ async def test_run_monitor_logs_startup_user_agents(
 
     await monitor.run_monitor(config, once=True)
 
-    services = {
-        payload.get("extra", {}).get("service")
-        for event, payload in events
-        if event == "startup_user_agent"
-    }
+    services: set[str] = set()
+    for event, payload in events:
+        if event != "startup_user_agent":
+            continue
+        extra = payload.get("extra")
+        if not isinstance(extra, dict):
+            continue
+        service = extra.get("service")
+        if isinstance(service, str):
+            services.add(service)
     assert services == {"discord", "telegram"}
     assert verify_calls, "Expected proxies to be validated before the monitor loop"
 
@@ -215,28 +223,31 @@ async def test_verify_startup_proxies_fails_when_unhealthy(
         def endpoints(self) -> tuple[str, ...]:
             return ("http://proxy.invalid",)
 
-        async def ensure_healthy(self, proxy: str, session: object) -> bool:
+        async def ensure_healthy(self, proxy: str | None, session: aiohttp.ClientSession) -> bool:
             assert proxy == "http://proxy.invalid"
-            assert session is dummy_session
+            session_obj = cast(DummySession, session)
+            assert session_obj is dummy_session
             return False
 
     events: list[tuple[str, dict[str, object]]] = []
 
     def capture_event(event: str, **payload: object) -> None:
-        events.append((event, payload))
+        payload_copy: dict[str, object] = dict(payload)
+        events.append((event, payload_copy))
 
     dummy_session = DummySession()
     monkeypatch.setattr(monitor, "log_event", capture_event)
 
     with pytest.raises(RuntimeError):
         await monitor._verify_startup_proxies(
-            dummy_session,
-            (("telegram", FailingProxyPool()),),
+            cast(aiohttp.ClientSession, dummy_session),
+            (("telegram", cast(ProxyPool, FailingProxyPool())),),
         )
 
     failure_events = [payload for event, payload in events if event == "proxy_startup_check"]
     assert failure_events, "Expected proxy failure to be logged"
     failure = failure_events[0]
-    extra = failure.get("extra", {})
+    extra_obj = failure.get("extra", {})
+    extra = cast(dict[str, object], extra_obj)
     assert extra.get("service") == "telegram"
     assert extra.get("failed_proxies") == ["http://proxy.invalid"]
