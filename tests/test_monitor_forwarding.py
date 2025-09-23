@@ -198,7 +198,7 @@ async def test_forward_message_applies_customisation_to_embed_text() -> None:
     assert "Header" in lines
     assert "Visible embed text" in lines
     assert "Footer" in lines
-    assert lines[-1].startswith("Открыть в Discord:")
+    assert all("Открыть в Discord:" not in line for line in lines)
 
 
 @pytest.mark.asyncio

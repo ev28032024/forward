@@ -109,18 +109,18 @@ def test_format_announcement_uses_channel_label() -> None:
     assert "123" not in first_line
 
 
-def test_build_jump_url_supports_direct_messages() -> None:
+def test_format_does_not_include_jump_url() -> None:
     message = {
         "author": {"username": "Tester"},
         "id": 555,
+        "guild_id": 321,
     }
 
     formatted = format_announcement_message(888, message, "Body", [])
 
-    assert any(
-        "https://discord.com/channels/@me/888/555" in chunk
-        for chunk in (formatted.text, *formatted.extra_messages)
-    )
+    assert "discord.com/channels" not in formatted.text
+    for extra in formatted.extra_messages:
+        assert "discord.com/channels" not in extra
 
 
 def test_build_attachments_includes_embed_urls() -> None:

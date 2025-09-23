@@ -38,6 +38,67 @@ from .types import DiscordMessage
 DiscordMessageMapping = DiscordMessage
 
 
+def _log_startup_user_agent(service: str, provider: UserAgentProvider) -> None:
+    user_agent = provider.preview()
+    log_event(
+        "startup_user_agent",
+        level=logging.INFO,
+        discord_channel_id=None,
+        discord_message_id=None,
+        telegram_chat_id=None,
+        attempt=None,
+        outcome="selected",
+        latency_ms=None,
+        extra={"service": service, "user_agent": user_agent},
+    )
+
+
+async def _verify_startup_proxies(
+    session: aiohttp.ClientSession,
+    proxies: Sequence[tuple[str, ProxyPool]],
+) -> None:
+    for service, proxy_pool in proxies:
+        if not proxy_pool.has_proxies():
+            continue
+        endpoints = tuple(proxy_pool.endpoints())
+        if not endpoints:
+            continue
+
+        failed: list[str] = []
+        for endpoint in endpoints:
+            healthy = await proxy_pool.ensure_healthy(endpoint, session)
+            if not healthy:
+                failed.append(endpoint)
+
+        if failed:
+            log_event(
+                "proxy_startup_check",
+                level=logging.ERROR,
+                discord_channel_id=None,
+                discord_message_id=None,
+                telegram_chat_id=None,
+                attempt=None,
+                outcome="failure",
+                latency_ms=None,
+                extra={"service": service, "failed_proxies": failed},
+            )
+            raise RuntimeError(
+                f"Proxy health check failed for {service}: {', '.join(failed)}"
+            )
+
+        log_event(
+            "proxy_startup_check",
+            level=logging.INFO,
+            discord_channel_id=None,
+            discord_message_id=None,
+            telegram_chat_id=None,
+            attempt=None,
+            outcome="success",
+            latency_ms=None,
+            extra={"service": service, "proxy_count": len(endpoints)},
+        )
+
+
 class AnnouncementFormatter(Protocol):
     def __call__(
         self,
@@ -240,8 +301,15 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
         user_agents = config.network.user_agents
         discord_user_agents = UserAgentProvider(user_agents)
         telegram_user_agents = UserAgentProvider(user_agents)
+        _log_startup_user_agent("discord", discord_user_agents)
+        _log_startup_user_agent("telegram", telegram_user_agents)
         discord_proxy = ProxyPool(config.network.proxy_for_service("discord"), name="discord")
         telegram_proxy = ProxyPool(config.network.proxy_for_service("telegram"), name="telegram")
+
+        await _verify_startup_proxies(
+            session,
+            (("discord", discord_proxy), ("telegram", telegram_proxy)),
+        )
 
         discord = DiscordClient(
             config.discord.token,

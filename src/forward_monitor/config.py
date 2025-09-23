@@ -217,7 +217,10 @@ class FormattingProfile:
         explicit = set(self.provided)
 
         if "parse_mode" in other.provided:
-            parse_mode = (other.parse_mode or parse_mode or "").strip() or "HTML"
+            candidate = (other.parse_mode or "").strip()
+            if candidate and candidate.upper() != "HTML":
+                raise ValueError("Only HTML parse mode is supported")
+            parse_mode = "HTML"
             explicit.add("parse_mode")
         if "disable_link_preview" in other.provided:
             disable_preview = bool(
@@ -888,7 +891,10 @@ def _parse_formatting(raw: Any) -> FormattingProfile | None:
     attachments_style_value: Literal["compact", "minimal"] | None = None
     provided: set[str] = set()
     if parse_mode is not None:
-        parse_mode_value = parse_mode
+        candidate = parse_mode.strip()
+        if candidate and candidate.upper() != "HTML":
+            raise ValueError("Only HTML parse mode is supported")
+        parse_mode_value = "HTML"
         provided.add("parse_mode")
     if disable_preview is not None:
         disable_preview_value = bool(disable_preview)
