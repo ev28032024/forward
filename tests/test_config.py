@@ -321,3 +321,38 @@ def test_formatting_defaults_merge(tmp_path: Path) -> None:
     assert channel_formatting.parse_mode == "MarkdownV2"
     assert channel_formatting.disable_link_preview is False
     assert channel_formatting.attachments_style == "minimal"
+
+
+def test_proxy_credentials_and_rotation_parsing(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(
+        config_path,
+        _base_config(
+            """
+            network:
+              proxies:
+                username: base-user
+                password: base-pass
+                rotate_url: https://rotate.example
+                pool:
+                  - http://proxy.example:8080
+                telegram:
+                  auth: tg-user:tg-pass
+                  rotate: https://rotate.telegram
+                  pool:
+                    - http://tg-proxy.example:9000
+            """
+        ),
+    )
+
+    config = MonitorConfig.from_file(config_path)
+
+    default_proxy = config.network.default_proxy
+    assert default_proxy.username == "base-user"
+    assert default_proxy.password == "base-pass"
+    assert default_proxy.rotate_url == "https://rotate.example"
+
+    telegram_proxy = config.network.proxy_for_service("telegram")
+    assert telegram_proxy.username == "tg-user"
+    assert telegram_proxy.password == "tg-pass"
+    assert telegram_proxy.rotate_url == "https://rotate.telegram"

@@ -115,6 +115,9 @@ class ProxyPoolSettings:
     health_check_url: str | None = None
     health_check_timeout: float = 5.0
     recovery_seconds: float = 180.0
+    username: str | None = None
+    password: str | None = None
+    rotate_url: str | None = None
 
     def merge(self, other: ProxyPoolSettings | None) -> ProxyPoolSettings:
         if other is None:
@@ -125,20 +128,32 @@ class ProxyPoolSettings:
             _first_non_null(other.health_check_timeout, self.health_check_timeout)
         )
         recovery = float(_first_non_null(other.recovery_seconds, self.recovery_seconds))
+        username = _first_non_null(other.username, self.username)
+        password = _first_non_null(other.password, self.password)
+        rotate_url = other.rotate_url or self.rotate_url
         return ProxyPoolSettings(
             endpoints=endpoints,
             health_check_url=health_check_url,
             health_check_timeout=max(timeout, 0.1),
             recovery_seconds=max(recovery, 1.0),
+            username=username,
+            password=password,
+            rotate_url=rotate_url,
         )
 
     def normalised(self) -> ProxyPoolSettings:
         cleaned = tuple({endpoint.strip(): None for endpoint in self.endpoints if endpoint}.keys())
+        username = (_optional_string(self.username) or None)
+        password = _optional_string(self.password)
+        rotate_url = (_optional_string(self.rotate_url) or None)
         return ProxyPoolSettings(
             endpoints=cleaned,
             health_check_url=(self.health_check_url or "").strip() or None,
             health_check_timeout=self.health_check_timeout,
             recovery_seconds=self.recovery_seconds,
+            username=username,
+            password=password,
+            rotate_url=rotate_url,
         )
 
 
@@ -619,13 +634,44 @@ def _parse_network_settings(raw: Mapping[str, Any]) -> NetworkSettings:
     discord_proxy = _parse_proxy_pool(proxies_mapping.get("discord"))
     telegram_proxy = _parse_proxy_pool(proxies_mapping.get("telegram"))
 
+    base_username = _optional_string(
+        proxies_mapping.get("username")
+        or proxies_mapping.get("user")
+        or proxies_mapping.get("login")
+    )
+    base_password = _optional_string(
+        proxies_mapping.get("password")
+        or proxies_mapping.get("pass")
+        or proxies_mapping.get("pwd")
+    )
+    cred_user, cred_pass = _parse_proxy_credentials(
+        proxies_mapping.get("auth") or proxies_mapping.get("credentials")
+    )
+    if cred_user and not base_username:
+        base_username = cred_user
+    if cred_pass and not base_password:
+        base_password = cred_pass
+    base_rotate = _optional_string(
+        proxies_mapping.get("rotate_url")
+        or proxies_mapping.get("rotate")
+        or proxies_mapping.get("rotation_url")
+    )
+
+    base_credentials = ProxyPoolSettings(
+        username=base_username,
+        password=base_password,
+        rotate_url=base_rotate,
+    ).normalised()
+
+    default_proxy = default_proxy.merge(base_credentials)
+
     if isinstance(proxies_mapping.get("healthcheck"), Mapping):
         health_map = cast(Mapping[str, Any], proxies_mapping.get("healthcheck"))
         base = ProxyPoolSettings(
             health_check_url=_optional_string(health_map.get("url")),
             health_check_timeout=float(health_map.get("timeout", 5.0)),
             recovery_seconds=float(health_map.get("cooldown", 180.0)),
-        )
+        ).normalised()
         default_proxy = default_proxy.merge(base)
         discord_proxy = discord_proxy.merge(base)
         telegram_proxy = telegram_proxy.merge(base)
@@ -648,11 +694,30 @@ def _parse_proxy_pool(raw: Any) -> ProxyPoolSettings:
         health_url = raw.get("healthcheck") or raw.get("health_check")
         timeout = raw.get("timeout")
         recovery = raw.get("cooldown") or raw.get("recovery")
+        username = _optional_string(
+            raw.get("username") or raw.get("user") or raw.get("login")
+        )
+        password = _optional_string(
+            raw.get("password") or raw.get("pass") or raw.get("pwd")
+        )
+        cred_user, cred_pass = _parse_proxy_credentials(
+            raw.get("auth") or raw.get("credentials")
+        )
+        if cred_user and not username:
+            username = cred_user
+        if cred_pass and not password:
+            password = cred_pass
+        rotate_url = _optional_string(
+            raw.get("rotate_url") or raw.get("rotate") or raw.get("rotation_url")
+        )
         settings = ProxyPoolSettings(
             endpoints=tuple(_to_string_list(endpoints)),
             health_check_url=_optional_string(health_url),
             health_check_timeout=float(timeout) if timeout is not None else 5.0,
             recovery_seconds=float(recovery) if recovery is not None else 180.0,
+            username=username,
+            password=password,
+            rotate_url=rotate_url,
         )
         return settings.normalised()
     if isinstance(raw, Sequence):
@@ -660,6 +725,33 @@ def _parse_proxy_pool(raw: Any) -> ProxyPoolSettings:
     if isinstance(raw, str):
         return ProxyPoolSettings(endpoints=(raw.strip(),)).normalised()
     raise ValueError("Proxy configuration must be a mapping, list or string")
+
+
+def _parse_proxy_credentials(raw: Any) -> tuple[str | None, str | None]:
+    if raw is None:
+        return (None, None)
+    if isinstance(raw, Mapping):
+        base_user = raw.get("username") or raw.get("user") or raw.get("login")
+        base_pass = raw.get("password") or raw.get("pass") or raw.get("pwd")
+        auth_value = raw.get("auth") or raw.get("value") or raw.get("token")
+        user, pwd = _parse_proxy_credentials(auth_value)
+        username = _optional_string(base_user) or user
+        password = _optional_string(base_pass) or pwd
+        return username, password
+    if isinstance(raw, Sequence) and not isinstance(raw, str):
+        items = list(raw)
+        if not items:
+            return (None, None)
+        username = _optional_string(items[0])
+        password = _optional_string(items[1]) if len(items) > 1 else None
+        return username, password
+    text = _optional_string(raw)
+    if not text:
+        return (None, None)
+    if ":" in text:
+        user, _, pwd = text.partition(":")
+        return _optional_string(user), _optional_string(pwd)
+    return text, None
 
 
 def _parse_user_agents(raw: Any) -> UserAgentSettings:

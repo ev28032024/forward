@@ -55,6 +55,7 @@ class _FakeSession:
         *,
         json: dict[str, Any],
         proxy: str | None = None,
+        proxy_auth: aiohttp.BasicAuth | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> _FakeResponse:
         # aiohttp returns an awaitable context manager; our fake response already

@@ -138,6 +138,9 @@ class ProxyPool:
         "_verified",
         "_name",
         "_random",
+        "_auth",
+        "_rotation_lock",
+        "_last_rotation",
     )
 
     def __init__(self, settings: ProxyPoolSettings, *, name: str) -> None:
@@ -147,6 +150,13 @@ class ProxyPool:
         self._verified: set[str] = set()
         self._name = name
         self._random = random.Random()
+        self._auth = (
+            aiohttp.BasicAuth(self._settings.username, self._settings.password or "")
+            if self._settings.username
+            else None
+        )
+        self._rotation_lock = asyncio.Lock()
+        self._last_rotation = 0.0
 
     def has_proxies(self) -> bool:
         return bool(self._settings.endpoints)
@@ -179,6 +189,7 @@ class ProxyPool:
             async with session.get(
                 url,
                 proxy=proxy,
+                proxy_auth=self._auth,
                 timeout=aiohttp.ClientTimeout(
                     total=self._settings.health_check_timeout
                 ),
@@ -187,7 +198,11 @@ class ProxyPool:
                     raise aiohttp.ClientError(f"status={response.status}")
         # pragma: no cover - network failure paths exercised via integration tests.
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            await self.mark_bad(proxy, reason=f"health_check_failed:{exc}")
+            await self.mark_bad(
+                proxy,
+                reason=f"health_check_failed:{exc}",
+                session=session,
+            )
             return False
         async with self._lock:
             self._verified.add(proxy)
@@ -204,7 +219,13 @@ class ProxyPool:
         )
         return True
 
-    async def mark_bad(self, proxy: str, *, reason: str) -> None:
+    async def mark_bad(
+        self,
+        proxy: str,
+        *,
+        reason: str,
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
         async with self._lock:
             loop = asyncio.get_running_loop()
             self._unhealthy[proxy] = loop.time() + self._settings.recovery_seconds
@@ -220,6 +241,8 @@ class ProxyPool:
             latency_ms=None,
             extra={"service": self._name, "proxy": proxy, "reason": reason},
         )
+        if session is not None:
+            await self._trigger_rotation(session, reason=reason)
 
     async def mark_success(self, proxy: str | None) -> None:
         if proxy is None:
@@ -230,3 +253,59 @@ class ProxyPool:
 
     def endpoints(self) -> Iterable[str]:
         return tuple(self._settings.endpoints)
+
+    @property
+    def auth(self) -> aiohttp.BasicAuth | None:
+        return self._auth
+
+    async def _trigger_rotation(
+        self, session: aiohttp.ClientSession, *, reason: str
+    ) -> None:
+        url = self._settings.rotate_url
+        if not url:
+            return
+        async with self._rotation_lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if now - self._last_rotation < 1.0:
+                return
+            self._last_rotation = now
+            try:
+                async with session.get(
+                    url,
+                    proxy=None,
+                    timeout=aiohttp.ClientTimeout(
+                        total=max(3.0, self._settings.health_check_timeout)
+                    ),
+                ) as response:
+                    if response.status >= 400:
+                        raise aiohttp.ClientError(f"status={response.status}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                log_event(
+                    "proxy_rotation",
+                    level=30,
+                    discord_channel_id=None,
+                    discord_message_id=None,
+                    telegram_chat_id=None,
+                    attempt=None,
+                    outcome="error",
+                    latency_ms=None,
+                    extra={
+                        "service": self._name,
+                        "url": url,
+                        "reason": reason,
+                        "error": type(exc).__name__,
+                    },
+                )
+            else:
+                log_event(
+                    "proxy_rotation",
+                    level=20,
+                    discord_channel_id=None,
+                    discord_message_id=None,
+                    telegram_chat_id=None,
+                    attempt=None,
+                    outcome="requested",
+                    latency_ms=None,
+                    extra={"service": self._name, "url": url, "reason": reason},
+                )
