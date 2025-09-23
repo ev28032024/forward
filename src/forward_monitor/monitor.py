@@ -645,25 +645,47 @@ def _should_forward(
         attachment_categories=attachment_categories,
     )
 
+    reason = (
+        _check_text_filters(filters, context)
+        or _check_sender_filters(filters, context)
+        or _check_type_filters(filters, context)
+    )
+
+    if reason is not None:
+        return False, reason
+
+    return True, None
+
+
+def _check_text_filters(filters: PreparedFilters, context: _FilterContext) -> str | None:
     if filters.requires_text:
         context.ensure_text()
 
-    if filters.whitelist:
-        if not context.text_contains_any(filters.whitelist):
-            return False, "whitelist"
+    if filters.whitelist and not context.text_contains_any(filters.whitelist):
+        return "whitelist"
 
-    if filters.blacklist:
-        if context.text_contains_any(filters.blacklist):
-            return False, "blacklist"
+    if filters.blacklist and context.text_contains_any(filters.blacklist):
+        return "blacklist"
+
+    return None
+
+
+def _check_sender_filters(filters: PreparedFilters, context: _FilterContext) -> str | None:
+    if not (filters.allowed_senders or filters.blocked_senders):
+        return None
 
     author_values = context.author_values()
 
     if filters.allowed_senders and author_values.isdisjoint(filters.allowed_senders):
-        return False, "allowed_senders"
+        return "allowed_senders"
 
     if filters.blocked_senders and author_values.intersection(filters.blocked_senders):
-        return False, "blocked_senders"
+        return "blocked_senders"
 
+    return None
+
+
+def _check_type_filters(filters: PreparedFilters, context: _FilterContext) -> str | None:
     if filters.requires_types:
         context.ensure_types()
 
@@ -671,13 +693,12 @@ def _should_forward(
         if not filters.requires_types:
             raise AssertionError
         if not context.message_types().intersection(filters.allowed_types):
-            return False, "allowed_types"
+            return "allowed_types"
 
-    if filters.blocked_types:
-        if context.message_types().intersection(filters.blocked_types):
-            return False, "blocked_types"
+    if filters.blocked_types and context.message_types().intersection(filters.blocked_types):
+        return "blocked_types"
 
-    return True, None
+    return None
 
 
 def _author_identifiers(author: Mapping[str, Any]) -> set[str]:
