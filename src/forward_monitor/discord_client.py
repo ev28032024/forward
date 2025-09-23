@@ -4,6 +4,8 @@ import asyncio
 import logging
 import random
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from time import perf_counter
 from typing import Any, Literal
 
@@ -314,7 +316,7 @@ class DiscordClient:
                             extra={"url": url, "proxy": proxy},
                         )
                         return payload
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 network_attempts += 1
                 elapsed_ms = (perf_counter() - start) * 1000
                 if proxy:
@@ -353,6 +355,22 @@ class DiscordClient:
 
 
 async def _retry_after_seconds(response: aiohttp.ClientResponse) -> float:
+    retry_header = response.headers.get("Retry-After")
+    if retry_header:
+        try:
+            return max(float(retry_header), 0.0)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_header)
+            except (TypeError, ValueError, IndexError):
+                retry_at = None
+            if retry_at is not None:
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                delay = (retry_at - datetime.now(UTC)).total_seconds()
+                if delay > 0:
+                    return delay
+
     try:
         payload = await response.json()
     except aiohttp.ContentTypeError:

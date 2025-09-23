@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Final, Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping
+from typing import Any, Final
 
 BRIDGE_LOGGER_NAME: Final = "bridge"
 _REDACT_KEYS: Final = {"token", "authorization"}
 _MAX_STRING_LENGTH: Final = 512
+_LOGGER = logging.getLogger(BRIDGE_LOGGER_NAME)
 
 
 def configure_bridge_logging(level: int) -> None:
-    logger = logging.getLogger(BRIDGE_LOGGER_NAME)
+    logger = _LOGGER
     if logger.handlers:
         return
     handler = logging.StreamHandler()
@@ -53,8 +55,7 @@ def log_event(
                 continue
             payload[key_text] = _sanitize_value(value)
 
-    logger = logging.getLogger(BRIDGE_LOGGER_NAME)
-    logger.log(level, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    _LOGGER.log(level, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def _sanitize_value(value: Any) -> Any:
@@ -62,6 +63,6 @@ def _sanitize_value(value: Any) -> Any:
         if len(value) > _MAX_STRING_LENGTH:
             return f"{value[:_MAX_STRING_LENGTH]}…"
         return value
-    if isinstance(value, (int, float, bool)) or value is None:
+    if isinstance(value, bool | int | float) or value is None:
         return value
     return str(value)

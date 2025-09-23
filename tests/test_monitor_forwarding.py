@@ -6,6 +6,8 @@ from typing import Any, Mapping, Sequence, cast
 import pytest
 
 from forward_monitor.config import (
+    DEFAULT_MAX_FETCH_SECONDS,
+    DEFAULT_MAX_MESSAGES_PER_CHANNEL,
     ChannelMapping,
     CustomisedText,
     FormattingProfile,
@@ -255,6 +257,8 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
         state,
         min_delay=0,
         max_delay=0,
+        max_messages=DEFAULT_MAX_MESSAGES_PER_CHANNEL,
+        max_fetch_seconds=DEFAULT_MAX_FETCH_SECONDS,
         api_semaphore=api_semaphore,
     )
 
@@ -335,6 +339,8 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
             state,
             min_delay=0,
             max_delay=0,
+            max_messages=DEFAULT_MAX_MESSAGES_PER_CHANNEL,
+            max_fetch_seconds=DEFAULT_MAX_FETCH_SECONDS,
             api_semaphore=api_semaphore,
         )
     )
@@ -408,6 +414,8 @@ async def test_sync_announcements_skips_failed_message(
         state,
         min_delay=0,
         max_delay=0,
+        max_messages=DEFAULT_MAX_MESSAGES_PER_CHANNEL,
+        max_fetch_seconds=DEFAULT_MAX_FETCH_SECONDS,
         api_semaphore=api_semaphore,
     )
 
@@ -457,6 +465,8 @@ async def test_sync_announcements_counts_only_forwarded_messages() -> None:
         state,
         min_delay=0,
         max_delay=0,
+        max_messages=DEFAULT_MAX_MESSAGES_PER_CHANNEL,
+        max_fetch_seconds=DEFAULT_MAX_FETCH_SECONDS,
         api_semaphore=api_semaphore,
     )
 

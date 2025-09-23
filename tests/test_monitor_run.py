@@ -96,6 +96,8 @@ async def test_run_monitor_propagates_cancellation(
         state: monitor.MonitorState,
         min_delay: float,
         max_delay: float,
+        max_messages: int,
+        max_fetch_seconds: float,
         api_semaphore: asyncio.Semaphore,
     ) -> None:
         state.update_last_message_id(123, "456")

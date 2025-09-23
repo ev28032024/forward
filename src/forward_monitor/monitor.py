@@ -7,7 +7,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Protocol
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -120,8 +119,6 @@ class StateStore(Protocol):
 
 _DISCORD_FETCH_LIMIT = 100
 _DISCORD_CONCURRENCY_LIMIT = 8
-_MAX_MESSAGES_PER_CHANNEL = 1000
-_MAX_FETCH_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +269,8 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     state,
                     config.runtime.min_delay,
                     config.runtime.max_delay,
+                    config.runtime.max_messages_per_channel,
+                    config.runtime.max_fetch_seconds,
                     discord_api_semaphore,
                 )
                 log_event(
@@ -293,10 +292,10 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                 state.save()
                 raise
             except (
+                asyncio.TimeoutError,
                 DiscordAPIError,
                 RuntimeError,
                 aiohttp.ClientError,
-                asyncio.TimeoutError,
             ) as exc:
                 log_event(
                     "monitor_iteration_failed",
@@ -325,36 +324,39 @@ async def _sync_announcements(
     state: StateStore,
     min_delay: float,
     max_delay: float,
+    max_messages: int,
+    max_fetch_seconds: float,
     api_semaphore: asyncio.Semaphore,
 ) -> tuple[int, int]:
     if not contexts:
         return 0, 0
 
-    tasks: list[asyncio.Task[_ChannelFetchResult]] = []
+    results: dict[int, _ChannelFetchResult] = {}
     total_fetched = 0
     total_forwarded = 0
+    async def _fetch_and_store(context: ChannelContext) -> None:
+        channel_id = context.mapping.discord_channel_id
+        last_seen = state.get_last_message_id(channel_id)
+        result = await _fetch_channel_messages(
+            context,
+            discord,
+            last_seen,
+            limit=_DISCORD_FETCH_LIMIT,
+            max_messages=max_messages,
+            max_duration_seconds=max_fetch_seconds,
+            api_semaphore=api_semaphore,
+        )
+        results[channel_id] = result
+
     async with asyncio.TaskGroup() as group:
         for context in contexts:
-            channel_id = context.mapping.discord_channel_id
-            last_seen = state.get_last_message_id(channel_id)
-            tasks.append(
-                group.create_task(
-                    _fetch_channel_messages(
-                        context,
-                        discord,
-                        last_seen,
-                        limit=_DISCORD_FETCH_LIMIT,
-                        max_messages=_MAX_MESSAGES_PER_CHANNEL,
-                        max_duration=_MAX_FETCH_SECONDS,
-                        api_semaphore=api_semaphore,
-                    )
-                )
-            )
+            group.create_task(_fetch_and_store(context))
 
-    for task in tasks:
-        result = task.result()
-        context = result.context
+    for context in contexts:
         channel_id = context.mapping.discord_channel_id
+        result = results.get(channel_id)
+        if result is None:
+            continue
         messages = result.messages
         if not messages:
             continue
@@ -410,7 +412,7 @@ async def _fetch_channel_messages(
     *,
     limit: int,
     max_messages: int,
-    max_duration: float,
+    max_duration_seconds: float,
     api_semaphore: asyncio.Semaphore,
 ) -> _ChannelFetchResult:
     channel_id = context.mapping.discord_channel_id
@@ -422,7 +424,7 @@ async def _fetch_channel_messages(
             last_seen,
             limit=limit,
             max_messages=max_messages,
-            max_duration=max_duration,
+            max_duration_seconds=max_duration_seconds,
             api_semaphore=api_semaphore,
         )
     except DiscordAPIError as exc:
@@ -467,7 +469,7 @@ async def _fetch_all_messages(
     *,
     limit: int,
     max_messages: int,
-    max_duration: float,
+    max_duration_seconds: float,
     api_semaphore: asyncio.Semaphore,
 ) -> tuple[list[DiscordMessage], bool, bool]:
     messages: list[DiscordMessage] = []
@@ -481,7 +483,7 @@ async def _fetch_all_messages(
             truncated = True
             break
 
-        if perf_counter() - start >= max_duration:
+        if perf_counter() - start >= max_duration_seconds:
             timed_out = True
             break
 
@@ -698,7 +700,7 @@ def _aggregate_text(
     for attachment in attachments:
         if attachment.filename:
             text_blocks.append(attachment.filename)
-        domain = _attachment_domain(attachment)
+        domain = _attachment_domain_text(attachment)
         if domain:
             text_blocks.append(domain)
     return " ".join(block for block in text_blocks if block).casefold()
@@ -782,6 +784,10 @@ def _attachment_category(attachment: AttachmentInfo) -> str:
     return "other"
 
 
+def _attachment_domain_text(attachment: AttachmentInfo) -> str | None:
+    return attachment.domain or attachment.url
+
+
 async def _send_attachments(
     telegram: TelegramSender,
     chat_id: str,
@@ -828,14 +834,3 @@ def _attachment_caption(attachment: AttachmentInfo) -> str | None:
         return filename
 
     return filename[:1021] + "..."
-
-
-def _attachment_domain(attachment: AttachmentInfo) -> str | None:
-    if attachment.domain:
-        return attachment.domain
-    if attachment.url:
-        parsed = urlparse(attachment.url)
-        domain = parsed.netloc or parsed.path
-        if domain:
-            return domain
-    return None

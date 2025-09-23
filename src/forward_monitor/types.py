@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class DiscordUser(TypedDict, total=False):
@@ -72,3 +72,28 @@ class DiscordMessage(TypedDict, total=False):
     embeds: list[DiscordEmbed]
     mentions: list[DiscordUser]
     mention_channels: list[DiscordChannelMention]
+
+
+class TelegramAPIPayload(TypedDict, total=False):
+    chat_id: str
+    text: str
+    disable_web_page_preview: bool
+    parse_mode: str
+    photo: str
+    video: str
+    audio: str
+    document: str
+    caption: str
+
+
+class TelegramResponseParameters(TypedDict, total=False):
+    retry_after: float
+
+
+class TelegramAPIResponse(TypedDict, total=False):
+    ok: bool
+    result: Any
+    description: str
+    error_code: int
+    parameters: TelegramResponseParameters
+    retry_after: float

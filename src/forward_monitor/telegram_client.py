@@ -4,14 +4,15 @@ import asyncio
 import logging
 import random
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Literal, cast
 
 import aiohttp
 
 from .networking import ProxyPool, SoftRateLimiter, UserAgentProvider
 from .structured_logging import log_event
+from .types import TelegramAPIPayload, TelegramAPIResponse, TelegramResponseParameters
 
 __all__ = ["TelegramClient"]
 
@@ -63,20 +64,20 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TelegramAPIResponse:
         disable_preview = (
             self._default_disable_preview
             if disable_web_page_preview is None
             else bool(disable_web_page_preview)
         )
-        parse_mode = parse_mode or self._default_parse_mode
-        payload = {
+        parse_mode_value = parse_mode or self._default_parse_mode
+        payload: TelegramAPIPayload = {
             "chat_id": chat_id,
             "text": text,
             "disable_web_page_preview": disable_preview,
         }
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+        if parse_mode_value is not None:
+            payload["parse_mode"] = parse_mode_value
         return await self._post(
             "sendMessage",
             payload,
@@ -93,7 +94,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TelegramAPIResponse:
         return await self._send_media(
             method="sendPhoto",
             chat_id=chat_id,
@@ -114,7 +115,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TelegramAPIResponse:
         return await self._send_media(
             method="sendVideo",
             chat_id=chat_id,
@@ -135,7 +136,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TelegramAPIResponse:
         return await self._send_media(
             method="sendAudio",
             chat_id=chat_id,
@@ -156,7 +157,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TelegramAPIResponse:
         return await self._send_media(
             method="sendDocument",
             chat_id=chat_id,
@@ -173,18 +174,20 @@ class TelegramClient:
         *,
         method: str,
         chat_id: str,
-        media_field: str,
+        media_field: Literal["photo", "video", "audio", "document"],
         media_value: str,
         caption: str | None,
         parse_mode: str | None,
         retry_attempts: int,
         retry_statuses: Iterable[int] | None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"chat_id": chat_id, media_field: media_value}
+    ) -> TelegramAPIResponse:
+        payload: TelegramAPIPayload = {"chat_id": chat_id}
+        payload[media_field] = media_value
         if caption is not None:
             payload["caption"] = caption
-        if parse_mode or self._default_parse_mode:
-            payload["parse_mode"] = parse_mode or self._default_parse_mode
+        parse_mode_value = parse_mode or self._default_parse_mode
+        if parse_mode_value is not None:
+            payload["parse_mode"] = parse_mode_value
         return await self._post(
             method,
             payload,
@@ -195,17 +198,18 @@ class TelegramClient:
     async def _post(
         self,
         method: str,
-        payload: dict[str, Any],
+        request_payload: TelegramAPIPayload,
         *,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> dict[str, Any]:
+    ) -> TelegramAPIResponse:
         url = f"https://api.telegram.org/bot{self._token}/{method}"
         statuses = (
             self.RETRYABLE_STATUSES
             if retry_statuses is None
             else _normalise_retry_statuses(retry_statuses)
         )
+        chat_id = request_payload.get("chat_id")
         attempt = 0
         network_attempts = 0
         while True:
@@ -222,7 +226,7 @@ class TelegramClient:
                         level=logging.INFO,
                         discord_channel_id=None,
                         discord_message_id=None,
-                        telegram_chat_id=payload.get("chat_id"),
+                        telegram_chat_id=chat_id,
                         attempt=None,
                         outcome="switch",
                         latency_ms=None,
@@ -230,12 +234,12 @@ class TelegramClient:
                     )
                     self._current_proxy = proxy
 
-                headers = {"User-Agent": self._user_agents.pick(prefer_mobile=None)}
+                headers = {"User-Agent": self._user_agents.pick()}
 
                 async with self._rate_limiter:
                     async with self._session.post(
                         url,
-                        json=payload,
+                        json=request_payload,
                         proxy=proxy,
                         proxy_auth=self._proxy_pool.auth,
                         headers=headers,
@@ -258,7 +262,7 @@ class TelegramClient:
                                 level=logging.WARNING,
                                 discord_channel_id=None,
                                 discord_message_id=None,
-                                telegram_chat_id=payload.get("chat_id"),
+                                telegram_chat_id=chat_id,
                                 attempt=attempt,
                                 outcome="retry",
                                 latency_ms=None,
@@ -292,7 +296,7 @@ class TelegramClient:
                                     level=logging.WARNING,
                                     discord_channel_id=None,
                                     discord_message_id=None,
-                                    telegram_chat_id=payload.get("chat_id"),
+                                    telegram_chat_id=chat_id,
                                     attempt=attempt,
                                     outcome="cooldown",
                                     latency_ms=None,
@@ -303,10 +307,12 @@ class TelegramClient:
                                 f"{response.status}: {detail}"
                             )
 
-                        payload = await response.json()
-                        if isinstance(payload, dict) and payload.get("ok") is False:
-                            description = payload.get("description")
-                            error_code = payload.get("error_code")
+                        response_payload = cast(
+                            TelegramAPIResponse, await response.json()
+                        )
+                        if response_payload.get("ok") is False:
+                            description = response_payload.get("description")
+                            error_code = response_payload.get("error_code")
                             extra_details = []
                             if description:
                                 extra_details.append(str(description))
@@ -317,8 +323,8 @@ class TelegramClient:
                                 f"Telegram API method '{method}' reported failure: {detail}"
                             )
                         await self._proxy_pool.mark_success(proxy)
-                        return payload
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        return response_payload
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 network_attempts += 1
                 if network_attempts <= retry_attempts:
                     backoff = min(2 ** network_attempts, 20.0)
@@ -328,7 +334,7 @@ class TelegramClient:
                         level=logging.WARNING,
                         discord_channel_id=None,
                         discord_message_id=None,
-                        telegram_chat_id=payload.get("chat_id"),
+                        telegram_chat_id=chat_id,
                         attempt=network_attempts,
                         outcome="retry",
                         latency_ms=None,
@@ -352,7 +358,7 @@ def _normalise_retry_statuses(statuses: Iterable[int | str]) -> set[int]:
 async def _retry_after_seconds(
     response: aiohttp.ClientResponse, *, now: datetime | None = None
 ) -> float:
-    reference_time = now or datetime.now(timezone.utc)
+    reference_time = now or datetime.now(UTC)
     retry_header = response.headers.get("Retry-After")
     if retry_header:
         try:
@@ -364,24 +370,27 @@ async def _retry_after_seconds(
                 retry_at = None
             if retry_at is not None:
                 if retry_at.tzinfo is None:
-                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    retry_at = retry_at.replace(tzinfo=UTC)
                 delay = (retry_at - reference_time).total_seconds()
                 if delay > 0:
                     return delay
                 return 1.0
 
     try:
-        payload = await response.json()
+        payload = cast(TelegramAPIResponse, await response.json())
     except aiohttp.ContentTypeError:  # pragma: no cover - fallback for non-JSON responses
         return 1.0
 
-    retry_after = payload.get("parameters", {}).get("retry_after")
+    parameters: TelegramResponseParameters = payload.get("parameters", {})
+    retry_after = parameters.get("retry_after")
     if retry_after is None:
         retry_after = payload.get("retry_after")
-    try:
-        return float(retry_after)
-    except (TypeError, ValueError):  # pragma: no cover - fallback when parsing fails
-        return 1.0
+    if retry_after is not None:
+        try:
+            return float(retry_after)
+        except (TypeError, ValueError):  # pragma: no cover - fallback when parsing fails
+            return 1.0
+    return 1.0
 
 
 def _looks_suspicious(body: str, keywords: Iterable[str]) -> bool:
