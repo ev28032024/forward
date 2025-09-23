@@ -139,6 +139,60 @@ class _ChannelFetchResult:
     timed_out: bool
 
 
+@dataclass(slots=True)
+class _FilterContext:
+    """Cache expensive filter inputs so `_should_forward` stays linear."""
+
+    message: Mapping[str, Any]
+    clean_content: str
+    embed_text: str
+    attachments: Sequence[AttachmentInfo]
+    attachment_categories: Sequence[str]
+    _aggregate_text: str | None = None
+    _message_types: set[str] | None = None
+    _author_values: set[str] | None = None
+
+    def ensure_text(self) -> None:
+        self.aggregate_text()
+
+    def aggregate_text(self) -> str:
+        if self._aggregate_text is None:
+            self._aggregate_text = _aggregate_text(
+                self.clean_content, self.embed_text, self.attachments
+            )
+        return self._aggregate_text
+
+    def text_contains_any(self, keywords: set[str]) -> bool:
+        text = self.aggregate_text()
+        return any(keyword in text for keyword in keywords)
+
+    def author_values(self) -> set[str]:
+        if self._author_values is None:
+            author = self.message.get("author") or {}
+            values = _author_identifiers(author)
+            member = self.message.get("member") or {}
+            nickname = member.get("nick")
+            if nickname is not None:
+                nick_text = str(nickname).strip()
+                if nick_text:
+                    values.add(nick_text.casefold())
+            self._author_values = values
+        return self._author_values
+
+    def ensure_types(self) -> None:
+        self.message_types()
+
+    def message_types(self) -> set[str]:
+        if self._message_types is None:
+            self._message_types = _message_types(
+                self.clean_content,
+                self.embed_text,
+                self.attachments,
+                self.attachment_categories,
+            )
+        return self._message_types
+
+
 def _channel_contexts(
     global_filters: MessageFilters,
     global_customization: MessageCustomization,
@@ -592,55 +646,44 @@ def _should_forward(
     attachment_categories: Sequence[str],
     filters: PreparedFilters,
 ) -> tuple[bool, str | None]:
-    aggregate_text: str | None = None
+    context = _FilterContext(
+        message=message,
+        clean_content=clean_content,
+        embed_text=embed_text,
+        attachments=attachments,
+        attachment_categories=attachment_categories,
+    )
+
     if filters.requires_text:
-        aggregate_text = _aggregate_text(clean_content, embed_text, attachments)
+        context.ensure_text()
 
     if filters.whitelist:
-        assert aggregate_text is not None
-        if not any(keyword in aggregate_text for keyword in filters.whitelist):
+        if not context.text_contains_any(filters.whitelist):
             return False, "whitelist"
 
     if filters.blacklist:
-        if aggregate_text is None:
-            aggregate_text = _aggregate_text(clean_content, embed_text, attachments)
-        if any(keyword in aggregate_text for keyword in filters.blacklist):
+        if context.text_contains_any(filters.blacklist):
             return False, "blacklist"
 
-    author = message.get("author") or {}
-    author_values = _author_identifiers(author)
-    member = message.get("member") or {}
-    nickname = member.get("nick")
-    if nickname is not None:
-        nick_text = str(nickname).strip()
-        if nick_text:
-            author_values.add(nick_text.casefold())
+    author_values = context.author_values()
 
-    if filters.allowed_senders:
-        if author_values.isdisjoint(filters.allowed_senders):
-            return False, "allowed_senders"
+    if filters.allowed_senders and author_values.isdisjoint(filters.allowed_senders):
+        return False, "allowed_senders"
 
-    if filters.blocked_senders:
-        if author_values.intersection(filters.blocked_senders):
-            return False, "blocked_senders"
+    if filters.blocked_senders and author_values.intersection(filters.blocked_senders):
+        return False, "blocked_senders"
 
-    message_types: set[str] | None = None
     if filters.requires_types:
-        message_types = _message_types(
-            clean_content, embed_text, attachments, attachment_categories
-        )
+        context.ensure_types()
 
     if filters.allowed_types:
-        assert message_types is not None
-        if not message_types.intersection(filters.allowed_types):
+        if not filters.requires_types:
+            raise AssertionError
+        if not context.message_types().intersection(filters.allowed_types):
             return False, "allowed_types"
 
     if filters.blocked_types:
-        if message_types is None:
-            message_types = _message_types(
-                clean_content, embed_text, attachments, attachment_categories
-            )
-        if message_types.intersection(filters.blocked_types):
+        if context.message_types().intersection(filters.blocked_types):
             return False, "blocked_types"
 
     return True, None
