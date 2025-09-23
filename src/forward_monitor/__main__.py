@@ -42,6 +42,9 @@ def main() -> None:
     try:
         config = MonitorConfig.from_file(config_path)
         asyncio.run(run_monitor(config, once=args.once))
+    except KeyboardInterrupt:
+        logging.getLogger(__name__).info("Monitor interrupted by user")
+        sys.exit(0)
     except (FileNotFoundError, ValueError, OSError) as exc:
         logging.getLogger(__name__).error("Failed to start monitor: %s", exc)
         log_event(
