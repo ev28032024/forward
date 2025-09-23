@@ -308,7 +308,7 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_announcements_stops_after_forward_error(
+async def test_sync_announcements_skips_failed_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = ChannelContext(
@@ -333,6 +333,7 @@ async def test_sync_announcements_stops_after_forward_error(
             return messages
 
     forwarded: list[str] = []
+    failures: list[str] = []
     error_triggered = False
 
     async def failing_forward(**kwargs: Any) -> bool:
@@ -340,6 +341,7 @@ async def test_sync_announcements_stops_after_forward_error(
         message = kwargs["message"]
         if not error_triggered:
             error_triggered = True
+            failures.append(message["id"])
             raise RuntimeError("boom")
         forwarded.append(message["content"])
         return True
@@ -358,10 +360,11 @@ async def test_sync_announcements_stops_after_forward_error(
         max_delay=0,
     )
 
-    assert forwarded == []
-    assert 7 not in state._values
+    assert forwarded == ["second"]
+    assert failures == ["31"]
+    assert state._values[7] == "32"
     assert fetched == 2
-    assert forwarded_count == 0
+    assert forwarded_count == 1
 
 
 @pytest.mark.asyncio

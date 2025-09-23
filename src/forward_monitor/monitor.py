@@ -292,7 +292,13 @@ async def _sync_announcements(
             except asyncio.CancelledError:
                 raise
             except RuntimeError:
-                break
+                last_processed_id = message_id
+                MODULE_LOGGER.warning(
+                    "Failed to forward message %s from channel %s; skipping",
+                    message_id,
+                    channel_id,
+                )
+                continue
             else:
                 last_processed_id = message_id
                 if forwarded:
