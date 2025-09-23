@@ -193,6 +193,17 @@ class _FilterContext:
         return self._message_types
 
 
+@dataclass(slots=True)
+class _ForwardingPayload:
+    """Prepared Telegram payload so formatting is separated from sending."""
+
+    message_id: str | None
+    chat_id: str
+    formatted: FormattedMessage
+    attachments: Sequence[AttachmentInfo]
+    attachment_categories: Sequence[str]
+
+
 def _channel_contexts(
     global_filters: MessageFilters,
     global_customization: MessageCustomization,
@@ -517,21 +528,13 @@ async def _forward_message(
     max_delay: float,
 ) -> bool:
     start = perf_counter()
-    message_id = str(message.get("id", "")) or None
-    clean_content = clean_discord_content(message)
-    embed_text = extract_embed_text(message)
-    attachments = build_attachments(message)
-    attachment_categories = tuple(_attachment_category(attachment) for attachment in attachments)
-
-    should_forward, reason = _should_forward(
-        message,
-        clean_content,
-        embed_text,
-        attachments,
-        attachment_categories,
-        context.filters,
+    payload, reason, message_id = _prepare_forward_payload(
+        context=context,
+        message=message,
+        formatter=formatter,
     )
-    if not should_forward:
+
+    if payload is None:
         log_event(
             "message_filtered",
             level=logging.DEBUG,
@@ -545,47 +548,12 @@ async def _forward_message(
         )
         return False
 
-    combined_content = "\n\n".join(section for section in (clean_content, embed_text) if section)
-    customised_content = context.customization.render(combined_content)
-    channel_label = context.mapping.display_name
-
-    formatted = formatter(
-        channel_id,
-        message,
-        customised_content,
-        attachments,
-        embed_text="",
-        channel_label=channel_label,
-        formatting=context.formatting,
-    )
-
-    chat_id = context.mapping.telegram_chat_id
     try:
-        await telegram.send_message(
-            chat_id,
-            formatted.text,
-            parse_mode=formatted.parse_mode,
-            disable_web_page_preview=formatted.disable_preview,
-        )
-        await _sleep_with_jitter(min_delay, max_delay)
-        for extra_text in formatted.extra_messages:
-            if not extra_text:
-                continue
-            await telegram.send_message(
-                chat_id,
-                extra_text,
-                parse_mode=formatted.parse_mode,
-                disable_web_page_preview=formatted.disable_preview,
-            )
-            await _sleep_with_jitter(min_delay, max_delay)
-        await _send_attachments(
-            telegram,
-            chat_id,
-            attachments,
-            attachment_categories,
-            min_delay,
-            max_delay,
-            parse_mode=formatted.parse_mode,
+        await _dispatch_forwarding(
+            telegram=telegram,
+            payload=payload,
+            min_delay=min_delay,
+            max_delay=max_delay,
         )
     except RuntimeError as exc:
         log_event(
@@ -593,7 +561,7 @@ async def _forward_message(
             level=logging.ERROR,
             discord_channel_id=channel_id,
             discord_message_id=message_id,
-            telegram_chat_id=chat_id,
+            telegram_chat_id=payload.chat_id,
             attempt=1,
             outcome="failure",
             latency_ms=(perf_counter() - start) * 1000,
@@ -606,13 +574,13 @@ async def _forward_message(
         level=logging.INFO,
         discord_channel_id=channel_id,
         discord_message_id=message_id,
-        telegram_chat_id=chat_id,
+        telegram_chat_id=payload.chat_id,
         attempt=1,
         outcome="success",
         latency_ms=(perf_counter() - start) * 1000,
         extra={
-            "attachment_count": len(attachments),
-            "extra_messages": len(formatted.extra_messages),
+            "attachment_count": len(payload.attachments),
+            "extra_messages": len(payload.formatted.extra_messages),
         },
     )
 
@@ -809,6 +777,44 @@ def _attachment_domain_text(attachment: AttachmentInfo) -> str | None:
     return attachment.domain or attachment.url
 
 
+async def _dispatch_forwarding(
+    *,
+    telegram: TelegramSender,
+    payload: _ForwardingPayload,
+    min_delay: float,
+    max_delay: float,
+) -> None:
+    formatted = payload.formatted
+    await telegram.send_message(
+        payload.chat_id,
+        formatted.text,
+        parse_mode=formatted.parse_mode,
+        disable_web_page_preview=formatted.disable_preview,
+    )
+    await _sleep_with_jitter(min_delay, max_delay)
+
+    for extra_text in formatted.extra_messages:
+        if not extra_text:
+            continue
+        await telegram.send_message(
+            payload.chat_id,
+            extra_text,
+            parse_mode=formatted.parse_mode,
+            disable_web_page_preview=formatted.disable_preview,
+        )
+        await _sleep_with_jitter(min_delay, max_delay)
+
+    await _send_attachments(
+        telegram,
+        payload.chat_id,
+        payload.attachments,
+        payload.attachment_categories,
+        min_delay,
+        max_delay,
+        parse_mode=formatted.parse_mode,
+    )
+
+
 async def _send_attachments(
     telegram: TelegramSender,
     chat_id: str,
@@ -855,3 +861,50 @@ def _attachment_caption(attachment: AttachmentInfo) -> str | None:
         return filename
 
     return filename[:1021] + "..."
+
+
+def _prepare_forward_payload(
+    *,
+    context: ChannelContext,
+    message: DiscordMessageMapping,
+    formatter: AnnouncementFormatter,
+) -> tuple[_ForwardingPayload | None, str | None, str | None]:
+    message_id = str(message.get("id", "")).strip() or None
+    clean_content = clean_discord_content(message)
+    embed_text = extract_embed_text(message)
+    attachments = build_attachments(message)
+    attachment_categories = tuple(_attachment_category(attachment) for attachment in attachments)
+
+    should_forward, reason = _should_forward(
+        message,
+        clean_content,
+        embed_text,
+        attachments,
+        attachment_categories,
+        context.filters,
+    )
+    if not should_forward:
+        return None, reason, message_id
+
+    combined_content = "\n\n".join(section for section in (clean_content, embed_text) if section)
+    customised_content = context.customization.render(combined_content)
+    channel_label = context.mapping.display_name
+
+    formatted = formatter(
+        context.mapping.discord_channel_id,
+        message,
+        customised_content,
+        attachments,
+        embed_text="",
+        channel_label=channel_label,
+        formatting=context.formatting,
+    )
+
+    payload = _ForwardingPayload(
+        message_id=message_id,
+        chat_id=context.mapping.telegram_chat_id,
+        formatted=formatted,
+        attachments=attachments,
+        attachment_categories=attachment_categories,
+    )
+    return payload, None, message_id
