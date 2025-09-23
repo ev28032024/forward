@@ -50,6 +50,23 @@ def test_default_state_file_uses_config_directory(tmp_path: Path) -> None:
     assert config.state_file == tmp_path / "monitor_state.json"
 
 
+def test_discord_token_type_defaults_to_auto(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+
+    _write_config(
+        config_path,
+        """
+        discord_token: discord
+        telegram_token: telegram
+        telegram_chat_id: "@chat"
+        """,
+    )
+
+    config = MonitorConfig.from_file(config_path)
+
+    assert config.discord_token_type == "auto"
+
+
 def test_negative_poll_interval_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "forward.yml"
 
@@ -60,6 +77,23 @@ def test_negative_poll_interval_rejected(tmp_path: Path) -> None:
         telegram_token: telegram
         telegram_chat_id: "@chat"
         poll_interval: -5
+        """,
+    )
+
+    with pytest.raises(ValueError):
+        MonitorConfig.from_file(config_path)
+
+
+def test_discord_token_type_invalid_rejected(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+
+    _write_config(
+        config_path,
+        """
+        discord_token: discord
+        telegram_token: telegram
+        telegram_chat_id: "@chat"
+        discord_token_type: something
         """,
     )
 
@@ -83,6 +117,24 @@ def test_zero_poll_interval_allowed(tmp_path: Path) -> None:
     config = MonitorConfig.from_file(config_path)
 
     assert config.poll_interval == 0
+
+
+def test_discord_token_type_normalized(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+
+    _write_config(
+        config_path,
+        """
+        discord_token: discord
+        telegram_token: telegram
+        telegram_chat_id: "@chat"
+        discord_token_type: BOT
+        """,
+    )
+
+    config = MonitorConfig.from_file(config_path)
+
+    assert config.discord_token_type == "bot"
 
 
 @pytest.mark.parametrize(

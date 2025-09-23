@@ -34,9 +34,15 @@ class DummySession:
 
 
 class DummyDiscordClient:
-    def __init__(self, token: str, session: DummySession) -> None:
+    def __init__(
+        self,
+        token: str,
+        session: DummySession,
+        **kwargs: object,
+    ) -> None:
         self.token = token
         self.session = session
+        self.kwargs = kwargs
 
 
 class DummyTelegramClient:

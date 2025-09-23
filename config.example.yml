@@ -2,6 +2,7 @@
 # Переименуйте файл и заполните токены/ID перед запуском
 
 discord_token: "DISCORD_USER_TOKEN"
+discord_token_type: auto  # варианты: auto, user, bot, bearer
 telegram_token: "TELEGRAM_BOT_TOKEN"
 telegram_chat_id: "@default_channel_or_chat_id"
 
