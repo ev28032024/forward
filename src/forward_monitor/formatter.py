@@ -5,9 +5,10 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Mapping, Sequence, cast
+from typing import Any, List, Mapping, Sequence, cast
 from urllib.parse import urlparse
 
+from .config import CustomisedText, FormattingProfile
 from .types import DiscordMessage
 
 __all__ = [
@@ -18,8 +19,6 @@ __all__ = [
     "clean_discord_content",
     "extract_embed_text",
 ]
-
-TELEGRAM_MAX_LENGTH = 4096
 
 MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
 ROLE_PATTERN = re.compile(r"<@&(\d+)>")
@@ -63,140 +62,55 @@ class FormattedMessage:
 
     text: str
     extra_messages: Sequence[str] = ()
+    parse_mode: str | None = "HTML"
+    disable_preview: bool = True
 
 
 def format_announcement_message(
     channel_id: int,
     message: Mapping[str, Any],
-    content: str,
+    content: CustomisedText | str,
     attachments: Sequence[AttachmentInfo],
     *,
     embed_text: str | None = None,
     channel_label: str | None = None,
+    formatting: FormattingProfile | None = None,
 ) -> FormattedMessage:
     """Build the outgoing text for a regular Discord message."""
 
-    author_name = _author_name(message)
-    label = (channel_label or "").strip() or str(channel_id)
-    prefix = f"📢 Новое сообщение в канале {label} от {author_name}"
+    profile = formatting or FormattingProfile()
     if embed_text is None:
         embed_text = extract_embed_text(cast(DiscordMessage, message))
-    combined_content = _combine_content_sections([content, embed_text])
+    customised = _ensure_customised_text(content, embed_text)
+    author_name = _author_name(message)
     jump_url = _build_jump_url(message, channel_id)
-    return _compose_message(prefix, combined_content, attachments, jump_url)
+    label = (channel_label or "").strip() or str(channel_id)
 
-
-def _compose_message(
-    prefix: str,
-    content: str,
-    attachments: Sequence[AttachmentInfo],
-    jump_url: str | None,
-) -> FormattedMessage:
-    """Compose the multi-line text that will be forwarded to Telegram."""
-
-    lines: List[str] = [prefix]
-    if content:
-        lines.extend(["", content])
-
-    base_text = "\n".join(lines)
-    messages = _chunk_text(base_text, TELEGRAM_MAX_LENGTH)
-
-    attachment_block: str | None = None
-    if attachments:
-        attachment_lines = ["Вложения:"] + _attachment_lines(attachments)
-        attachment_block = "\n".join(attachment_lines)
-
-    if attachment_block:
-        appended = False
-        for index in range(len(messages) - 1, -1, -1):
-            candidate = _append_section(messages[index], attachment_block)
-            if len(candidate) <= TELEGRAM_MAX_LENGTH:
-                messages[index] = candidate
-                appended = True
-                break
-        if not appended:
-            messages.extend(_chunk_text(attachment_block, TELEGRAM_MAX_LENGTH))
-
+    chip_line = _build_chip_line(label, author_name, customised.chips)
+    main_lines = _assemble_sections(customised)
+    attachment_line = _attachment_summary(attachments, profile.attachments_style)
+    if attachment_line:
+        main_lines.append(attachment_line)
     if jump_url:
-        jump_line = f"Открыть в Discord: {jump_url}"
-        appended = False
-        for index in range(len(messages) - 1, -1, -1):
-            candidate = _append_section(messages[index], jump_line)
-            if len(candidate) <= TELEGRAM_MAX_LENGTH:
-                messages[index] = candidate
-                appended = True
-                break
-        if not appended:
-            messages.extend(_chunk_text(jump_line, TELEGRAM_MAX_LENGTH))
+        main_lines.append("")
+        main_lines.append(f"Открыть в Discord: {jump_url}")
 
-    main_text = messages[0]
-    extra_messages = tuple(messages[1:])
-    return FormattedMessage(main_text, extra_messages)
+    if chip_line:
+        main_lines.insert(0, chip_line)
 
+    escaped_lines = [_escape_html(line) for line in _collapse_blank_lines(main_lines)]
+    base_text = "\n".join(escaped_lines)
+    chunks = _chunk_html(base_text, profile.max_length, profile.ellipsis)
+    main_text = chunks[0]
+    extra_messages = tuple(chunks[1:])
 
-def _append_section(base: str, section: str) -> str:
-    if not base:
-        return section
-    if not section:
-        return base
-    if base.endswith("\n"):
-        separator = "\n"
-    else:
-        separator = "\n\n"
-    return f"{base}{separator}{section}"
+    return FormattedMessage(
+        text=main_text,
+        extra_messages=extra_messages,
+        parse_mode=profile.parse_mode,
+        disable_preview=profile.disable_link_preview,
+    )
 
-
-def _chunk_text(text: str, limit: int) -> List[str]:
-    if limit <= 0:
-        return [text]
-
-    lines = text.split("\n")
-    chunks: List[str] = []
-    current_lines: List[str] = []
-    current_length = 0
-
-    def flush() -> None:
-        nonlocal current_lines, current_length
-        if current_lines:
-            chunks.append("\n".join(current_lines))
-            current_lines = []
-            current_length = 0
-
-    for line in lines:
-        line_length = len(line)
-        if line_length > limit:
-            flush()
-            start = 0
-            while start < line_length:
-                end = min(start + limit, line_length)
-                chunks.append(line[start:end])
-                start = end
-            continue
-
-        projected = line_length if not current_lines else current_length + 1 + line_length
-        if projected > limit:
-            flush()
-
-        current_lines.append(line)
-        current_length = (
-            line_length if len(current_lines) == 1 else current_length + 1 + line_length
-        )
-
-    flush()
-
-    if not chunks:
-        return [""]
-    return chunks
-
-
-def _attachment_lines(attachments: Iterable[AttachmentInfo]) -> List[str]:
-    """Represent attachments as a list of human-readable lines."""
-
-    lines: List[str] = []
-    for attachment in attachments:
-        if attachment.url:
-            lines.append(attachment.display_label())
-    return lines
 
 
 def build_attachments(message: DiscordMessage) -> List[AttachmentInfo]:
@@ -362,13 +276,6 @@ def _strip_simple_markdown(content: str) -> str:
     return stripped
 
 
-def _combine_content_sections(sections: Sequence[str]) -> str:
-    parts = [section for section in sections if section]
-    if not parts:
-        return ""
-    return "\n\n".join(parts)
-
-
 def extract_embed_text(message: DiscordMessage) -> str:
     """Return cleaned textual content from embeds."""
 
@@ -509,3 +416,177 @@ def _guess_content_type_from_filename(filename: str | None) -> str | None:
     if extension in {"mp3", "wav", "ogg", "flac", "m4a"}:
         return "audio/unknown"
     return None
+
+
+def _ensure_customised_text(
+    content: CustomisedText | str, embed_text: str | None
+) -> CustomisedText:
+    if isinstance(content, CustomisedText):
+        body_lines = list(content.body_lines)
+        if embed_text:
+            embed_lines = _split_and_normalise(embed_text)
+            if embed_lines:
+                if body_lines:
+                    body_lines.append("")
+                body_lines.extend(embed_lines)
+        combined = tuple(_collapse_blank_lines(body_lines))
+        return CustomisedText(
+            chips=content.chips,
+            header_lines=content.header_lines,
+            body_lines=combined,
+            footer_lines=content.footer_lines,
+        )
+
+    lines = _split_and_normalise(content)
+    if embed_text:
+        embed_lines = _split_and_normalise(embed_text)
+        if embed_lines:
+            if lines:
+                lines.append("")
+            lines.extend(embed_lines)
+    return CustomisedText(
+        chips=(),
+        header_lines=(),
+        body_lines=tuple(_collapse_blank_lines(lines)),
+        footer_lines=(),
+    )
+
+
+def _split_and_normalise(text: str) -> List[str]:
+    if not text:
+        return []
+    raw_lines = [line.rstrip() for line in text.splitlines()]
+    return _collapse_blank_lines(raw_lines)
+
+
+def _assemble_sections(customised: CustomisedText) -> List[str]:
+    sections: List[List[str]] = []
+    if customised.header_lines:
+        sections.append(list(customised.header_lines))
+    if customised.body_lines:
+        sections.append(list(customised.body_lines))
+    if customised.footer_lines:
+        sections.append(list(customised.footer_lines))
+
+    lines: List[str] = []
+    for block in sections:
+        cleaned = _collapse_blank_lines(block)
+        if not cleaned:
+            continue
+        if lines:
+            lines.append("")
+        lines.extend(cleaned)
+    return lines
+
+
+def _build_chip_line(
+    channel_label: str | None, author: str, chips: Sequence[str]
+) -> str:
+    ordered: List[str] = []
+    for candidate in (channel_label, author, *chips):
+        text = (candidate or "").strip()
+        if not text or text in ordered:
+            continue
+        ordered.append(text)
+    if not ordered:
+        return ""
+    return f"📢 {' · '.join(ordered)}"
+
+
+def _attachment_summary(
+    attachments: Sequence[AttachmentInfo], style: str
+) -> str | None:
+    if not attachments:
+        return None
+    domains: List[str] = []
+    for attachment in attachments:
+        domain = attachment.domain or attachment.url
+        if not domain:
+            continue
+        cleaned = domain.split("/", 1)[0]
+        if cleaned not in domains:
+            domains.append(cleaned)
+
+    summary = ""
+    if domains:
+        limit = 3 if style == "minimal" else len(domains)
+        visible = domains[:limit]
+        summary = ", ".join(visible)
+        remaining = len(domains) - len(visible)
+        if remaining > 0:
+            summary = f"{summary} +{remaining}"
+
+    text = f"Вложения: {len(attachments)}"
+    if summary:
+        text = f"{text} · {summary}"
+    return text
+
+
+def _escape_html(value: str) -> str:
+    return html.escape(value, quote=False)
+
+
+def _collapse_blank_lines(lines: Sequence[str]) -> List[str]:
+    result: List[str] = []
+    blank = False
+    for line in lines:
+        if line is None:
+            continue
+        cleaned = line.rstrip()
+        if cleaned:
+            result.append(cleaned)
+            blank = False
+        else:
+            if result and not blank:
+                result.append("")
+            blank = True
+    while result and not result[-1]:
+        result.pop()
+    return result
+
+
+def _chunk_html(text: str, limit: int, ellipsis: str) -> List[str]:
+    if limit <= 0 or len(text) <= limit:
+        return [text]
+
+    chunks: List[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        cut = _find_safe_cut(remaining, limit)
+        fragment = remaining[:cut].rstrip()
+        fragment = _trim_partial_entity(fragment)
+        if not fragment:
+            fragment = _trim_partial_entity(remaining[:limit])
+        if not fragment:
+            fragment = remaining[:limit]
+        chunks.append(f"{fragment}{ellipsis}")
+        remaining = remaining[len(fragment) :].lstrip()
+
+    return chunks
+
+
+def _find_safe_cut(text: str, limit: int) -> int:
+    newline = text.rfind("\n", 0, limit)
+    if newline > limit * 0.6:
+        return newline
+    space = text.rfind(" ", 0, limit)
+    if space > limit * 0.6:
+        return space
+    return limit
+
+
+def _trim_partial_entity(fragment: str) -> str:
+    if "&" not in fragment:
+        return fragment
+    if fragment.endswith("&"):
+        return fragment[:-1]
+    last_amp = fragment.rfind("&")
+    if last_amp == -1:
+        return fragment
+    if ";" not in fragment[last_amp:]:
+        return fragment[:last_amp]
+    return fragment

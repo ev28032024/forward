@@ -10,10 +10,15 @@ import pytest
 
 from forward_monitor import monitor
 from forward_monitor.config import (
+    ChannelDefaults,
     ChannelMapping,
+    DiscordSettings,
     MessageCustomization,
     MessageFilters,
     MonitorConfig,
+    MonitorRuntime,
+    NetworkSettings,
+    TelegramSettings,
 )
 
 
@@ -38,17 +43,39 @@ class DummyDiscordClient:
         self,
         token: str,
         session: DummySession,
+        *,
+        rate_limiter: object,
+        proxy_pool: object,
+        user_agents: object,
         **kwargs: object,
     ) -> None:
         self.token = token
         self.session = session
+        self.rate_limiter = rate_limiter
+        self.proxy_pool = proxy_pool
+        self.user_agents = user_agents
         self.kwargs = kwargs
 
 
 class DummyTelegramClient:
-    def __init__(self, token: str, session: DummySession) -> None:
+    def __init__(
+        self,
+        token: str,
+        session: DummySession,
+        *,
+        rate_limiter: object,
+        proxy_pool: object,
+        user_agents: object,
+        default_disable_preview: bool,
+        default_parse_mode: str | None,
+    ) -> None:
         self.token = token
         self.session = session
+        self.rate_limiter = rate_limiter
+        self.proxy_pool = proxy_pool
+        self.user_agents = user_agents
+        self.default_disable_preview = default_disable_preview
+        self.default_parse_mode = default_parse_mode
 
 
 @pytest.mark.asyncio
@@ -75,20 +102,27 @@ async def test_run_monitor_propagates_cancellation(
 
     monkeypatch.setattr(monitor, "_sync_announcements", fake_sync)
 
+    discord_settings = DiscordSettings(token="token")
+    telegram_settings = TelegramSettings(token="token", default_chat="chat")
+    defaults = ChannelDefaults(
+        filters=MessageFilters(),
+        customization=MessageCustomization(),
+        formatting=telegram_settings.formatting,
+    )
     config = MonitorConfig(
-        discord_token="token",
-        telegram_token="token",
-        telegram_chat_id="chat",
-        announcement_channels=[
+        discord=discord_settings,
+        telegram=telegram_settings,
+        runtime=MonitorRuntime(poll_interval=1, state_file=state_file),
+        defaults=defaults,
+        channels=(
             ChannelMapping(
                 discord_channel_id=123,
                 telegram_chat_id="chat",
                 filters=MessageFilters(),
                 customization=MessageCustomization(),
-            )
-        ],
-        poll_interval=1,
-        state_file=state_file,
+            ),
+        ),
+        network=NetworkSettings(),
     )
 
     with pytest.raises(asyncio.CancelledError):

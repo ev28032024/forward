@@ -5,7 +5,13 @@ from typing import Any, Mapping, Sequence, cast
 
 import pytest
 
-from forward_monitor.config import ChannelMapping, MessageCustomization, MessageFilters
+from forward_monitor.config import (
+    ChannelMapping,
+    CustomisedText,
+    FormattingProfile,
+    MessageCustomization,
+    MessageFilters,
+)
 from forward_monitor.formatter import AttachmentInfo, FormattedMessage, format_announcement_message
 from forward_monitor.monitor import (
     AnnouncementFormatter,
@@ -20,26 +26,59 @@ class StubTelegram:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
 
-    async def send_message(self, chat_id: str, text: str) -> None:
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        disable_web_page_preview: bool | None = None,
+    ) -> None:
         self.sent.append((chat_id, text))
 
-    async def send_photo(self, chat_id: str, photo: str, *, caption: str | None = None) -> None:
+    async def send_photo(
+        self,
+        chat_id: str,
+        photo: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
         self.sent.append((chat_id, f"photo:{photo}"))
         if caption:
             self.sent.append((chat_id, caption))
 
-    async def send_video(self, chat_id: str, video: str, *, caption: str | None = None) -> None:
+    async def send_video(
+        self,
+        chat_id: str,
+        video: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
         self.sent.append((chat_id, f"video:{video}"))
         if caption:
             self.sent.append((chat_id, caption))
 
-    async def send_audio(self, chat_id: str, audio: str, *, caption: str | None = None) -> None:
+    async def send_audio(
+        self,
+        chat_id: str,
+        audio: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+    ) -> None:
         self.sent.append((chat_id, f"audio:{audio}"))
         if caption:
             self.sent.append((chat_id, caption))
 
     async def send_document(
-        self, chat_id: str, document: str, *, caption: str | None = None
+        self,
+        chat_id: str,
+        document: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
     ) -> None:
         self.sent.append((chat_id, f"document:{document}"))
         if caption:
@@ -63,6 +102,7 @@ async def test_forward_message_sends_extra_messages() -> None:
         mapping=ChannelMapping(discord_channel_id=1, telegram_chat_id="chat"),
         filters=MessageFilters().prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
 
     message = cast(
@@ -77,14 +117,15 @@ async def test_forward_message_sends_extra_messages() -> None:
     def formatter(
         channel_id: int,
         payload: Mapping[str, Any],
-        content: str,
+        content: CustomisedText,
         attachments: Sequence[AttachmentInfo],
         *,
         embed_text: str | None = None,
         channel_label: str | None = None,
+        formatting: FormattingProfile | None = None,
     ) -> FormattedMessage:
         assert channel_id == 1
-        assert content == "Hello"
+        assert content.body_lines == ("Hello",)
         assert payload is message
         assert list(attachments) == []
         assert embed_text == ""
@@ -120,6 +161,7 @@ async def test_forward_message_applies_customisation_to_embed_text() -> None:
             footers=("Footer",),
             replacements=(("Secret", "Visible"),),
         ).prepare(),
+        formatting=FormattingProfile(),
     )
 
     message = cast(
@@ -149,13 +191,12 @@ async def test_forward_message_applies_customisation_to_embed_text() -> None:
 
     assert telegram.sent, "Expected at least one message to be sent"
     forwarded = telegram.sent[0][1]
-    assert "Header" in forwarded
-    assert "Visible embed text" in forwarded
-    assert forwarded.index("Header") > forwarded.index("канале 2 от Author")
-    footer_position = forwarded.rfind("Footer")
-    assert footer_position != -1
-    jump_index = forwarded.find("Открыть в Discord")
-    assert jump_index == -1 or footer_position < jump_index
+    lines = forwarded.splitlines()
+    assert lines[0] == "📢 2 · Author"
+    assert "Header" in lines
+    assert "Visible embed text" in lines
+    assert "Footer" in lines
+    assert lines[-1].startswith("Открыть в Discord:")
 
 
 @pytest.mark.asyncio
@@ -164,6 +205,7 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
         mapping=ChannelMapping(discord_channel_id=5, telegram_chat_id="dest"),
         filters=MessageFilters().prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
 
     first_batch: list[DiscordMessage] = [
@@ -235,11 +277,13 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
         ),
         filters=MessageFilters().prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
     fast_context = ChannelContext(
         mapping=ChannelMapping(discord_channel_id=12, telegram_chat_id="fast_chat"),
         filters=MessageFilters().prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
 
     slow_started = asyncio.Event()
@@ -315,6 +359,7 @@ async def test_sync_announcements_skips_failed_message(
         mapping=ChannelMapping(discord_channel_id=7, telegram_chat_id="chat"),
         filters=MessageFilters().prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
 
     messages: list[DiscordMessage] = [
@@ -373,6 +418,7 @@ async def test_sync_announcements_counts_only_forwarded_messages() -> None:
         mapping=ChannelMapping(discord_channel_id=8, telegram_chat_id="chat"),
         filters=MessageFilters(whitelist=("keep",)).prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
 
     class FilteringDiscord:

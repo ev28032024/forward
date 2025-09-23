@@ -5,7 +5,12 @@ from typing import cast
 
 import pytest
 
-from forward_monitor.config import ChannelMapping, MessageCustomization, MessageFilters
+from forward_monitor.config import (
+    ChannelMapping,
+    FormattingProfile,
+    MessageCustomization,
+    MessageFilters,
+)
 from forward_monitor.formatter import (
     AttachmentInfo,
     FormattedMessage,
@@ -213,6 +218,7 @@ async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixtu
         mapping=ChannelMapping(discord_channel_id=10, telegram_chat_id="chat"),
         filters=MessageFilters(blacklist=("deny",)).prepare(),
         customization=MessageCustomization().prepare(),
+        formatting=FormattingProfile(),
     )
 
     message = cast(
@@ -224,20 +230,53 @@ async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixtu
         def __init__(self) -> None:
             self.sent: list[tuple[str, str]] = []
 
-        async def send_message(self, chat_id: str, text: str) -> None:
+        async def send_message(
+            self,
+            chat_id: str,
+            text: str,
+            *,
+            parse_mode: str | None = None,
+            disable_web_page_preview: bool | None = None,
+        ) -> None:
             self.sent.append((chat_id, text))
 
-        async def send_photo(self, chat_id: str, photo: str, *, caption: str | None = None) -> None:
+        async def send_photo(
+            self,
+            chat_id: str,
+            photo: str,
+            *,
+            caption: str | None = None,
+            parse_mode: str | None = None,
+        ) -> None:
             raise AssertionError("send_photo should not be called")
 
-        async def send_video(self, chat_id: str, video: str, *, caption: str | None = None) -> None:
+        async def send_video(
+            self,
+            chat_id: str,
+            video: str,
+            *,
+            caption: str | None = None,
+            parse_mode: str | None = None,
+        ) -> None:
             raise AssertionError("send_video should not be called")
 
-        async def send_audio(self, chat_id: str, audio: str, *, caption: str | None = None) -> None:
+        async def send_audio(
+            self,
+            chat_id: str,
+            audio: str,
+            *,
+            caption: str | None = None,
+            parse_mode: str | None = None,
+        ) -> None:
             raise AssertionError("send_audio should not be called")
 
         async def send_document(
-            self, chat_id: str, document: str, *, caption: str | None = None
+            self,
+            chat_id: str,
+            document: str,
+            *,
+            caption: str | None = None,
+            parse_mode: str | None = None,
         ) -> None:
             raise AssertionError("send_document should not be called")
 

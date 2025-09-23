@@ -102,8 +102,10 @@ def test_format_announcement_uses_channel_label() -> None:
         channel_label="Announcements",
     )
 
-    assert "канале Announcements" in result.text
-    assert "123" not in result.text.splitlines()[0]
+    first_line = result.text.splitlines()[0]
+    assert first_line.startswith("📢 Announcements")
+    assert "Tester" in first_line
+    assert "123" not in first_line
 
 
 def test_build_jump_url_supports_direct_messages() -> None:
@@ -160,13 +162,14 @@ def test_format_keeps_small_attachment_summary_inline() -> None:
         AttachmentInfo(
             url="https://example.com/file.txt",
             filename="file.txt",
+            domain="example.com",
         )
     ]
 
     result = format_announcement_message(3, message, "Body", attachments)
 
-    assert "Вложения:" in result.text
-    assert attachments[0].display_label() in result.text
+    assert "Вложения: 1" in result.text
+    assert "example.com" in result.text
     assert result.extra_messages == ()
 
 
@@ -174,22 +177,18 @@ def test_format_splits_oversized_attachment_summary() -> None:
     message = cast(
         DiscordMessage, {"author": {"username": "Tester"}, "guild_id": 1, "id": 2}
     )
-    long_name = "a" * 500
     attachments = [
         AttachmentInfo(
-            url=f"https://example.com/{index}",
-            filename=f"{long_name}_{index}",
+            url=f"https://host{index}.example.com/file{index}.txt",
+            filename=f"file{index}.txt",
+            domain=f"host{index}.example.com",
         )
-        for index in range(12)
+        for index in range(6)
     ]
 
     result = format_announcement_message(3, message, "Body", attachments)
 
-    assert len(result.text) <= 4096
-    assert result.extra_messages
-    assert all(len(chunk) <= 4096 for chunk in result.extra_messages)
-
-    combined = "\n".join([result.text, *result.extra_messages])
-    assert "Вложения:" in combined
-    for attachment in attachments:
-        assert attachment.display_label() in combined
+    assert "Вложения: 6" in result.text
+    assert "host0.example.com" in result.text
+    assert "+3" in result.text
+    assert result.extra_messages == ()
