@@ -107,7 +107,14 @@ class SoftRateLimiter:
 class UserAgentProvider:
     """Randomises user agent selection for outbound requests."""
 
-    __slots__ = ("_desktop", "_mobile", "_mobile_ratio", "_random")
+    __slots__ = (
+        "_desktop",
+        "_mobile",
+        "_mobile_ratio",
+        "_random",
+        "_prefetched",
+        "_last_user_agent",
+    )
 
     def __init__(self, settings: UserAgentSettings) -> None:
         desktop = list(settings.desktop)
@@ -120,12 +127,41 @@ class UserAgentProvider:
         self._mobile = mobile
         self._mobile_ratio = min(max(float(settings.mobile_ratio), 0.0), 1.0)
         self._random = random.Random()
+        self._prefetched: tuple[str, bool] | None = None
+        self._last_user_agent: str | None = None
 
     def pick(self, *, prefer_mobile: bool | None = None) -> str:
         if prefer_mobile is None:
-            prefer_mobile = self._random.random() < self._mobile_ratio
-        pool = self._mobile if prefer_mobile else self._desktop
-        return self._random.choice(pool)
+            prefer_mobile_flag = self._random.random() < self._mobile_ratio
+        else:
+            prefer_mobile_flag = prefer_mobile
+
+        if self._prefetched is not None:
+            prefetched_agent, prefetched_mobile = self._prefetched
+            if prefer_mobile is None or prefetched_mobile == prefer_mobile_flag:
+                self._prefetched = None
+                self._last_user_agent = prefetched_agent
+                return prefetched_agent
+
+        pool = self._mobile if prefer_mobile_flag else self._desktop
+        agent = self._random.choice(pool)
+        self._last_user_agent = agent
+        return agent
+
+    def preview(self, *, prefer_mobile: bool | None = None) -> str:
+        if prefer_mobile is None:
+            prefer_mobile_flag = self._random.random() < self._mobile_ratio
+        else:
+            prefer_mobile_flag = prefer_mobile
+        pool = self._mobile if prefer_mobile_flag else self._desktop
+        agent = self._random.choice(pool)
+        self._prefetched = (agent, prefer_mobile_flag)
+        self._last_user_agent = agent
+        return agent
+
+    @property
+    def last_user_agent(self) -> str | None:
+        return self._last_user_agent
 
 
 class ProxyPool:

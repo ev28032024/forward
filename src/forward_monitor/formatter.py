@@ -84,7 +84,6 @@ def format_announcement_message(
         embed_text = extract_embed_text(cast(DiscordMessage, message))
     customised = _ensure_customised_text(content, embed_text)
     author_name = _author_name(message)
-    jump_url = _build_jump_url(message, channel_id)
     label = (channel_label or "").strip() or str(channel_id)
 
     chip_line = _build_chip_line(label, author_name, customised.chips)
@@ -92,9 +91,6 @@ def format_announcement_message(
     attachment_line = _attachment_summary(attachments, profile.attachments_style)
     if attachment_line:
         main_lines.append(attachment_line)
-    if jump_url:
-        main_lines.append("")
-        main_lines.append(f"Открыть в Discord: {jump_url}")
 
     if chip_line:
         main_lines.insert(0, chip_line)
@@ -174,16 +170,6 @@ def clean_discord_content(message: Mapping[str, Any]) -> str:
     """Normalise Discord message text for forwarding."""
 
     return _clean_discord_content(message)
-
-
-def _build_jump_url(message: Mapping[str, Any], channel_id: int) -> str | None:
-    guild_id = message.get("guild_id")
-    message_id = message.get("id")
-    if guild_id and message_id:
-        return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-    if message_id and not guild_id:
-        return f"https://discord.com/channels/@me/{channel_id}/{message_id}"
-    return None
 
 
 def _author_name(message: Mapping[str, Any]) -> str:

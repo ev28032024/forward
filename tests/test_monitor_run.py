@@ -135,3 +135,108 @@ async def test_run_monitor_propagates_cancellation(
     with state_file.open("r", encoding="utf-8") as file:
         data = json.load(file)
     assert data["last_message_ids"]["123"] == "456"
+
+
+@pytest.mark.asyncio
+async def test_run_monitor_logs_startup_user_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor.aiohttp, "ClientSession", DummySession)
+    monkeypatch.setattr(monitor, "DiscordClient", DummyDiscordClient)
+    monkeypatch.setattr(monitor, "TelegramClient", DummyTelegramClient)
+
+    async def fake_sync(
+        *_: object,
+        **__: object,
+    ) -> tuple[int, int]:
+        return 0, 0
+
+    verify_calls: list[Sequence[tuple[str, object]]] = []
+
+    async def capture_verify(
+        session: DummySession,
+        proxies: Sequence[tuple[str, object]],
+    ) -> None:
+        verify_calls.append(tuple(proxies))
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def capture_event(event: str, **payload: object) -> None:
+        events.append((event, payload))
+
+    monkeypatch.setattr(monitor, "_sync_announcements", fake_sync)
+    monkeypatch.setattr(monitor, "_verify_startup_proxies", capture_verify)
+    monkeypatch.setattr(monitor, "log_event", capture_event)
+
+    state_file = tmp_path / "state.json"
+    discord_settings = DiscordSettings(token="token")
+    telegram_settings = TelegramSettings(token="token", default_chat="chat")
+    defaults = ChannelDefaults(
+        filters=MessageFilters(),
+        customization=MessageCustomization(),
+        formatting=telegram_settings.formatting,
+    )
+    config = MonitorConfig(
+        discord=discord_settings,
+        telegram=telegram_settings,
+        runtime=MonitorRuntime(poll_interval=1, state_file=state_file),
+        defaults=defaults,
+        channels=(
+            ChannelMapping(
+                discord_channel_id=1,
+                telegram_chat_id="chat",
+                filters=MessageFilters(),
+                customization=MessageCustomization(),
+            ),
+        ),
+        network=NetworkSettings(),
+    )
+
+    await monitor.run_monitor(config, once=True)
+
+    services = {
+        payload.get("extra", {}).get("service")
+        for event, payload in events
+        if event == "startup_user_agent"
+    }
+    assert services == {"discord", "telegram"}
+    assert verify_calls, "Expected proxies to be validated before the monitor loop"
+
+
+@pytest.mark.asyncio
+async def test_verify_startup_proxies_fails_when_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingProxyPool:
+        def has_proxies(self) -> bool:
+            return True
+
+        def endpoints(self) -> tuple[str, ...]:
+            return ("http://proxy.invalid",)
+
+        async def ensure_healthy(self, proxy: str, session: object) -> bool:
+            assert proxy == "http://proxy.invalid"
+            assert session is dummy_session
+            return False
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def capture_event(event: str, **payload: object) -> None:
+        events.append((event, payload))
+
+    dummy_session = DummySession()
+    monkeypatch.setattr(monitor, "log_event", capture_event)
+
+    with pytest.raises(RuntimeError):
+        await monitor._verify_startup_proxies(
+            dummy_session,
+            (("telegram", FailingProxyPool()),),
+        )
+
+    failure_events = [payload for event, payload in events if event == "proxy_startup_check"]
+    assert failure_events, "Expected proxy failure to be logged"
+    failure = failure_events[0]
+    extra = failure.get("extra", {})
+    assert extra.get("service") == "telegram"
+    assert extra.get("failed_proxies") == ["http://proxy.invalid"]

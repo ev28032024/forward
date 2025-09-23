@@ -12,7 +12,7 @@ telegram:
     jitter_max_ms: 200                   # максимальная задержка перед запросом
     cooldown_seconds: 30.0               # пауза при ошибках 429/5xx
   formatting:
-    parse_mode: HTML                     # HTML или MarkdownV2
+    parse_mode: HTML                     # Используется HTML-разметка
     disable_link_preview: true           # скрывать предпросмотр ссылок
     max_length: 3500                     # обрезать сообщения длиннее лимита
     ellipsis: "…"                        # суффикс усечения (при обрезке)

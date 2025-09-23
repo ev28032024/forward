@@ -340,7 +340,7 @@ def test_formatting_defaults_merge(tmp_path: Path) -> None:
           token: telegram
           chat: "@chat"
           formatting:
-            parse_mode: MarkdownV2
+            parse_mode: HTML
             disable_preview: false
         discord:
           token: discord
@@ -358,9 +358,32 @@ def test_formatting_defaults_merge(tmp_path: Path) -> None:
 
     config = MonitorConfig.from_file(config_path)
     channel_formatting = config.channels[0].formatting
-    assert channel_formatting.parse_mode == "MarkdownV2"
+    assert channel_formatting.parse_mode == "HTML"
     assert channel_formatting.disable_link_preview is False
     assert channel_formatting.attachments_style == "minimal"
+
+
+def test_formatting_rejects_markdown_parse_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "forward.yml"
+    _write_config(
+        config_path,
+        """
+        telegram:
+          token: telegram
+          chat: "@chat"
+          formatting:
+            parse_mode: PlainText
+        discord:
+          token: discord
+        forward:
+          channels:
+            - discord: 1
+              telegram: "-100"
+        """,
+    )
+
+    with pytest.raises(ValueError):
+        MonitorConfig.from_file(config_path)
 
 
 def test_proxy_credentials_and_rotation_parsing(tmp_path: Path) -> None:
