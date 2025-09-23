@@ -246,6 +246,7 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
     discord = FakeDiscord([first_batch, second_batch])
     telegram = StubTelegram()
     state = DummyState()
+    api_semaphore = asyncio.Semaphore(8)
 
     fetched, forwarded_count = await _sync_announcements(
         [context],
@@ -254,6 +255,7 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
         state,
         min_delay=0,
         max_delay=0,
+        api_semaphore=api_semaphore,
     )
 
     # 102 messages should have been forwarded once.
@@ -323,6 +325,7 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
     discord = ParallelDiscord()
     telegram = StubTelegram()
     state = DummyState()
+    api_semaphore = asyncio.Semaphore(8)
 
     sync_task = asyncio.create_task(
         _sync_announcements(
@@ -332,6 +335,7 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
             state,
             min_delay=0,
             max_delay=0,
+            api_semaphore=api_semaphore,
         )
     )
 
@@ -395,6 +399,7 @@ async def test_sync_announcements_skips_failed_message(
 
     telegram = StubTelegram()
     state = DummyState()
+    api_semaphore = asyncio.Semaphore(8)
 
     fetched, forwarded_count = await _sync_announcements(
         [context],
@@ -403,6 +408,7 @@ async def test_sync_announcements_skips_failed_message(
         state,
         min_delay=0,
         max_delay=0,
+        api_semaphore=api_semaphore,
     )
 
     assert forwarded == ["second"]
@@ -442,6 +448,7 @@ async def test_sync_announcements_counts_only_forwarded_messages() -> None:
 
     telegram = StubTelegram()
     state = DummyState()
+    api_semaphore = asyncio.Semaphore(8)
 
     fetched, forwarded_count = await _sync_announcements(
         [context],
@@ -450,6 +457,7 @@ async def test_sync_announcements_counts_only_forwarded_messages() -> None:
         state,
         min_delay=0,
         max_delay=0,
+        api_semaphore=api_semaphore,
     )
 
     assert fetched == 2

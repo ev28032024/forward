@@ -6,7 +6,7 @@ import random
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, Set
+from typing import Any
 
 import aiohttp
 
@@ -63,7 +63,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         disable_preview = (
             self._default_disable_preview
             if disable_web_page_preview is None
@@ -93,7 +93,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return await self._send_media(
             method="sendPhoto",
             chat_id=chat_id,
@@ -114,7 +114,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return await self._send_media(
             method="sendVideo",
             chat_id=chat_id,
@@ -135,7 +135,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return await self._send_media(
             method="sendAudio",
             chat_id=chat_id,
@@ -156,7 +156,7 @@ class TelegramClient:
         parse_mode: str | None = None,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return await self._send_media(
             method="sendDocument",
             chat_id=chat_id,
@@ -179,8 +179,8 @@ class TelegramClient:
         parse_mode: str | None,
         retry_attempts: int,
         retry_statuses: Iterable[int] | None,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"chat_id": chat_id, media_field: media_value}
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"chat_id": chat_id, media_field: media_value}
         if caption is not None:
             payload["caption"] = caption
         if parse_mode or self._default_parse_mode:
@@ -195,11 +195,11 @@ class TelegramClient:
     async def _post(
         self,
         method: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         *,
         retry_attempts: int = 5,
         retry_statuses: Iterable[int] | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         url = f"https://api.telegram.org/bot{self._token}/{method}"
         statuses = (
             self.RETRYABLE_STATUSES
@@ -331,8 +331,8 @@ class TelegramClient:
                 raise RuntimeError("Telegram API request failed due to a network error") from exc
 
 
-def _normalise_retry_statuses(statuses: Iterable[int | str]) -> Set[int]:
-    normalised: Set[int] = set()
+def _normalise_retry_statuses(statuses: Iterable[int | str]) -> set[int]:
+    normalised: set[int] = set()
     for status in statuses:
         try:
             normalised.add(int(status))

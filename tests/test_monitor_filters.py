@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import logging
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -213,7 +212,9 @@ def test_allowed_senders_accepts_member_nick() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixture) -> None:
+async def test_forward_message_logs_filter_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = ChannelContext(
         mapping=ChannelMapping(discord_channel_id=10, telegram_chat_id="chat"),
         filters=MessageFilters(blacklist=("deny",)).prepare(),
@@ -288,16 +289,25 @@ async def test_forward_message_logs_filter_reason(caplog: pytest.LogCaptureFixtu
     ) -> FormattedMessage:  # pragma: no cover - formatter unused
         raise RuntimeError("formatter should not be called")
 
-    with caplog.at_level(logging.DEBUG, logger="forward_monitor.monitor"):
-        await _forward_message(
-            context=context,
-            channel_id=10,
-            message=message,
-            telegram=telegram,
-            formatter=unused_formatter,
-            min_delay=0,
-            max_delay=0,
-        )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    def capture_event(event: str, **kwargs: Any) -> None:
+        events.append((event, kwargs))
+
+    monkeypatch.setattr("forward_monitor.monitor.log_event", capture_event)
+
+    await _forward_message(
+        context=context,
+        channel_id=10,
+        message=message,
+        telegram=telegram,
+        formatter=unused_formatter,
+        min_delay=0,
+        max_delay=0,
+    )
 
     assert not telegram.sent
-    assert "blacklist" in caplog.text
+    assert events
+    event, payload = events[0]
+    assert event == "message_filtered"
+    assert payload.get("extra", {}).get("reason") == "blacklist"
