@@ -5,7 +5,7 @@ import logging
 import random
 from collections.abc import Mapping
 from time import perf_counter
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import aiohttp
 
@@ -124,7 +124,7 @@ class DiscordClient:
         self,
         channel_id: int,
         *,
-        after: Optional[str] = None,
+        after: str | None = None,
         limit: int = 100,
     ) -> list[DiscordMessage]:
         params: dict[str, str] = {"limit": str(max(1, min(limit, 100)))}
@@ -147,7 +147,7 @@ class DiscordClient:
         method: str,
         url: str,
         *,
-        params: Optional[Mapping[str, str]] = None,
+        params: Mapping[str, str] | None = None,
         max_rate_limit_retries: int = _RATE_LIMIT_MAX_RETRIES,
         max_network_retries: int = _NETWORK_MAX_RETRIES,
         discord_channel_id: int | None = None,

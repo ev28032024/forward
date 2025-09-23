@@ -38,9 +38,6 @@ from .types import DiscordMessage
 
 DiscordMessageMapping = DiscordMessage
 
-MODULE_LOGGER = logging.getLogger(__name__)
-
-
 class AnnouncementFormatter(Protocol):
     def __call__(
         self,
@@ -121,6 +118,7 @@ class StateStore(Protocol):
 
 
 _DISCORD_FETCH_LIMIT = 100
+_DISCORD_CONCURRENCY_LIMIT = 8
 _MAX_MESSAGES_PER_CHANNEL = 1000
 _MAX_FETCH_SECONDS = 5.0
 @dataclass(frozen=True, slots=True)
@@ -176,6 +174,7 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
         discord_rate_limiter = SoftRateLimiter(
             config.discord.rate_limit, name="discord"
         )
+        discord_api_semaphore = asyncio.Semaphore(_DISCORD_CONCURRENCY_LIMIT)
         telegram_rate_limiter = SoftRateLimiter(
             config.telegram.rate_limit, name="telegram"
         )
@@ -226,6 +225,7 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     state,
                     config.runtime.min_delay,
                     config.runtime.max_delay,
+                    discord_api_semaphore,
                 )
                 log_event(
                     "monitor_iteration_complete",
@@ -278,6 +278,7 @@ async def _sync_announcements(
     state: StateStore,
     min_delay: float,
     max_delay: float,
+    api_semaphore: asyncio.Semaphore,
 ) -> tuple[int, int]:
     if not contexts:
         return 0, 0
@@ -298,6 +299,7 @@ async def _sync_announcements(
                         limit=_DISCORD_FETCH_LIMIT,
                         max_messages=_MAX_MESSAGES_PER_CHANNEL,
                         max_duration=_MAX_FETCH_SECONDS,
+                        api_semaphore=api_semaphore,
                     )
                 )
             )
@@ -329,12 +331,18 @@ async def _sync_announcements(
                 )
             except asyncio.CancelledError:
                 raise
-            except RuntimeError:
+            except RuntimeError as exc:
                 last_processed_id = message_id
-                MODULE_LOGGER.warning(
-                    "Failed to forward message %s from channel %s; skipping",
-                    message_id,
-                    channel_id,
+                log_event(
+                    "telegram_forward_failed",
+                    level=logging.WARNING,
+                    discord_channel_id=channel_id,
+                    discord_message_id=message_id,
+                    telegram_chat_id=context.mapping.telegram_chat_id,
+                    attempt=1,
+                    outcome="failure",
+                    latency_ms=None,
+                    extra={"error": type(exc).__name__},
                 )
                 continue
             else:
@@ -356,6 +364,7 @@ async def _fetch_channel_messages(
     limit: int,
     max_messages: int,
     max_duration: float,
+    api_semaphore: asyncio.Semaphore,
 ) -> _ChannelFetchResult:
     channel_id = context.mapping.discord_channel_id
     start = perf_counter()
@@ -367,6 +376,7 @@ async def _fetch_channel_messages(
             limit=limit,
             max_messages=max_messages,
             max_duration=max_duration,
+            api_semaphore=api_semaphore,
         )
     except DiscordAPIError as exc:
         if exc.status == 404:
@@ -411,6 +421,7 @@ async def _fetch_all_messages(
     limit: int,
     max_messages: int,
     max_duration: float,
+    api_semaphore: asyncio.Semaphore,
 ) -> tuple[list[DiscordMessage], bool, bool]:
     messages: list[DiscordMessage] = []
     cursor = last_seen
@@ -427,7 +438,8 @@ async def _fetch_all_messages(
             timed_out = True
             break
 
-        batch = await discord.fetch_messages(channel_id, after=cursor, limit=limit)
+        async with api_semaphore:
+            batch = await discord.fetch_messages(channel_id, after=cursor, limit=limit)
         if not batch:
             break
 
@@ -483,12 +495,6 @@ async def _forward_message(
             outcome="skipped",
             latency_ms=(perf_counter() - start) * 1000,
             extra={"reason": reason},
-        )
-        MODULE_LOGGER.debug(
-            "Skipping message %s from channel %s because of %s",
-            message_id,
-            channel_id,
-            reason or "filters",
         )
         return False
 

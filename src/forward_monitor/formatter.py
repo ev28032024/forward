@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import Any, List, Mapping, Sequence, cast
+from typing import Any, Mapping, Sequence, cast
 from urllib.parse import urlparse
 
 from .config import CustomisedText, FormattingProfile
@@ -113,10 +113,10 @@ def format_announcement_message(
 
 
 
-def build_attachments(message: DiscordMessage) -> List[AttachmentInfo]:
+def build_attachments(message: DiscordMessage) -> list[AttachmentInfo]:
     """Convert the raw Discord payload into AttachmentInfo objects."""
 
-    attachments: List[AttachmentInfo] = []
+    attachments: list[AttachmentInfo] = []
     seen_urls: set[str] = set()
 
     for raw in message.get("attachments", []):
@@ -250,7 +250,7 @@ def _clean_text_fragment(raw_text: str | None, message: Mapping[str, Any]) -> st
     if "&" in content:
         content = html.unescape(content)
 
-    processed_lines: List[str] = []
+    processed_lines: list[str] = []
     for line in content.splitlines():
         if line.strip():
             processed_lines.append(line.rstrip())
@@ -287,11 +287,11 @@ def _format_embeds(message: DiscordMessage) -> str:
     if not isinstance(embeds, Sequence):
         return ""
 
-    sections: List[str] = []
+    sections: list[str] = []
     for embed in embeds:
         if not isinstance(embed, Mapping):
             continue
-        lines: List[str] = []
+        lines: list[str] = []
 
         title = _clean_text_fragment(embed.get("title"), message)
         if title:
@@ -339,8 +339,8 @@ def _format_embeds(message: DiscordMessage) -> str:
     return "\n\n".join(sections)
 
 
-def _build_embed_attachments(embed: Mapping[str, Any], seen_urls: set[str]) -> List[AttachmentInfo]:
-    attachments: List[AttachmentInfo] = []
+def _build_embed_attachments(embed: Mapping[str, Any], seen_urls: set[str]) -> list[AttachmentInfo]:
+    attachments: list[AttachmentInfo] = []
 
     for key, category in (
         ("image", "image/unknown"),
@@ -452,15 +452,15 @@ def _ensure_customised_text(
     )
 
 
-def _split_and_normalise(text: str) -> List[str]:
+def _split_and_normalise(text: str) -> list[str]:
     if not text:
         return []
     raw_lines = [line.rstrip() for line in text.splitlines()]
     return _collapse_blank_lines(raw_lines)
 
 
-def _assemble_sections(customised: CustomisedText) -> List[str]:
-    sections: List[List[str]] = []
+def _assemble_sections(customised: CustomisedText) -> list[str]:
+    sections: list[list[str]] = []
     if customised.header_lines:
         sections.append(list(customised.header_lines))
     if customised.body_lines:
@@ -468,7 +468,7 @@ def _assemble_sections(customised: CustomisedText) -> List[str]:
     if customised.footer_lines:
         sections.append(list(customised.footer_lines))
 
-    lines: List[str] = []
+    lines: list[str] = []
     for block in sections:
         cleaned = _collapse_blank_lines(block)
         if not cleaned:
@@ -482,7 +482,7 @@ def _assemble_sections(customised: CustomisedText) -> List[str]:
 def _build_chip_line(
     channel_label: str | None, author: str, chips: Sequence[str]
 ) -> str:
-    ordered: List[str] = []
+    ordered: list[str] = []
     for candidate in (channel_label, author, *chips):
         text = (candidate or "").strip()
         if not text or text in ordered:
@@ -498,7 +498,7 @@ def _attachment_summary(
 ) -> str | None:
     if not attachments:
         return None
-    domains: List[str] = []
+    domains: list[str] = []
     for attachment in attachments:
         domain = attachment.domain or attachment.url
         if not domain:
@@ -526,8 +526,8 @@ def _escape_html(value: str) -> str:
     return html.escape(value, quote=False)
 
 
-def _collapse_blank_lines(lines: Sequence[str]) -> List[str]:
-    result: List[str] = []
+def _collapse_blank_lines(lines: Sequence[str]) -> list[str]:
+    result: list[str] = []
     blank = False
     for line in lines:
         if line is None:
@@ -545,8 +545,8 @@ def _collapse_blank_lines(lines: Sequence[str]) -> List[str]:
     return result
 
 
-def _deduplicate_consecutive(lines: Sequence[str]) -> List[str]:
-    trimmed: List[str] = []
+def _deduplicate_consecutive(lines: Sequence[str]) -> list[str]:
+    trimmed: list[str] = []
     previous_key: str | None = None
     for line in lines:
         if not line:
@@ -569,38 +569,48 @@ def _deduplicate_consecutive(lines: Sequence[str]) -> List[str]:
     return trimmed
 
 
-def _chunk_html(text: str, limit: int, ellipsis: str) -> List[str]:
+_SAFE_CUT_FRACTION = 0.6
+
+
+def _chunk_html(text: str, limit: int, ellipsis: str) -> list[str]:
     if limit <= 0 or len(text) <= limit:
         return [text]
 
-    chunks: List[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
+    chunks: list[str] = []
+    start_index = 0
+    text_length = len(text)
+    while start_index < text_length:
+        remaining_length = text_length - start_index
+        if remaining_length <= limit:
+            chunks.append(text[start_index:])
             break
 
-        cut = _find_safe_cut(remaining, limit)
-        fragment = remaining[:cut].rstrip()
+        cut = _find_safe_cut(text, start_index, limit)
+        fragment = text[start_index:cut].rstrip()
         fragment = _trim_partial_entity(fragment)
         if not fragment:
-            fragment = _trim_partial_entity(remaining[:limit])
+            fragment = _trim_partial_entity(text[start_index : start_index + limit])
         if not fragment:
-            fragment = remaining[:limit]
+            fragment = text[start_index : start_index + limit]
+
+        start_index += len(fragment)
         chunks.append(f"{fragment}{ellipsis}")
-        remaining = remaining[len(fragment) :].lstrip()
+
+        while start_index < text_length and text[start_index].isspace():
+            start_index += 1
 
     return chunks
 
 
-def _find_safe_cut(text: str, limit: int) -> int:
-    newline = text.rfind("\n", 0, limit)
-    if newline > limit * 0.6:
+def _find_safe_cut(text: str, start: int, limit: int) -> int:
+    upper_bound = min(start + limit, len(text))
+    newline = text.rfind("\n", start, upper_bound)
+    if newline != -1 and newline - start > limit * _SAFE_CUT_FRACTION:
         return newline
-    space = text.rfind(" ", 0, limit)
-    if space > limit * 0.6:
+    space = text.rfind(" ", start, upper_bound)
+    if space != -1 and space - start > limit * _SAFE_CUT_FRACTION:
         return space
-    return limit
+    return upper_bound
 
 
 def _trim_partial_entity(fragment: str) -> str:

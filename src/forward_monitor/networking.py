@@ -4,7 +4,7 @@ import asyncio
 import random
 from collections import deque
 from types import TracebackType
-from typing import Iterable, Optional
+from typing import Iterable
 
 import aiohttp
 
@@ -121,7 +121,7 @@ class UserAgentProvider:
         self._mobile_ratio = min(max(float(settings.mobile_ratio), 0.0), 1.0)
         self._random = random.Random()
 
-    def pick(self, *, prefer_mobile: Optional[bool] = None) -> str:
+    def pick(self, *, prefer_mobile: bool | None = None) -> str:
         if prefer_mobile is None:
             prefer_mobile = self._random.random() < self._mobile_ratio
         pool = self._mobile if prefer_mobile else self._desktop
@@ -185,7 +185,8 @@ class ProxyPool:
             ) as response:
                 if response.status >= 400:
                     raise aiohttp.ClientError(f"status={response.status}")
-        except Exception as exc:  # pragma: no cover - network failure paths
+        # pragma: no cover - network failure paths exercised via integration tests.
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             await self.mark_bad(proxy, reason=f"health_check_failed:{exc}")
             return False
         async with self._lock:
