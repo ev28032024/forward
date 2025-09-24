@@ -30,7 +30,6 @@ from .formatter import (
     format_announcement_message,
 )
 from .networking import ProxyPool, SoftRateLimiter, UserAgentProvider
-from .state import MonitorState
 from .structured_logging import log_event
 from .telegram_client import TelegramClient
 from .types import DiscordMessage
@@ -172,12 +171,6 @@ class TelegramSender(Protocol):
     ) -> Any: ...
 
 
-class StateStore(Protocol):
-    def get_last_message_id(self, channel_id: int) -> str | None: ...
-
-    def update_last_message_id(self, channel_id: int, message_id: str) -> None: ...
-
-
 _DISCORD_FETCH_LIMIT = 100
 _DISCORD_CONCURRENCY_LIMIT = 8
 
@@ -198,6 +191,36 @@ class _ChannelFetchResult:
     messages: list[DiscordMessage]
     truncated: bool
     timed_out: bool
+
+
+class _RunState:
+    """Tracks which messages have already been forwarded during a run."""
+
+    __slots__ = ("_initialised", "_last_message_ids")
+
+    def __init__(self) -> None:
+        self._initialised: set[int] = set()
+        self._last_message_ids: dict[int, str] = {}
+
+    def last_seen(self, channel_id: int) -> str | None:
+        return self._last_message_ids.get(channel_id)
+
+    def is_initialised(self, channel_id: int) -> bool:
+        return channel_id in self._initialised
+
+    def baseline(self, channel_id: int, last_message_id: str | None) -> None:
+        self._initialised.add(channel_id)
+        if last_message_id:
+            normalized = last_message_id.strip()
+            if normalized:
+                self._last_message_ids[channel_id] = normalized
+
+    def mark_forwarded(self, channel_id: int, message_id: str) -> None:
+        normalized = message_id.strip()
+        if not normalized:
+            return
+        self._initialised.add(channel_id)
+        self._last_message_ids[channel_id] = normalized
 
 
 @dataclass(slots=True)
@@ -290,7 +313,7 @@ def _channel_contexts(
 async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
     """Start the monitoring loop."""
 
-    state = MonitorState(config.runtime.state_file)
+    run_state = _RunState()
 
     timeout = aiohttp.ClientTimeout(total=60)
     connector = aiohttp.TCPConnector(limit=64, ttl_dns_cache=300)
@@ -345,7 +368,7 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     announcement_contexts,
                     discord,
                     telegram,
-                    state,
+                    run_state,
                     config.runtime.min_delay,
                     config.runtime.max_delay,
                     config.runtime.max_messages_per_channel,
@@ -368,7 +391,6 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     },
                 )
             except asyncio.CancelledError:
-                state.save()
                 raise
             except (
                 asyncio.TimeoutError,
@@ -387,9 +409,6 @@ async def run_monitor(config: MonitorConfig, *, once: bool = False) -> None:
                     latency_ms=(perf_counter() - iteration_start) * 1000,
                     extra={"error": type(exc).__name__},
                 )
-            finally:
-                state.save()
-
             if once:
                 break
 
@@ -400,7 +419,7 @@ async def _sync_announcements(
     contexts: Sequence[ChannelContext],
     discord: DiscordService,
     telegram: TelegramSender,
-    state: StateStore,
+    state: _RunState,
     min_delay: float,
     max_delay: float,
     max_messages: int,
@@ -413,9 +432,10 @@ async def _sync_announcements(
     results: dict[int, _ChannelFetchResult] = {}
     total_fetched = 0
     total_forwarded = 0
+
     async def _fetch_and_store(context: ChannelContext) -> None:
         channel_id = context.mapping.discord_channel_id
-        last_seen = state.get_last_message_id(channel_id)
+        last_seen = state.last_seen(channel_id)
         result = await _fetch_channel_messages(
             context,
             discord,
@@ -437,6 +457,15 @@ async def _sync_announcements(
         if result is None:
             continue
         messages = result.messages
+
+        if not state.is_initialised(channel_id):
+            baseline_id: str | None = None
+            if messages:
+                last_message = messages[-1]
+                baseline_id = str(last_message.get("id", "")).strip() or None
+            state.baseline(channel_id, baseline_id)
+            continue
+
         if not messages:
             continue
 
@@ -479,7 +508,7 @@ async def _sync_announcements(
                     total_forwarded += 1
 
         if last_processed_id is not None:
-            state.update_last_message_id(channel_id, last_processed_id)
+            state.mark_forwarded(channel_id, last_processed_id)
 
     return total_fetched, total_forwarded
 
