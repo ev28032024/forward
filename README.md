@@ -51,7 +51,6 @@ python -m forward_monitor --config config.yml
 
 ### runtime
 - `poll_every` — интервал опроса Discord.
-- `state_file` — **устарело**, опция сохранена ради совместимости и игнорируется.
 - `max_messages`, `max_fetch_seconds` — лимиты количества сообщений и ожидания API.
 - `delays.min`/`delays.max` — случайные паузы перед отправкой в Telegram.
 
