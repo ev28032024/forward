@@ -18,8 +18,8 @@ from forward_monitor.formatter import AttachmentInfo, FormattedMessage, format_a
 from forward_monitor.monitor import (
     AnnouncementFormatter,
     ChannelContext,
-    _RunState,
     _forward_message,
+    _RunState,
     _sync_announcements,
 )
 from forward_monitor.types import DiscordMessage
@@ -86,6 +86,8 @@ class StubTelegram:
         self.sent.append((chat_id, f"document:{document}"))
         if caption:
             self.sent.append((chat_id, caption))
+
+
 @pytest.mark.asyncio
 async def test_forward_message_sends_extra_messages() -> None:
     context = ChannelContext(
