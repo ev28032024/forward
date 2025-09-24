@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from types import TracebackType
 from typing import Sequence, cast
@@ -89,20 +88,19 @@ async def test_run_monitor_propagates_cancellation(
     monkeypatch.setattr(monitor, "DiscordClient", DummyDiscordClient)
     monkeypatch.setattr(monitor, "TelegramClient", DummyTelegramClient)
 
-    state_file = tmp_path / "state.json"
-
     async def fake_sync(
         contexts: Sequence[monitor.ChannelContext],
         discord: monitor.DiscordClient,
         telegram: monitor.TelegramClient,
-        state: monitor.MonitorState,
+        state: monitor._RunState,
         min_delay: float,
         max_delay: float,
         max_messages: int,
         max_fetch_seconds: float,
         api_semaphore: asyncio.Semaphore,
     ) -> None:
-        state.update_last_message_id(123, "456")
+        state.mark_forwarded(123, "456")
+        assert state.last_seen(123) == "456"
         raise asyncio.CancelledError
 
     monkeypatch.setattr(monitor, "_sync_announcements", fake_sync)
@@ -117,7 +115,7 @@ async def test_run_monitor_propagates_cancellation(
     config = MonitorConfig(
         discord=discord_settings,
         telegram=telegram_settings,
-        runtime=MonitorRuntime(poll_interval=1, state_file=state_file),
+        runtime=MonitorRuntime(poll_interval=1, state_file=tmp_path / "state.json"),
         defaults=defaults,
         channels=(
             ChannelMapping(
@@ -132,11 +130,6 @@ async def test_run_monitor_propagates_cancellation(
 
     with pytest.raises(asyncio.CancelledError):
         await monitor.run_monitor(config)
-
-    assert state_file.exists()
-    with state_file.open("r", encoding="utf-8") as file:
-        data = json.load(file)
-    assert data["last_message_ids"]["123"] == "456"
 
 
 @pytest.mark.asyncio
@@ -210,6 +203,85 @@ async def test_run_monitor_logs_startup_user_agents(
             services.add(service)
     assert services == {"discord", "telegram"}
     assert verify_calls, "Expected proxies to be validated before the monitor loop"
+
+
+@pytest.mark.asyncio
+async def test_sync_announcements_ignores_existing_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapping = ChannelMapping(discord_channel_id=1, telegram_chat_id="chat")
+    context = monitor.ChannelContext(
+        mapping=mapping,
+        filters=mapping.filters.prepare(),
+        customization=mapping.customization.prepare(),
+        formatting=mapping.formatting,
+    )
+
+    backlog = [{"id": "100"}, {"id": "101"}]
+    new_messages = [{"id": "102"}]
+    fetch_calls: list[str | None] = []
+
+    async def fake_fetch_channel_messages(
+        ctx: monitor.ChannelContext,
+        discord: monitor.DiscordService,
+        last_seen: str | None,
+        *,
+        limit: int,
+        max_messages: int,
+        max_duration_seconds: float,
+        api_semaphore: asyncio.Semaphore,
+    ) -> monitor._ChannelFetchResult:
+        assert ctx is context
+        fetch_calls.append(last_seen)
+        messages = backlog if len(fetch_calls) == 1 else new_messages
+        return monitor._ChannelFetchResult(ctx, messages, False, False)
+
+    forwarded: list[str] = []
+
+    async def fake_forward_message(**kwargs: object) -> bool:
+        message = kwargs.get("message")
+        assert isinstance(message, dict)
+        forwarded.append(str(message.get("id")))
+        return True
+
+    monkeypatch.setattr(monitor, "_fetch_channel_messages", fake_fetch_channel_messages)
+    monkeypatch.setattr(monitor, "_forward_message", fake_forward_message)
+
+    state = monitor._RunState()
+
+    first_result = await monitor._sync_announcements(
+        (context,),
+        cast(monitor.DiscordService, object()),
+        cast(monitor.TelegramSender, object()),
+        state,
+        min_delay=0,
+        max_delay=0,
+        max_messages=10,
+        max_fetch_seconds=5.0,
+        api_semaphore=asyncio.Semaphore(1),
+    )
+
+    assert first_result == (0, 0)
+    assert forwarded == []
+    assert state.is_initialised(1)
+    assert state.last_seen(1) == "101"
+    assert fetch_calls == [None]
+
+    second_result = await monitor._sync_announcements(
+        (context,),
+        cast(monitor.DiscordService, object()),
+        cast(monitor.TelegramSender, object()),
+        state,
+        min_delay=0,
+        max_delay=0,
+        max_messages=10,
+        max_fetch_seconds=5.0,
+        api_semaphore=asyncio.Semaphore(1),
+    )
+
+    assert second_result == (1, 1)
+    assert forwarded == ["102"]
+    assert fetch_calls[-1] == "101"
 
 
 @pytest.mark.asyncio

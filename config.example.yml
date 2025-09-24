@@ -123,7 +123,7 @@ network:
 
 runtime:
   poll_every: 300                        # пауза между опросами Discord (сек)
-  state_file: "monitor_state.json"       # путь к файлу состояния
+  state_file: "monitor_state.json"       # устарело, параметр игнорируется
   max_messages: 1000                     # максимум сообщений за цикл канала
   max_fetch_seconds: 5.0                 # предел ожидания Discord API
   delays:

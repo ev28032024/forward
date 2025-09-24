@@ -18,6 +18,7 @@ from forward_monitor.formatter import AttachmentInfo, FormattedMessage, format_a
 from forward_monitor.monitor import (
     AnnouncementFormatter,
     ChannelContext,
+    _RunState,
     _forward_message,
     _sync_announcements,
 )
@@ -85,19 +86,6 @@ class StubTelegram:
         self.sent.append((chat_id, f"document:{document}"))
         if caption:
             self.sent.append((chat_id, caption))
-
-
-class DummyState:
-    def __init__(self) -> None:
-        self._values: dict[int, str] = {}
-
-    def get_last_message_id(self, channel_id: int) -> str | None:
-        return self._values.get(channel_id)
-
-    def update_last_message_id(self, channel_id: int, message_id: str) -> None:
-        self._values[channel_id] = message_id
-
-
 @pytest.mark.asyncio
 async def test_forward_message_sends_extra_messages() -> None:
     context = ChannelContext(
@@ -247,7 +235,8 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
 
     discord = FakeDiscord([first_batch, second_batch])
     telegram = StubTelegram()
-    state = DummyState()
+    state = _RunState()
+    state.baseline(5, None)
     api_semaphore = asyncio.Semaphore(8)
 
     fetched, forwarded_count = await _sync_announcements(
@@ -264,7 +253,7 @@ async def test_sync_announcements_fetches_multiple_batches() -> None:
 
     # 102 messages should have been forwarded once.
     assert len(telegram.sent) == 102
-    assert state._values[5] == "102"
+    assert state.last_seen(5) == "102"
     assert fetched == 102
     assert forwarded_count == 102
     assert discord.calls == [
@@ -328,7 +317,9 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
 
     discord = ParallelDiscord()
     telegram = StubTelegram()
-    state = DummyState()
+    state = _RunState()
+    state.baseline(11, None)
+    state.baseline(12, None)
     api_semaphore = asyncio.Semaphore(8)
 
     sync_task = asyncio.create_task(
@@ -355,8 +346,8 @@ async def test_sync_announcements_fetches_channels_in_parallel() -> None:
     assert {call for call in discord.calls} == {11, 12}
     assert any("slow news" in text for _, text in telegram.sent)
     assert any("fast update" in text for _, text in telegram.sent)
-    assert state._values[11] == "21"
-    assert state._values[12] == "12"
+    assert state.last_seen(11) == "21"
+    assert state.last_seen(12) == "12"
     assert fetched == 2
     assert forwarded_count == 2
 
@@ -404,7 +395,8 @@ async def test_sync_announcements_skips_failed_message(
     monkeypatch.setattr("forward_monitor.monitor._forward_message", failing_forward)
 
     telegram = StubTelegram()
-    state = DummyState()
+    state = _RunState()
+    state.baseline(7, None)
     api_semaphore = asyncio.Semaphore(8)
 
     fetched, forwarded_count = await _sync_announcements(
@@ -421,7 +413,7 @@ async def test_sync_announcements_skips_failed_message(
 
     assert forwarded == ["second"]
     assert failures == ["31"]
-    assert state._values[7] == "32"
+    assert state.last_seen(7) == "32"
     assert fetched == 2
     assert forwarded_count == 1
 
@@ -455,7 +447,8 @@ async def test_sync_announcements_counts_only_forwarded_messages() -> None:
             ]
 
     telegram = StubTelegram()
-    state = DummyState()
+    state = _RunState()
+    state.baseline(8, None)
     api_semaphore = asyncio.Semaphore(8)
 
     fetched, forwarded_count = await _sync_announcements(
@@ -472,6 +465,6 @@ async def test_sync_announcements_counts_only_forwarded_messages() -> None:
 
     assert fetched == 2
     assert forwarded_count == 1
-    assert state._values[8] == "42"
+    assert state.last_seen(8) == "42"
     assert any("keep me" in text for _, text in telegram.sent)
     assert all("ignore" not in text for _, text in telegram.sent)
