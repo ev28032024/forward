@@ -21,6 +21,7 @@ from forward_monitor.config import (
     TelegramSettings,
 )
 from forward_monitor.networking import ProxyPool
+from forward_monitor.types import DiscordMessage
 
 
 class DummySession:
@@ -217,8 +218,8 @@ async def test_sync_announcements_ignores_existing_history(
         formatting=mapping.formatting,
     )
 
-    backlog = [{"id": "100"}, {"id": "101"}]
-    new_messages = [{"id": "102"}]
+    backlog: list[DiscordMessage] = [{"id": "100"}, {"id": "101"}]
+    new_messages: list[DiscordMessage] = [{"id": "102"}]
     fetch_calls: list[str | None] = []
 
     async def fake_fetch_channel_messages(
