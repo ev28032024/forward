@@ -735,7 +735,7 @@ class TelegramController:
                 _describe_filters(
                     default_filter_sets,
                     indent="&nbsp;&nbsp;",
-                    empty_message="• нет активных фильтров",
+                    empty_message="• Нет активных фильтров",
                 )
             )
         else:
