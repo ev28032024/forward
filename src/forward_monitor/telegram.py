@@ -22,6 +22,10 @@ class TelegramAPIProtocol(Protocol):
         timeout: int = 30,
     ) -> list[dict[str, Any]]: ...
 
+    async def set_my_commands(
+        self, commands: Iterable[tuple[str, str]]
+    ) -> None: ...
+
     async def send_message(
         self,
         chat_id: int | str,
@@ -68,6 +72,26 @@ class TelegramAPI:
         if not payload.get("ok"):
             return []
         return list(payload.get("result") or [])
+
+    async def set_my_commands(self, commands: Iterable[tuple[str, str]]) -> None:
+        url = f"{_API_BASE}/bot{self._token}/setMyCommands"
+        payload = {
+            "commands": [
+                {"command": name, "description": description[:256]}
+                for name, description in commands
+            ]
+        }
+        try:
+            timeout_cfg = aiohttp.ClientTimeout(total=15)
+            async with self._session.post(
+                url,
+                json=payload,
+                proxy=self._proxy,
+                timeout=timeout_cfg,
+            ) as resp:
+                await resp.read()
+        except aiohttp.ClientError:
+            return
 
     async def send_message(
         self,
@@ -125,6 +149,169 @@ class CommandContext:
 AdminCheck = Callable[[str], bool]
 
 
+@dataclass(frozen=True, slots=True)
+class _CommandInfo:
+    name: str
+    summary: str
+    help_text: str
+    admin_only: bool = True
+
+
+BOT_COMMANDS: tuple[_CommandInfo, ...] = (
+    _CommandInfo(
+        name="start",
+        summary="Приветствие и краткая справка.",
+        help_text="/start — Forward Monitor готов. Используйте /help для списка команд.",
+        admin_only=False,
+    ),
+    _CommandInfo(
+        name="help",
+        summary="Список команд управления.",
+        help_text="/help — полный список команд.",
+        admin_only=False,
+    ),
+    _CommandInfo(
+        name="claim",
+        summary="Назначить себя администратором.",
+        help_text="/claim — стать администратором (если список пуст)",
+        admin_only=False,
+    ),
+    _CommandInfo(
+        name="status",
+        summary="Показать текущие настройки.",
+        help_text="/status — текущая конфигурация",
+        admin_only=False,
+    ),
+    _CommandInfo(
+        name="admins",
+        summary="Показать администраторов.",
+        help_text="/admins — показать администраторов",
+    ),
+    _CommandInfo(
+        name="grant",
+        summary="Выдать права администрирования.",
+        help_text="/grant <id> — выдать права",
+    ),
+    _CommandInfo(
+        name="revoke",
+        summary="Отозвать права администрирования.",
+        help_text="/revoke <id> — отобрать права",
+    ),
+    _CommandInfo(
+        name="set_discord_token",
+        summary="Сохранить токен Discord.",
+        help_text="/set_discord_token <token>",
+    ),
+    _CommandInfo(
+        name="add_channel",
+        summary="Добавить связку каналов.",
+        help_text="/add_channel <discord_id> <telegram_chat> [метка]",
+    ),
+    _CommandInfo(
+        name="remove_channel",
+        summary="Удалить связку каналов.",
+        help_text="/remove_channel <discord_id>",
+    ),
+    _CommandInfo(
+        name="list_channels",
+        summary="Показать все связки каналов.",
+        help_text="/list_channels",
+    ),
+    _CommandInfo(
+        name="set_header",
+        summary="Задать шапку сообщений.",
+        help_text="/set_header <discord_id|all> <текст>",
+    ),
+    _CommandInfo(
+        name="set_footer",
+        summary="Задать подпись сообщений.",
+        help_text="/set_footer <discord_id|all> <текст>",
+    ),
+    _CommandInfo(
+        name="set_chip",
+        summary="Задать маркер-стикер.",
+        help_text="/set_chip <discord_id|all> <текст>",
+    ),
+    _CommandInfo(
+        name="set_parse_mode",
+        summary="Выбрать режим форматирования.",
+        help_text="/set_parse_mode <discord_id|all> <markdownv2|markdown|html|text>",
+    ),
+    _CommandInfo(
+        name="set_disable_preview",
+        summary="Управлять предпросмотром ссылок.",
+        help_text="/set_disable_preview <discord_id|all> <on|off>",
+    ),
+    _CommandInfo(
+        name="set_max_length",
+        summary="Ограничить длину сообщений.",
+        help_text="/set_max_length <discord_id|all> <число>",
+    ),
+    _CommandInfo(
+        name="set_attachments",
+        summary="Выбрать стиль вложений.",
+        help_text="/set_attachments <discord_id|all> <summary|links>",
+    ),
+    _CommandInfo(
+        name="add_filter",
+        summary="Добавить фильтр сообщений.",
+        help_text="/add_filter <discord_id|all> <тип> <значение>",
+    ),
+    _CommandInfo(
+        name="clear_filter",
+        summary="Удалить фильтры сообщений.",
+        help_text="/clear_filter <discord_id|all> <тип> [значение]",
+    ),
+    _CommandInfo(
+        name="add_replace",
+        summary="Добавить правило замены.",
+        help_text="/add_replace <discord_id|all> шаблон => замена",
+    ),
+    _CommandInfo(
+        name="clear_replace",
+        summary="Удалить правила замены.",
+        help_text="/clear_replace <discord_id|all> [шаблон]",
+    ),
+    _CommandInfo(
+        name="set_proxy",
+        summary="Настроить прокси-серверы.",
+        help_text="/set_proxy <discord|telegram|clear> [url]",
+    ),
+    _CommandInfo(
+        name="set_user_agent",
+        summary="Сохранить user-agent Discord.",
+        help_text="/set_user_agent <desktop|mobile> <значение>",
+    ),
+    _CommandInfo(
+        name="set_mobile_ratio",
+        summary="Установить долю мобильных запросов.",
+        help_text="/set_mobile_ratio <0-1>",
+    ),
+    _CommandInfo(
+        name="set_poll",
+        summary="Изменить интервал опроса Discord.",
+        help_text="/set_poll <секунды>",
+    ),
+    _CommandInfo(
+        name="set_delay",
+        summary="Настроить случайную задержку отправки.",
+        help_text="/set_delay <min_ms> <max_ms>",
+    ),
+    _CommandInfo(
+        name="set_rate",
+        summary="Настроить лимиты запросов.",
+        help_text="/set_rate <discord|telegram> <в_секунду>",
+    ),
+    _CommandInfo(
+        name="set_fallback_chat",
+        summary="Указать резервный чат Telegram.",
+        help_text="/set_fallback_chat <chat_id>",
+    ),
+)
+
+_COMMAND_MAP = {info.name: info for info in BOT_COMMANDS}
+
+
 class TelegramController:
     """Interactive Telegram bot that manages runtime configuration."""
 
@@ -140,13 +327,20 @@ class TelegramController:
         self._offset = 0
         self._running = True
         self._on_change = on_change
+        self._commands_registered = False
 
     async def run(self) -> None:
+        await self._ensure_commands_registered()
         while self._running:
             updates = await self._api.get_updates(self._offset, timeout=25)
             for update in updates:
                 self._offset = max(self._offset, int(update.get("update_id", 0)) + 1)
                 await self._handle_update(update)
+
+    def stop(self) -> None:
+        """Stop the controller loop on the next iteration."""
+
+        self._running = False
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message") or update.get("edited_message")
@@ -173,7 +367,8 @@ class TelegramController:
         if handler is None:
             await self._api.send_message(ctx.chat_id, f"Неизвестная команда: {command}")
             return
-        requires_admin = command not in {"start", "help", "claim", "status"}
+        info = _COMMAND_MAP.get(command)
+        requires_admin = info.admin_only if info else True
         if requires_admin and ctx.user_id not in self._store.list_admins():
             await self._api.send_message(ctx.chat_id, "Команда доступна только администраторам")
             return
@@ -189,36 +384,12 @@ class TelegramController:
         )
 
     async def cmd_help(self, ctx: CommandContext) -> None:
-        commands = [
-            "/claim — стать администратором (если список пуст)",
-            "/admins — показать администраторов",
-            "/grant <id> — выдать права",
-            "/revoke <id> — отобрать права",
-            "/status — текущая конфигурация",
-            "/set_discord_token <token>",
-            "/add_channel <discord_id> <telegram_chat> [метка]",
-            "/remove_channel <discord_id>",
-            "/list_channels",
-            "/set_header <discord_id|all> <текст>",
-            "/set_footer <discord_id|all> <текст>",
-            "/set_chip <discord_id|all> <текст>",
-            "/set_parse_mode <discord_id|all> <markdownv2|markdown|html|text>",
-            "/set_disable_preview <discord_id|all> <on|off>",
-            "/set_max_length <discord_id|all> <число>",
-            "/set_attachments <discord_id|all> <summary|links>",
-            "/add_filter <discord_id|all> <тип> <значение>",
-            "/clear_filter <discord_id|all> <тип> [значение]",
-            "/add_replace <discord_id|all> шаблон => замена",
-            "/clear_replace <discord_id|all> [шаблон]",
-            "/set_proxy <discord|telegram|clear> [url]",
-            "/set_user_agent <desktop|mobile> <значение>",
-            "/set_mobile_ratio <0-1>",
-            "/set_poll <секунды>",
-            "/set_delay <min_ms> <max_ms>",
-            "/set_rate <discord|telegram> <в_секунду>",
-            "/set_fallback_chat <chat_id>",
-        ]
-        await self._api.send_message(ctx.chat_id, "\n".join(commands))
+        await self._api.send_message(
+            ctx.chat_id,
+            "\n".join(
+                info.help_text for info in BOT_COMMANDS if info.name not in {"start", "help"}
+            ),
+        )
 
     async def cmd_status(self, ctx: CommandContext) -> None:
         discord_token = "установлен" if self._store.get_setting("discord.token") else "нет"
@@ -614,6 +785,14 @@ class TelegramController:
         if not ids or not pattern:
             return (None, "", "")
         return (ids, pattern, replacement)
+
+    async def _ensure_commands_registered(self) -> None:
+        if self._commands_registered:
+            return
+        await self._api.set_my_commands(
+            (info.name, info.summary) for info in BOT_COMMANDS
+        )
+        self._commands_registered = True
 
 
 async def send_formatted(

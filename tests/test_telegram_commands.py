@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Iterable
 from pathlib import Path
 
 from forward_monitor.config_store import ConfigStore
@@ -10,6 +11,7 @@ from forward_monitor.telegram import CommandContext, TelegramController
 class DummyAPI:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.commands: list[tuple[str, str]] = []
 
     def set_proxy(self, proxy: str | None) -> None:
         return None
@@ -21,6 +23,9 @@ class DummyAPI:
     ) -> list[dict[str, object]]:
         await asyncio.sleep(0)
         return []
+
+    async def set_my_commands(self, commands: Iterable[tuple[str, str]]) -> None:
+        self.commands = list(commands)
 
     async def send_message(
         self,
