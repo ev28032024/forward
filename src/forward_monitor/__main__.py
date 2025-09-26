@@ -31,7 +31,10 @@ def main() -> None:
         )
 
     app = ForwardMonitorApp(db_path=Path(args.db_path), telegram_token=token)
-    asyncio.run(app.run())
+    try:
+        asyncio.run(app.run())
+    except KeyboardInterrupt:
+        logging.getLogger(__name__).info("Остановка по запросу пользователя")
 
 
 if __name__ == "__main__":

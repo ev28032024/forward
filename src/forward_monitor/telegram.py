@@ -16,6 +16,7 @@ import aiohttp
 from .config_store import AdminRecord, ConfigStore
 from .discord import DiscordClient
 from .models import FormattedTelegramMessage
+from .utils import parse_delay_setting
 
 _API_BASE = "https://api.telegram.org"
 
@@ -27,6 +28,10 @@ _FILTER_LABELS = {
     "allowed_types": "разрешённые типы",
     "blocked_types": "запрещённые типы",
 }
+
+
+def _format_seconds(value: float) -> str:
+    return (f"{value:.2f}").rstrip("0").rstrip(".") or "0"
 
 
 def _normalize_username(username: str | None) -> str | None:
@@ -274,7 +279,7 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="set_delay",
         summary="Настроить случайную задержку отправки.",
-        help_text="/set_delay <min_ms> <max_ms>",
+        help_text="/set_delay <min_s> <max_s>",
     ),
     _CommandInfo(
         name="set_rate",
@@ -471,7 +476,7 @@ class TelegramController:
                 "⏱ Режим работы",
                 [
                     ("/set_poll <секунды>", "Частота опроса Discord."),
-                    ("/set_delay <min_ms> <max_ms>", "Случайная пауза между сообщениями."),
+                    ("/set_delay <min_s> <max_s>", "Случайная пауза между сообщениями."),
                     ("/set_rate <в_секунду>", "Общий лимит запросов в секунду."),
                 ],
             ),
@@ -524,8 +529,12 @@ class TelegramController:
         proxy_password = self._store.get_setting("proxy.discord.password")
         user_agent = self._store.get_setting("ua.discord") or "стандартный"
         poll = self._store.get_setting("runtime.poll") or "2.0"
-        delay_min = self._store.get_setting("runtime.delay_min") or "0"
-        delay_max = self._store.get_setting("runtime.delay_max") or "0"
+        delay_min_raw = self._store.get_setting("runtime.delay_min")
+        delay_max_raw = self._store.get_setting("runtime.delay_max")
+        delay_min_value = parse_delay_setting(delay_min_raw, 0.0)
+        delay_max_value = parse_delay_setting(delay_max_raw, 0.0)
+        if delay_max_value < delay_min_value:
+            delay_max_value = delay_min_value
         rate = self._store.get_setting("runtime.rate")
         if rate is None:
             legacy_discord = self._store.get_setting("runtime.discord_rate") or "4.0"
@@ -627,8 +636,9 @@ class TelegramController:
             "",
             "<b>Режим работы</b>",
             f"• Интервал опроса: {html.escape(str(poll))} с",
-            f"• Пауза между сообщениями: "
-            f"{html.escape(str(delay_min))}–{html.escape(str(delay_max))} мс",
+            "• Пауза между сообщениями: "
+            f"{html.escape(_format_seconds(delay_min_value))}–"
+            f"{html.escape(_format_seconds(delay_max_value))} с",
             f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
             "",
             "<b>Оформление по умолчанию</b>",
@@ -887,19 +897,21 @@ class TelegramController:
     async def cmd_set_delay(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if len(parts) != 2:
-            await self._api.send_message(ctx.chat_id, "Использование: /set_delay <min_ms> <max_ms>")
+            await self._api.send_message(
+                ctx.chat_id, "Использование: /set_delay <min_s> <max_s>"
+            )
             return
         try:
-            min_ms = int(parts[0])
-            max_ms = int(parts[1])
+            min_seconds = float(parts[0])
+            max_seconds = float(parts[1])
         except ValueError:
-            await self._api.send_message(ctx.chat_id, "Значения должны быть целыми")
+            await self._api.send_message(ctx.chat_id, "Укажите числа в секундах")
             return
-        if min_ms < 0 or max_ms < min_ms:
+        if min_seconds < 0 or max_seconds < min_seconds:
             await self._api.send_message(ctx.chat_id, "Неверный диапазон")
             return
-        self._store.set_setting("runtime.delay_min", str(min_ms))
-        self._store.set_setting("runtime.delay_max", str(max_ms))
+        self._store.set_setting("runtime.delay_min", f"{min_seconds:.2f}")
+        self._store.set_setting("runtime.delay_max", f"{max_seconds:.2f}")
         self._on_change()
         await self._api.send_message(ctx.chat_id, "Диапазон задержек сохранён")
 

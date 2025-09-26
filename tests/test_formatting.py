@@ -60,7 +60,7 @@ def test_formatting_chunks_long_text() -> None:
     assert len(formatted.extra_messages) >= 1
 
 
-def test_channel_mentions_removed_from_content() -> None:
+def test_channel_mentions_converted_in_content() -> None:
     channel = sample_channel()
     message = DiscordMessage(
         id="2",
@@ -75,5 +75,5 @@ def test_channel_mentions_removed_from_content() -> None:
 
     formatted = format_discord_message(message, channel)
 
-    assert "<#" not in formatted.text
+    assert "#1234567890" in formatted.text
     assert "See" in formatted.text
