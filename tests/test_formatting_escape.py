@@ -9,9 +9,8 @@ def test_markdown_escape_preserves_special_chars() -> None:
         discord_id="1",
         telegram_chat_id="2",
         label="Test",
-        formatting=FormattingOptions(parse_mode="MarkdownV2"),
+        formatting=FormattingOptions(),
         filters=FilterConfig(),
-        replacements=(),
         last_message_id=None,
         storage_id=1,
     )
@@ -25,5 +24,4 @@ def test_markdown_escape_preserves_special_chars() -> None:
         embeds=(),
     )
     formatted = format_discord_message(message, channel)
-    assert "\\*bold\\*" in formatted.text
-    assert "\\_italic\\_" in formatted.text
+    assert "*bold* _italic_ [link](url)" in formatted.text

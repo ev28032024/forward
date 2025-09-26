@@ -1,24 +1,17 @@
 from __future__ import annotations
 
 from forward_monitor.formatting import format_discord_message
-from forward_monitor.models import (
-    ChannelConfig,
-    DiscordMessage,
-    FilterConfig,
-    FormattingOptions,
-    ReplacementRule,
-)
+from forward_monitor.models import ChannelConfig, DiscordMessage, FilterConfig, FormattingOptions
 
 
 def sample_channel(**overrides: object) -> ChannelConfig:
-    formatting = FormattingOptions(header="Header", footer="Footer", chip="Chip")
+    formatting = FormattingOptions()
     channel = ChannelConfig(
         discord_id="123",
         telegram_chat_id="456",
         label="Label",
         formatting=formatting,
         filters=FilterConfig(),
-        replacements=(ReplacementRule(pattern="foo", replacement="bar"),),
         last_message_id=None,
         storage_id=1,
     )
@@ -27,13 +20,13 @@ def sample_channel(**overrides: object) -> ChannelConfig:
     return channel
 
 
-def test_formatting_includes_header_footer_and_chip() -> None:
+def test_formatting_includes_label_and_author() -> None:
     message = DiscordMessage(
         id="1",
         channel_id="123",
         author_id="99",
         author_name="Author",
-        content="foo content",
+        content="original content",
         attachments=(
             {
                 "url": "https://example.com/file.txt",
@@ -44,12 +37,9 @@ def test_formatting_includes_header_footer_and_chip() -> None:
         embeds=(),
     )
     formatted = format_discord_message(message, sample_channel())
-    body = formatted.text.replace("\\", "")
-    assert "Header" in body
-    assert "Footer" in body
-    assert "Label" in body
-    assert "bar content" in body
-    assert "file.txt" in body
+    assert formatted.text.startswith("Label • Author")
+    assert "original content" in formatted.text
+    assert "file.txt" in formatted.text
 
 
 def test_formatting_chunks_long_text() -> None:

@@ -3,29 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Sequence
-
-
-@dataclass(slots=True)
-class ReplacementRule:
-    """Simple find/replace transformation."""
-
-    pattern: str
-    replacement: str
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(slots=True)
 class FormattingOptions:
     """Configuration affecting Telegram output."""
 
-    parse_mode: str = "MarkdownV2"
     disable_preview: bool = True
     max_length: int = 3500
     ellipsis: str = "…"
     attachments_style: str = "summary"
-    header: str = ""
-    footer: str = ""
-    chip: str = ""
 
 
 @dataclass(slots=True)
@@ -59,7 +47,6 @@ class ChannelConfig:
     label: str
     formatting: FormattingOptions
     filters: FilterConfig
-    replacements: Sequence[ReplacementRule]
     last_message_id: str | None
     active: bool = True
     storage_id: int | None = None
@@ -69,7 +56,6 @@ class ChannelConfig:
         *,
         formatting: FormattingOptions | None = None,
         filters: FilterConfig | None = None,
-        replacements: Iterable[ReplacementRule] | None = None,
         last_message_id: str | None = None,
     ) -> "ChannelConfig":
         return ChannelConfig(
@@ -78,7 +64,6 @@ class ChannelConfig:
             label=self.label,
             formatting=formatting or self.formatting,
             filters=filters or self.filters,
-            replacements=tuple(replacements or self.replacements),
             last_message_id=(
                 last_message_id if last_message_id is not None else self.last_message_id
             ),
