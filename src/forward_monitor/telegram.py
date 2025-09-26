@@ -35,6 +35,10 @@ _FILTER_LABELS = {
 
 _FILTER_TYPES: tuple[str, ...] = tuple(_FILTER_LABELS.keys())
 
+_NBSP = "\u00A0"
+_INDENT = _NBSP * 2
+_DOUBLE_INDENT = _NBSP * 4
+
 
 def _format_seconds(value: float) -> str:
     return (f"{value:.2f}").rstrip("0").rstrip(".") or "0"
@@ -646,13 +650,13 @@ class TelegramController:
                 status_icon = "🟢" if channel.active else "⚪️"
                 channel_lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
                 channel_lines.append(
-                    f"&nbsp;&nbsp;• Discord: <code>{html.escape(channel.discord_id)}</code>"
+                    f"{_INDENT}• Discord: <code>{html.escape(channel.discord_id)}</code>"
                 )
                 channel_lines.append(
-                    f"&nbsp;&nbsp;• Telegram: <code>{html.escape(channel.telegram_chat_id)}</code>"
+                    f"{_INDENT}• Telegram: <code>{html.escape(channel.telegram_chat_id)}</code>"
                 )
                 channel_lines.append(
-                    "&nbsp;&nbsp;• Предпросмотр ссылок: "
+                    f"{_INDENT}• Предпросмотр ссылок: "
                     + (
                         "выключен"
                         if channel.formatting.disable_preview
@@ -660,7 +664,7 @@ class TelegramController:
                     )
                 )
                 channel_lines.append(
-                    f"&nbsp;&nbsp;• Максимальная длина: {channel.formatting.max_length} символов"
+                    f"{_INDENT}• Максимальная длина: {channel.formatting.max_length} символов"
                 )
                 attachment_mode = (
                     "краткий список"
@@ -668,7 +672,7 @@ class TelegramController:
                     else "список ссылок"
                 )
                 channel_lines.append(
-                    "&nbsp;&nbsp;• Вложения: " + attachment_mode
+                    f"{_INDENT}• Вложения: " + attachment_mode
                 )
 
                 channel_filter_sets = _collect_filter_sets(channel.filters)
@@ -681,23 +685,23 @@ class TelegramController:
                     for key in _FILTER_TYPES
                 }
                 if any(extra_filters[name] for name in _FILTER_TYPES):
-                    channel_lines.append("&nbsp;&nbsp;• Дополнительные фильтры:")
+                    channel_lines.append(f"{_INDENT}• Дополнительные фильтры:")
                     channel_lines.extend(
                         _describe_filters(
                             extra_filters,
-                            indent="&nbsp;&nbsp;&nbsp;&nbsp;",
+                            indent=_DOUBLE_INDENT,
                             empty_message="",
                         )
                     )
                 else:
                     if has_default_filters:
                         channel_lines.append(
-                            "&nbsp;&nbsp;• Дополнительные фильтры: нет, "
+                            f"{_INDENT}• Дополнительные фильтры: нет, "
                             "используются глобальные"
                         )
                     else:
                         channel_lines.append(
-                            "&nbsp;&nbsp;• Дополнительные фильтры: нет"
+                            f"{_INDENT}• Дополнительные фильтры: нет"
                         )
 
                 channel_lines.append("")
@@ -734,7 +738,7 @@ class TelegramController:
             lines.extend(
                 _describe_filters(
                     default_filter_sets,
-                    indent="&nbsp;&nbsp;",
+                    indent=_INDENT,
                     empty_message="• Нет активных фильтров",
                 )
             )
