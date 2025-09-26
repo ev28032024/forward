@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+from typing import Any, Iterable, Mapping
+
 from forward_monitor.filters import FilterEngine
 from forward_monitor.models import DiscordMessage, FilterConfig
 
 
-def make_message(**kwargs: object) -> DiscordMessage:
+def make_message(**kwargs: Any) -> DiscordMessage:
+    attachments: Iterable[Mapping[str, Any]] = kwargs.get("attachments", [])
+    embeds: Iterable[Mapping[str, Any]] = kwargs.get("embeds", [])
     return DiscordMessage(
         id=str(kwargs.get("id", "1")),
         channel_id=str(kwargs.get("channel_id", "10")),
         author_id=str(kwargs.get("author_id", "42")),
         author_name=str(kwargs.get("author_name", "User")),
         content=str(kwargs.get("content", "")),
-        attachments=tuple(kwargs.get("attachments", [])),
-        embeds=tuple(kwargs.get("embeds", [])),
+        attachments=tuple(attachments),
+        embeds=tuple(embeds),
     )
 
 

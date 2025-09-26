@@ -6,15 +6,11 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator
 
 from .models import ChannelConfig, FilterConfig, FormattingOptions, ReplacementRule
 
-_DB_PRAGMA = (
-    "PRAGMA journal_mode=WAL;"
-    "PRAGMA synchronous=NORMAL;"
-    "PRAGMA foreign_keys=ON;"
-)
+_DB_PRAGMA = "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=NORMAL;" "PRAGMA foreign_keys=ON;"
 
 
 @dataclass(slots=True)
@@ -164,7 +160,10 @@ class ConfigStore:
                 "INSERT INTO channels(discord_id, telegram_chat_id, label) VALUES(?, ?, ?)",
                 (discord_id, telegram_chat_id, label),
             )
-            channel_id = cur.lastrowid
+            channel_id_raw = cur.lastrowid
+            if channel_id_raw is None:
+                raise RuntimeError("Failed to insert channel record")
+            channel_id = int(channel_id_raw)
             self._conn.commit()
         return ChannelRecord(
             id=channel_id,
@@ -223,8 +222,12 @@ class ConfigStore:
     def set_channel_option(self, channel_id: int, option_key: str, option_value: str) -> None:
         with closing(self._conn.cursor()) as cur:
             cur.execute(
-                "INSERT INTO channel_options(channel_id, option_key, option_value) VALUES(?, ?, ?)"
-                " ON CONFLICT(channel_id, option_key) DO UPDATE SET option_value=excluded.option_value",
+                """
+                INSERT INTO channel_options(channel_id, option_key, option_value)
+                VALUES(?, ?, ?)
+                ON CONFLICT(channel_id, option_key)
+                    DO UPDATE SET option_value=excluded.option_value
+                """,
                 (channel_id, option_key, option_value),
             )
             self._conn.commit()
@@ -390,7 +393,12 @@ def _formatting_from_options(
     base: dict[str, str],
     overrides: dict[str, str],
 ) -> FormattingOptions:
-    options = {**base, **{k.removeprefix("formatting."): v for k, v in overrides.items() if k.startswith("formatting.")}}
+    formatting_overrides = {
+        key.removeprefix("formatting."): value
+        for key, value in overrides.items()
+        if key.startswith("formatting.")
+    }
+    options = {**base, **formatting_overrides}
     return FormattingOptions(
         parse_mode=options.get("parse_mode", "MarkdownV2"),
         disable_preview=options.get("disable_preview", "true").lower() == "true",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol
 
 import aiohttp
 
@@ -11,6 +11,27 @@ from .config_store import ConfigStore
 from .models import FormattedTelegramMessage
 
 _API_BASE = "https://api.telegram.org"
+
+
+class TelegramAPIProtocol(Protocol):
+    def set_proxy(self, proxy: str | None) -> None: ...
+
+    async def get_updates(
+        self,
+        offset: int | None = None,
+        timeout: int = 30,
+    ) -> list[dict[str, Any]]: ...
+
+    async def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        disable_preview: bool = True,
+    ) -> None: ...
+
+    async def answer_callback_query(self, callback_id: str, text: str) -> None: ...
 
 
 class TelegramAPI:
@@ -24,13 +45,23 @@ class TelegramAPI:
     def set_proxy(self, proxy: str | None) -> None:
         self._proxy = proxy
 
-    async def get_updates(self, offset: int | None = None, timeout: int = 30) -> list[dict[str, Any]]:
+    async def get_updates(
+        self,
+        offset: int | None = None,
+        timeout: int = 30,
+    ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"timeout": timeout}
         if offset is not None:
             params["offset"] = offset
         url = f"{_API_BASE}/bot{self._token}/getUpdates"
         try:
-            async with self._session.get(url, params=params, timeout=timeout + 5, proxy=self._proxy) as resp:
+            timeout_cfg = aiohttp.ClientTimeout(total=timeout + 5)
+            async with self._session.get(
+                url,
+                params=params,
+                timeout=timeout_cfg,
+                proxy=self._proxy,
+            ) as resp:
                 payload = await resp.json(content_type=None)
         except aiohttp.ClientError:
             return []
@@ -55,7 +86,13 @@ class TelegramAPI:
         if parse_mode:
             data["parse_mode"] = parse_mode
         try:
-            async with self._session.post(url, json=data, proxy=self._proxy, timeout=15) as resp:
+            timeout_cfg = aiohttp.ClientTimeout(total=15)
+            async with self._session.post(
+                url,
+                json=data,
+                proxy=self._proxy,
+                timeout=timeout_cfg,
+            ) as resp:
                 await resp.read()
         except aiohttp.ClientError:
             return
@@ -64,7 +101,13 @@ class TelegramAPI:
         url = f"{_API_BASE}/bot{self._token}/answerCallbackQuery"
         data = {"callback_query_id": callback_id, "text": text[:200]}
         try:
-            async with self._session.post(url, json=data, proxy=self._proxy, timeout=10) as resp:
+            timeout_cfg = aiohttp.ClientTimeout(total=10)
+            async with self._session.post(
+                url,
+                json=data,
+                proxy=self._proxy,
+                timeout=timeout_cfg,
+            ) as resp:
                 await resp.read()
         except aiohttp.ClientError:
             return
@@ -87,7 +130,7 @@ class TelegramController:
 
     def __init__(
         self,
-        api: TelegramAPI,
+        api: TelegramAPIProtocol,
         store: ConfigStore,
         *,
         on_change: Callable[[], None],
@@ -114,10 +157,12 @@ class TelegramController:
             return
         command, _, args = text.partition(" ")
         command = command.split("@")[0][1:].lower()
+        sender = message["from"]
+        username = str(sender.get("username") or sender.get("first_name") or "user")
         ctx = CommandContext(
             chat_id=int(message["chat"]["id"]),
-            user_id=int(message["from"]["id"]),
-            username=str(message["from"].get("username") or message["from"].get("first_name") or "user"),
+            user_id=int(sender["id"]),
+            username=username,
             args=args.strip(),
             message=message,
         )
@@ -217,7 +262,10 @@ class TelegramController:
 
     async def cmd_admins(self, ctx: CommandContext) -> None:
         admins = self._store.list_admins()
-        lines = ["Администраторы:", *[str(admin) for admin in admins]] if admins else ["Список пуст"]
+        if admins:
+            lines = ["Администраторы:", *[str(admin) for admin in admins]]
+        else:
+            lines = ["Список пуст"]
         await self._api.send_message(ctx.chat_id, "\n".join(lines))
 
     async def cmd_grant(self, ctx: CommandContext) -> None:
@@ -262,7 +310,10 @@ class TelegramController:
     async def cmd_set_proxy(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if not parts:
-            await self._api.send_message(ctx.chat_id, "Использование: /set_proxy <discord|telegram|clear> [url]")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /set_proxy <discord|telegram|clear> [url]",
+            )
             return
         target = parts[0].lower()
         if target == "clear":
@@ -282,7 +333,10 @@ class TelegramController:
     async def cmd_set_user_agent(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=1)
         if len(parts) < 2:
-            await self._api.send_message(ctx.chat_id, "Использование: /set_user_agent <desktop|mobile> <ua>")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /set_user_agent <desktop|mobile> <ua>",
+            )
             return
         target, value = parts[0].lower(), parts[1].strip()
         if target not in {"desktop", "mobile"}:
@@ -335,7 +389,10 @@ class TelegramController:
     async def cmd_set_rate(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if len(parts) != 2:
-            await self._api.send_message(ctx.chat_id, "Использование: /set_rate <discord|telegram> <в_секунду>")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /set_rate <discord|telegram> <в_секунду>",
+            )
             return
         target, value_str = parts
         try:
@@ -356,7 +413,10 @@ class TelegramController:
     async def cmd_add_channel(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if len(parts) < 2:
-            await self._api.send_message(ctx.chat_id, "Использование: /add_channel <discord_id> <telegram_chat> [метка]")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /add_channel <discord_id> <telegram_chat> [метка]",
+            )
             return
         discord_id, telegram_chat = parts[0], parts[1]
         label = " ".join(parts[2:]) if len(parts) > 2 else discord_id
@@ -385,7 +445,10 @@ class TelegramController:
             return
         lines = [
             "Каналы:",
-            *[f"{record.discord_id} → {record.telegram_chat_id} [{record.label}]" for record in channels],
+            *[
+                f"{record.discord_id} → {record.telegram_chat_id} [{record.label}]"
+                for record in channels
+            ],
         ]
         await self._api.send_message(ctx.chat_id, "\n".join(lines))
 
@@ -399,10 +462,18 @@ class TelegramController:
         await self._set_format_option(ctx, "chip")
 
     async def cmd_set_parse_mode(self, ctx: CommandContext) -> None:
-        await self._set_format_option(ctx, "parse_mode", allowed={"markdownv2", "markdown", "html", "text"})
+        await self._set_format_option(
+            ctx,
+            "parse_mode",
+            allowed={"markdownv2", "markdown", "html", "text"},
+        )
 
     async def cmd_set_disable_preview(self, ctx: CommandContext) -> None:
-        await self._set_format_option(ctx, "disable_preview", allowed={"on", "off"})
+        await self._set_format_option(
+            ctx,
+            "disable_preview",
+            allowed={"on", "off"},
+        )
 
     async def cmd_set_max_length(self, ctx: CommandContext) -> None:
         await self._set_format_option(ctx, "max_length")
@@ -413,7 +484,10 @@ class TelegramController:
     async def cmd_add_filter(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=2)
         if len(parts) < 3:
-            await self._api.send_message(ctx.chat_id, "Использование: /add_filter <discord_id|all> <тип> <значение>")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /add_filter <discord_id|all> <тип> <значение>",
+            )
             return
         target_key, filter_type, value = parts
         channel_ids = self._resolve_channel_ids(target_key)
@@ -428,7 +502,10 @@ class TelegramController:
     async def cmd_clear_filter(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=2)
         if len(parts) < 2:
-            await self._api.send_message(ctx.chat_id, "Использование: /clear_filter <discord_id|all> <тип> [значение]")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /clear_filter <discord_id|all> <тип> [значение]",
+            )
             return
         target_key, filter_type = parts[0], parts[1]
         value = parts[2] if len(parts) == 3 else None
@@ -445,7 +522,10 @@ class TelegramController:
     async def cmd_add_replace(self, ctx: CommandContext) -> None:
         target, pattern, replacement = self._parse_replace_args(ctx)
         if target is None:
-            await self._api.send_message(ctx.chat_id, "Использование: /add_replace <discord_id|all> шаблон => замена")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /add_replace <discord_id|all> шаблон => замена",
+            )
             return
         for channel_id in target:
             self._store.add_replacement(channel_id, pattern, replacement)
@@ -455,7 +535,10 @@ class TelegramController:
     async def cmd_clear_replace(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=1)
         if not parts:
-            await self._api.send_message(ctx.chat_id, "Использование: /clear_replace <discord_id|all> [шаблон]")
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /clear_replace <discord_id|all> [шаблон]",
+            )
             return
         target_key = parts[0]
         pattern = parts[1] if len(parts) == 2 else None
@@ -533,7 +616,21 @@ class TelegramController:
         return (ids, pattern, replacement)
 
 
-async def send_formatted(api: TelegramAPI, chat_id: str, message: FormattedTelegramMessage) -> None:
-    await api.send_message(chat_id, message.text, parse_mode=message.parse_mode, disable_preview=message.disable_preview)
+async def send_formatted(
+    api: TelegramAPIProtocol,
+    chat_id: str,
+    message: FormattedTelegramMessage,
+) -> None:
+    await api.send_message(
+        chat_id,
+        message.text,
+        parse_mode=message.parse_mode,
+        disable_preview=message.disable_preview,
+    )
     for extra in message.extra_messages:
-        await api.send_message(chat_id, extra, parse_mode=message.parse_mode, disable_preview=message.disable_preview)
+        await api.send_message(
+            chat_id,
+            extra,
+            parse_mode=message.parse_mode,
+            disable_preview=message.disable_preview,
+        )

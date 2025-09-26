@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import html
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
 from .models import ChannelConfig, DiscordMessage, FormattedTelegramMessage, ReplacementRule
 
+EmbedPayload = Mapping[str, Any]
+AttachmentPayload = Mapping[str, Any]
 
-def format_discord_message(message: DiscordMessage, channel: ChannelConfig) -> FormattedTelegramMessage:
+
+def format_discord_message(
+    message: DiscordMessage,
+    channel: ChannelConfig,
+) -> FormattedTelegramMessage:
     """Convert a Discord message into Telegram text respecting the channel profile."""
 
     formatting = channel.formatting
     content = apply_replacements(message.content or "", channel.replacements)
     embed_text = "\n".join(_clean_embed_text(message.embeds))
-    attachment_lines = list(_summarise_attachments(message.attachments, formatting.attachments_style))
+    attachment_lines = list(
+        _summarise_attachments(message.attachments, formatting.attachments_style)
+    )
 
     blocks: list[str] = []
     if formatting.header:
@@ -55,7 +63,7 @@ def apply_replacements(text: str, replacements: Sequence[ReplacementRule]) -> st
     return result
 
 
-def _clean_embed_text(embeds: Sequence[dict]) -> Iterable[str]:
+def _clean_embed_text(embeds: Sequence[EmbedPayload]) -> Iterable[str]:
     for embed in embeds:
         title = str(embed.get("title") or "").strip()
         description = str(embed.get("description") or "").strip()
@@ -68,12 +76,17 @@ def _clean_embed_text(embeds: Sequence[dict]) -> Iterable[str]:
                 fields_text.append(f"{name}: {value}")
             elif value:
                 fields_text.append(value)
-        segments = [segment for segment in (title, description, "\n".join(fields_text), url) if segment]
+        segments = [
+            segment for segment in (title, description, "\n".join(fields_text), url) if segment
+        ]
         if segments:
             yield "\n".join(segments)
 
 
-def _summarise_attachments(attachments: Sequence[dict], style: str) -> Iterable[str]:
+def _summarise_attachments(
+    attachments: Sequence[AttachmentPayload],
+    style: str,
+) -> Iterable[str]:
     if not attachments:
         return []
 
