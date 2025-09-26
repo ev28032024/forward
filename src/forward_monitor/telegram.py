@@ -12,10 +12,15 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-from .config_store import AdminRecord, ConfigStore
+from .config_store import (
+    AdminRecord,
+    ConfigStore,
+    format_filter_value,
+    normalize_filter_value,
+)
 from .discord import DiscordClient
-from .models import FormattedTelegramMessage
-from .utils import parse_delay_setting
+from .models import FilterConfig, FormattedTelegramMessage
+from .utils import normalize_username, parse_delay_setting
 
 _API_BASE = "https://api.telegram.org"
 
@@ -42,16 +47,6 @@ def _format_rate(value: float) -> str:
         if formatted.endswith("."):
             formatted += "0"
     return formatted
-
-
-def _normalize_username(username: str | None) -> str | None:
-    if username is None:
-        return None
-    normalized = username.strip()
-    if normalized.startswith("@"):
-        normalized = normalized[1:]
-    normalized = normalized.strip().lower()
-    return normalized or None
 
 
 class TelegramAPIProtocol(Protocol):
@@ -421,7 +416,7 @@ class TelegramController:
                 )
 
     def _is_admin(self, ctx: CommandContext) -> bool:
-        normalized_handle = _normalize_username(ctx.handle)
+        normalized_handle = normalize_username(ctx.handle)
         for admin in self._store.list_admins():
             if admin.user_id is not None and admin.user_id == ctx.user_id:
                 return True
@@ -599,23 +594,36 @@ class TelegramController:
         )
         preview_desc = "без предпросмотра" if disable_preview_default else "с предпросмотром"
 
-        default_filters: dict[str, set[str]] = {name: set() for name in _FILTER_TYPES}
-        for filter_type, value in self._store.iter_filters(0):
-            default_filters.setdefault(filter_type, set()).add(value)
+        default_filter_config = self._store.get_filter_config(0)
 
-        def _describe_filters(filter_sets: dict[str, set[str]], *, indent: str) -> list[str]:
+        def _collect_filter_sets(filter_config: FilterConfig) -> dict[str, dict[str, str]]:
+            collected: dict[str, dict[str, str]] = {name: {} for name in _FILTER_TYPES}
+            for filter_type in _FILTER_TYPES:
+                values = getattr(filter_config, filter_type)
+                for value in values:
+                    normalized = normalize_filter_value(filter_type, value)
+                    if not normalized:
+                        continue
+                    _, key = normalized
+                    collected[filter_type][key] = format_filter_value(filter_type, value)
+            return collected
+
+        def _describe_filters(
+            filter_sets: dict[str, dict[str, str]], *, indent: str, empty_message: str
+        ) -> list[str]:
             rows: list[str] = []
             for filter_type in _FILTER_TYPES:
-                values = sorted(filter_sets.get(filter_type, set()))
+                values = filter_sets.get(filter_type, {})
                 if not values:
                     continue
                 label = html.escape(_FILTER_LABELS.get(filter_type, filter_type))
                 rendered_values = ", ".join(
-                    f"<code>{html.escape(value)}</code>" for value in values
+                    html.escape(display)
+                    for display in sorted(values.values(), key=str.lower)
                 )
                 rows.append(f"{indent}• {label}: {rendered_values}")
-            if not rows:
-                rows.append(f"{indent}• нет активных фильтров")
+            if not rows and empty_message:
+                rows.append(f"{indent}{empty_message}")
             return rows
 
         proxy_lines: list[str] = []
@@ -629,11 +637,11 @@ class TelegramController:
             proxy_lines.append("• отключён")
 
         channel_configs = self._store.load_channel_configurations()
-        has_default_filters = any(default_filters[name] for name in _FILTER_TYPES)
+        default_filter_sets = _collect_filter_sets(default_filter_config)
+        has_default_filters = any(default_filter_sets[name] for name in _FILTER_TYPES)
 
         if channel_configs:
             channel_lines: list[str] = ["<b>📡 Каналы</b>"]
-            default_filter_sets = default_filters
             for channel in channel_configs:
                 status_icon = "🟢" if channel.active else "⚪️"
                 channel_lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
@@ -663,23 +671,23 @@ class TelegramController:
                     "&nbsp;&nbsp;• Вложения: " + attachment_mode
                 )
 
-                channel_filter_sets: dict[str, set[str]] = {
-                    "whitelist": set(channel.filters.whitelist),
-                    "blacklist": set(channel.filters.blacklist),
-                    "allowed_senders": set(channel.filters.allowed_senders),
-                    "blocked_senders": set(channel.filters.blocked_senders),
-                    "allowed_types": set(channel.filters.allowed_types),
-                    "blocked_types": set(channel.filters.blocked_types),
-                }
-
+                channel_filter_sets = _collect_filter_sets(channel.filters)
                 extra_filters = {
-                    key: values - default_filter_sets.get(key, set())
-                    for key, values in channel_filter_sets.items()
+                    key: {
+                        value_key: value
+                        for value_key, value in channel_filter_sets.get(key, {}).items()
+                        if value_key not in default_filter_sets.get(key, {})
+                    }
+                    for key in _FILTER_TYPES
                 }
                 if any(extra_filters[name] for name in _FILTER_TYPES):
                     channel_lines.append("&nbsp;&nbsp;• Дополнительные фильтры:")
                     channel_lines.extend(
-                        _describe_filters(extra_filters, indent="&nbsp;&nbsp;&nbsp;&nbsp;")
+                        _describe_filters(
+                            extra_filters,
+                            indent="&nbsp;&nbsp;&nbsp;&nbsp;",
+                            empty_message="",
+                        )
                     )
                 else:
                     if has_default_filters:
@@ -723,7 +731,13 @@ class TelegramController:
 
         if has_default_filters:
             lines.append("• Глобальные фильтры:")
-            lines.extend(_describe_filters(default_filters, indent="&nbsp;&nbsp;"))
+            lines.extend(
+                _describe_filters(
+                    default_filter_sets,
+                    indent="&nbsp;&nbsp;",
+                    empty_message="• нет активных фильтров",
+                )
+            )
         else:
             lines.append("• Глобальные фильтры: нет")
 
@@ -784,7 +798,7 @@ class TelegramController:
             user_id = int(target)
             username = None
         else:
-            normalized_username = _normalize_username(target)
+            normalized_username = normalize_username(target)
             if normalized_username is None:
                 await self._api.send_message(ctx.chat_id, "Неверное имя пользователя")
                 return
@@ -821,7 +835,7 @@ class TelegramController:
             removed = self._store.remove_admin(identifier)
             label = self._format_admin(AdminRecord(user_id=identifier, username=None))
         else:
-            normalized = _normalize_username(target)
+            normalized = normalize_username(target)
             if normalized is None:
                 await self._api.send_message(ctx.chat_id, "Неверное имя пользователя")
                 return
@@ -1092,15 +1106,25 @@ class TelegramController:
                 "Использование: /add_filter <discord_id|all> <тип> <значение>",
             )
             return
-        target_key, filter_type, value = parts
+        target_key, filter_type_raw, value = parts
+        filter_type = filter_type_raw.strip().lower()
         channel_ids = self._resolve_channel_ids(target_key)
         if not channel_ids:
             await self._api.send_message(ctx.chat_id, "Канал не найден")
             return
+        added = False
         for channel_id in channel_ids:
-            self._store.add_filter(channel_id, filter_type, value)
-        self._on_change()
-        await self._api.send_message(ctx.chat_id, "Фильтр добавлен")
+            try:
+                changed = self._store.add_filter(channel_id, filter_type, value)
+            except ValueError:
+                await self._api.send_message(ctx.chat_id, "Неверное значение фильтра")
+                return
+            added = added or changed
+        if added:
+            self._on_change()
+            await self._api.send_message(ctx.chat_id, "Фильтр добавлен")
+        else:
+            await self._api.send_message(ctx.chat_id, "Такой фильтр уже существует")
 
     async def cmd_clear_filter(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=2)
@@ -1110,17 +1134,42 @@ class TelegramController:
                 "Использование: /clear_filter <discord_id|all> <тип> [значение]",
             )
             return
-        target_key, filter_type = parts[0], parts[1]
+        target_key, filter_type_raw = parts[0], parts[1]
+        filter_type = filter_type_raw.strip().lower()
         value = parts[2] if len(parts) == 3 else None
         channel_ids = self._resolve_channel_ids(target_key)
         if not channel_ids:
             await self._api.send_message(ctx.chat_id, "Канал не найден")
             return
+        if filter_type in {"all", "*"}:
+            removed = sum(self._store.clear_filters(channel_id) for channel_id in channel_ids)
+            if removed:
+                self._on_change()
+                await self._api.send_message(ctx.chat_id, "Все фильтры очищены")
+            else:
+                await self._api.send_message(ctx.chat_id, "Фильтры уже очищены")
+            return
+
         removed = 0
+        if value is None:
+            for channel_id in channel_ids:
+                removed += self._store.remove_filter(channel_id, filter_type, None)
+            if removed:
+                self._on_change()
+                await self._api.send_message(ctx.chat_id, "Фильтры удалены")
+            else:
+                await self._api.send_message(
+                    ctx.chat_id, "Фильтров этого типа не найдено"
+                )
+            return
+
         for channel_id in channel_ids:
             removed += self._store.remove_filter(channel_id, filter_type, value)
-        self._on_change()
-        await self._api.send_message(ctx.chat_id, f"Удалено {removed} записей")
+        if removed:
+            self._on_change()
+            await self._api.send_message(ctx.chat_id, "Фильтр удалён")
+        else:
+            await self._api.send_message(ctx.chat_id, "Такого фильтра не существует")
 
     # ------------------------------------------------------------------
     # Helpers

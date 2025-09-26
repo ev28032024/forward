@@ -10,6 +10,7 @@ from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 from .models import ChannelConfig, FilterConfig, FormattingOptions, NetworkOptions
+from .utils import normalize_username
 
 _DB_PRAGMA = "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=NORMAL;" "PRAGMA foreign_keys=ON;"
 
@@ -232,7 +233,7 @@ class ConfigStore:
         ]
 
     def add_admin(self, user_id: int | None = None, username: str | None = None) -> None:
-        normalized = _normalize_username(username)
+        normalized = normalize_username(username)
         with closing(self._conn.cursor()) as cur:
             if user_id is not None:
                 cur.execute(
@@ -255,7 +256,7 @@ class ConfigStore:
             if isinstance(identifier, int):
                 cur.execute("DELETE FROM admins WHERE user_id=?", (int(identifier),))
             else:
-                normalized = _normalize_username(identifier)
+                normalized = normalize_username(identifier)
                 cur.execute(
                     "DELETE FROM admins WHERE username=? COLLATE NOCASE",
                     (normalized,),
@@ -271,7 +272,7 @@ class ConfigStore:
         return bool(row)
 
     def remember_user(self, user_id: int, username: str | None) -> None:
-        normalized = _normalize_username(username)
+        normalized = normalize_username(username)
         with closing(self._conn.cursor()) as cur:
             cur.execute(
                 "INSERT INTO user_profiles(user_id, username) VALUES(?, ?) "
@@ -297,7 +298,7 @@ class ConfigStore:
             self._conn.commit()
 
     def resolve_user_id(self, username: str) -> int | None:
-        normalized = _normalize_username(username)
+        normalized = normalize_username(username)
         if normalized is None:
             return None
         with closing(self._conn.cursor()) as cur:
@@ -418,26 +419,67 @@ class ConfigStore:
     # ------------------------------------------------------------------
     # Filters
     # ------------------------------------------------------------------
-    def add_filter(self, channel_id: int, filter_type: str, value: str) -> None:
+    def add_filter(self, channel_id: int, filter_type: str, value: str) -> bool:
+        filter_type_key = filter_type.strip().lower()
+        prepared = normalize_filter_value(filter_type_key, value)
+        if prepared is None:
+            raise ValueError("invalid filter value")
+        stored_value, compare_key = prepared
         with closing(self._conn.cursor()) as cur:
             cur.execute(
-                "INSERT OR IGNORE INTO filters(channel_id, filter_type, value) VALUES(?, ?, ?)",
-                (channel_id, filter_type, value),
+                "SELECT id, value FROM filters WHERE channel_id=? AND filter_type=?",
+                (channel_id, filter_type_key),
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                existing = normalize_filter_value(filter_type_key, str(row["value"]))
+                if existing and existing[1] == compare_key:
+                    return False
+            cur.execute(
+                "INSERT INTO filters(channel_id, filter_type, value) VALUES(?, ?, ?)",
+                (channel_id, filter_type_key, stored_value),
             )
             self._conn.commit()
+        return True
 
     def remove_filter(self, channel_id: int, filter_type: str, value: str | None = None) -> int:
+        filter_type_key = filter_type.strip().lower()
         with closing(self._conn.cursor()) as cur:
             if value is None:
                 cur.execute(
                     "DELETE FROM filters WHERE channel_id=? AND filter_type=?",
-                    (channel_id, filter_type),
+                    (channel_id, filter_type_key),
                 )
+                removed = cur.rowcount
             else:
+                prepared = normalize_filter_value(filter_type_key, value)
+                if prepared is None:
+                    return 0
+                _, compare_key = prepared
                 cur.execute(
-                    "DELETE FROM filters WHERE channel_id=? AND filter_type=? AND value=?",
-                    (channel_id, filter_type, value),
+                    "SELECT id, value FROM filters WHERE channel_id=? AND filter_type=?",
+                    (channel_id, filter_type_key),
                 )
+                rows = cur.fetchall()
+                matched_ids = [
+                    int(row["id"])
+                    for row in rows
+                    if (
+                        existing := normalize_filter_value(
+                            filter_type_key, str(row["value"])
+                        )
+                    )
+                    and existing[1] == compare_key
+                ]
+                for entry_id in matched_ids:
+                    cur.execute("DELETE FROM filters WHERE id=?", (entry_id,))
+                removed = len(matched_ids)
+            self._conn.commit()
+        return removed
+
+    def clear_filters(self, channel_id: int) -> int:
+        with closing(self._conn.cursor()) as cur:
+            cur.execute("DELETE FROM filters WHERE channel_id=?", (channel_id,))
             removed = cur.rowcount
             self._conn.commit()
         return removed
@@ -451,6 +493,9 @@ class ConfigStore:
             rows = cur.fetchall()
         for row in rows:
             yield str(row["filter_type"]), str(row["value"])
+
+    def get_filter_config(self, channel_id: int) -> FilterConfig:
+        return self._load_filter_config(channel_id)
 
     # ------------------------------------------------------------------
     # Composite loads
@@ -486,10 +531,24 @@ class ConfigStore:
 
     def _load_filter_config(self, channel_id: int) -> FilterConfig:
         filters = FilterConfig()
-        for filter_type, value in self.iter_filters(channel_id):
+        seen: dict[str, set[str]] = {}
+        for filter_type_raw, value in self.iter_filters(channel_id):
+            filter_type = filter_type_raw.strip().lower()
+            normalized = normalize_filter_value(filter_type, value)
+            if not normalized:
+                continue
+            stored_value, compare_key = normalized
+            seen.setdefault(filter_type, set())
+            if compare_key in seen[filter_type]:
+                continue
+            seen[filter_type].add(compare_key)
             target = _filter_target(filters, filter_type)
-            if target is not None:
-                target.add(value)
+            if target is None:
+                continue
+            if filter_type in _TEXT_FILTER_TYPES:
+                target.add(value.strip())
+            else:
+                target.add(stored_value)
         return filters
 
     # ------------------------------------------------------------------
@@ -499,17 +558,44 @@ class ConfigStore:
         self._conn.close()
 
 
-def _normalize_username(username: str | None) -> str | None:
-    if username is None:
+_TEXT_FILTER_TYPES = {"whitelist", "blacklist"}
+_SENDER_FILTER_TYPES = {"allowed_senders", "blocked_senders"}
+_TYPE_FILTER_TYPES = {"allowed_types", "blocked_types"}
+
+
+def normalize_filter_value(filter_type: str, value: str) -> tuple[str, str] | None:
+    filter_key = filter_type.strip().lower()
+    trimmed = value.strip()
+    if not trimmed:
         return None
-    normalized = username.strip()
-    if normalized.startswith("@"):
-        normalized = normalized[1:]
-    normalized = normalized.strip().lower()
-    return normalized or None
+    if filter_key in _SENDER_FILTER_TYPES:
+        if trimmed.lstrip("-").isdigit():
+            numeric = str(int(trimmed))
+            return numeric, f"id:{numeric}"
+        normalized_name = normalize_username(trimmed)
+        if normalized_name is None:
+            return None
+        return normalized_name, f"name:{normalized_name}"
+    if filter_key in _TYPE_FILTER_TYPES:
+        normalized_value = trimmed.lower()
+        return normalized_value, normalized_value
+    if filter_key in _TEXT_FILTER_TYPES:
+        return trimmed, trimmed.casefold()
+    return trimmed, trimmed
+
+
+def format_filter_value(filter_type: str, value: str) -> str:
+    filter_key = filter_type.strip().lower()
+    cleaned = value.strip()
+    if not cleaned:
+        return cleaned
+    if filter_key in _SENDER_FILTER_TYPES and cleaned.lstrip("-").isdigit():
+        return str(int(cleaned))
+    return cleaned
 
 
 def _filter_target(filters: FilterConfig, filter_type: str) -> set[str] | None:
+    normalized_type = filter_type.strip().lower()
     mapping = {
         "whitelist": filters.whitelist,
         "blacklist": filters.blacklist,
@@ -518,7 +604,7 @@ def _filter_target(filters: FilterConfig, filter_type: str) -> set[str] | None:
         "allowed_types": filters.allowed_types,
         "blocked_types": filters.blocked_types,
     }
-    return mapping.get(filter_type)
+    return mapping.get(normalized_type)
 
 
 def _formatting_from_options(

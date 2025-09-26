@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .models import DiscordMessage, FilterConfig
+from .utils import normalize_username
 
 
 @dataclass(slots=True)
@@ -22,18 +23,32 @@ class FilterEngine:
 
     def __init__(self, config: FilterConfig):
         self._config = config
+        (
+            self._allowed_sender_ids,
+            self._allowed_sender_names,
+        ) = _split_sender_values(config.allowed_senders)
+        (
+            self._blocked_sender_ids,
+            self._blocked_sender_names,
+        ) = _split_sender_values(config.blocked_senders)
 
     def evaluate(self, message: DiscordMessage) -> FilterDecision:
         content = message.content or ""
         lowered = content.lower()
-        author_id = message.author_id
+        author_id = message.author_id.strip()
+        author_name = normalize_username(message.author_name)
 
         if message.stickers:
             return FilterDecision(False, "sticker_blocked")
 
-        if self._config.allowed_senders and author_id not in self._config.allowed_senders:
+        if (self._allowed_sender_ids or self._allowed_sender_names) and not (
+            author_id in self._allowed_sender_ids
+            or (author_name is not None and author_name in self._allowed_sender_names)
+        ):
             return FilterDecision(False, "sender_not_allowed")
-        if author_id in self._config.blocked_senders:
+        if author_id in self._blocked_sender_ids:
+            return FilterDecision(False, "sender_blocked")
+        if author_name and author_name in self._blocked_sender_names:
             return FilterDecision(False, "sender_blocked")
 
         if self._config.whitelist:
@@ -99,3 +114,18 @@ def tokenise(text: str) -> set[str]:
     """Public helper used in tests to inspect tokenisation."""
 
     return {match.group(0).lower() for match in _WORD_RE.finditer(text)}
+
+
+def _split_sender_values(values: Iterable[str]) -> tuple[set[str], set[str]]:
+    ids: set[str] = set()
+    names: set[str] = set()
+    for entry in values:
+        text = entry.strip()
+        if not text:
+            continue
+        if text.lstrip("-").isdigit():
+            ids.add(str(int(text)))
+            continue
+        normalized = normalize_username(text) or text.strip().lower()
+        names.add(normalized)
+    return ids, names
