@@ -9,7 +9,7 @@ import time
 from html import escape
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 if TYPE_CHECKING:
     from forward_monitor.models import ChannelConfig as ChannelConfigType
@@ -145,6 +145,9 @@ async def benchmark_forwarding(iterations: int) -> None:
             timeout: int = 30,
         ) -> list[dict[str, object]]:
             return []
+
+        async def set_my_commands(self, commands: Iterable[tuple[str, str]]) -> None:
+            return None
 
         async def send_message(
             self,

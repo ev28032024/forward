@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Iterable
 from pathlib import Path
+from typing import Iterable
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.telegram import CommandContext, TelegramController
