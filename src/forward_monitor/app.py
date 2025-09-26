@@ -7,6 +7,7 @@ import logging
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -64,8 +65,8 @@ class ForwardMonitorApp:
         telegram_api: TelegramAPI,
     ) -> None:
         runtime = self._load_runtime()
-        discord_rate = RateLimiter(runtime.discord_rate_per_second)
-        telegram_rate = RateLimiter(runtime.telegram_rate_per_second)
+        discord_rate = RateLimiter(runtime.rate_per_second)
+        telegram_rate = RateLimiter(runtime.rate_per_second)
         state = MonitorState(
             channels=[],
             runtime=runtime,
@@ -79,9 +80,8 @@ class ForwardMonitorApp:
                 state = self._reload_state()
                 discord_client.set_token(state.discord_token)
                 discord_client.set_network_options(state.network)
-                telegram_api.set_proxy(state.network.telegram_proxy)
-                discord_rate.update_rate(state.runtime.discord_rate_per_second)
-                telegram_rate.update_rate(state.runtime.telegram_rate_per_second)
+                discord_rate.update_rate(state.runtime.rate_per_second)
+                telegram_rate.update_rate(state.runtime.rate_per_second)
                 logger.info("Конфигурация обновлена: %d каналов", len(state.channels))
 
             if not state.discord_token:
@@ -184,12 +184,23 @@ class ForwardMonitorApp:
             except ValueError:
                 return default
 
+        rate = self._store.get_setting("runtime.rate")
+        if rate is not None:
+            try:
+                rate_value = float(rate)
+            except ValueError:
+                rate_value = 8.0
+        else:
+            # Backwards compatibility with older split settings
+            legacy_discord = _float("runtime.discord_rate", 8.0)
+            legacy_telegram = _float("runtime.telegram_rate", legacy_discord)
+            rate_value = max(legacy_discord, legacy_telegram)
+
         return RuntimeOptions(
             poll_interval=_float("runtime.poll", 2.0),
             min_delay_ms=_int("runtime.delay_min", 0),
             max_delay_ms=_int("runtime.delay_max", 0),
-            discord_rate_per_second=_float("runtime.discord_rate", 4.0),
-            telegram_rate_per_second=_float("runtime.telegram_rate", 25.0),
+            rate_per_second=rate_value,
         )
 
     def _load_network_options(self) -> NetworkOptions:
@@ -202,10 +213,36 @@ class ForwardMonitorApp:
             except ValueError:
                 return default
 
+        proxy_url = self._store.get_setting("proxy.discord.url")
+        proxy_login = self._store.get_setting("proxy.discord.login")
+        proxy_password = self._store.get_setting("proxy.discord.password")
+
+        legacy_proxy = None
+        if not proxy_url:
+            legacy_proxy = self._store.get_setting("proxy.discord")
+            if legacy_proxy:
+                parsed = urlsplit(legacy_proxy)
+                if parsed.username or parsed.password:
+                    proxy_login = proxy_login or parsed.username or None
+                    proxy_password = proxy_password or parsed.password or None
+                    host = parsed.hostname or ""
+                    if parsed.port:
+                        host = f"{host}:{parsed.port}"
+                    proxy_url = urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+                else:
+                    proxy_url = legacy_proxy
+
+        if legacy_proxy and proxy_url and not self._store.get_setting("proxy.discord.url"):
+            self._store.set_setting("proxy.discord.url", proxy_url)
+            if proxy_login:
+                self._store.set_setting("proxy.discord.login", proxy_login)
+            if proxy_password:
+                self._store.set_setting("proxy.discord.password", proxy_password)
+            self._store.delete_setting("proxy.discord")
+
         return NetworkOptions(
-            discord_proxy=self._store.get_setting("proxy.discord"),
-            telegram_proxy=self._store.get_setting("proxy.telegram"),
-            discord_user_agent_desktop=self._store.get_setting("ua.discord.desktop"),
-            discord_user_agent_mobile=self._store.get_setting("ua.discord.mobile"),
-            mobile_ratio=_float("ua.discord.mobile_ratio", 0.0),
+            discord_proxy_url=proxy_url,
+            discord_proxy_login=proxy_login,
+            discord_proxy_password=proxy_password,
+            discord_user_agent=self._store.get_setting("ua.discord"),
         )

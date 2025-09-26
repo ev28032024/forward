@@ -94,19 +94,17 @@ class RuntimeOptions:
     poll_interval: float = 2.0
     min_delay_ms: int = 0
     max_delay_ms: int = 0
-    discord_rate_per_second: float = 4.0
-    telegram_rate_per_second: float = 25.0
+    rate_per_second: float = 8.0
 
 
 @dataclass(slots=True)
 class NetworkOptions:
     """Proxy and client identity overrides."""
 
-    discord_proxy: str | None = None
-    telegram_proxy: str | None = None
-    discord_user_agent_desktop: str | None = None
-    discord_user_agent_mobile: str | None = None
-    mobile_ratio: float = 0.0
+    discord_proxy_url: str | None = None
+    discord_proxy_login: str | None = None
+    discord_proxy_password: str | None = None
+    discord_user_agent: str | None = None
 
 
 @dataclass(slots=True)

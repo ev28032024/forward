@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from typing import Any, Mapping, Sequence
 
 import aiohttp
@@ -11,8 +10,7 @@ import aiohttp
 from .models import DiscordMessage, NetworkOptions
 
 _API_BASE = "https://discord.com/api/v10"
-_DEFAULT_DESKTOP_UA = "DiscordBot (https://github.com, 1.0)"
-_DEFAULT_MOBILE_UA = "Discord/156.0 CFNetwork"
+_DEFAULT_USER_AGENT = "DiscordBot (https://github.com, 1.0)"
 
 
 class DiscordClient:
@@ -51,7 +49,8 @@ class DiscordClient:
         }
 
         url = f"{_API_BASE}/channels/{channel_id}/messages"
-        proxy = self._network.discord_proxy
+        proxy = self._network.discord_proxy_url
+        proxy_auth = self._build_proxy_auth()
 
         async with self._lock:
             try:
@@ -62,6 +61,7 @@ class DiscordClient:
                     params=params,
                     proxy=proxy,
                     timeout=timeout_cfg,
+                    proxy_auth=proxy_auth,
                 ) as resp:
                     if resp.status >= 400:
                         return []
@@ -73,10 +73,14 @@ class DiscordClient:
         )
 
     def _choose_user_agent(self) -> str:
-        options = self._network
-        if options.mobile_ratio > 0 and random.random() < options.mobile_ratio:
-            return options.discord_user_agent_mobile or _DEFAULT_MOBILE_UA
-        return options.discord_user_agent_desktop or _DEFAULT_DESKTOP_UA
+        return self._network.discord_user_agent or _DEFAULT_USER_AGENT
+
+    def _build_proxy_auth(self) -> aiohttp.BasicAuth | None:
+        login = self._network.discord_proxy_login
+        password = self._network.discord_proxy_password
+        if login:
+            return aiohttp.BasicAuth(login, password or "")
+        return None
 
 
 def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessage:
