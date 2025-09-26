@@ -7,8 +7,9 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlsplit, urlunsplit
 
-from .models import ChannelConfig, FilterConfig, FormattingOptions
+from .models import ChannelConfig, FilterConfig, FormattingOptions, NetworkOptions
 
 _DB_PRAGMA = "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=NORMAL;" "PRAGMA foreign_keys=ON;"
 
@@ -166,6 +167,51 @@ class ConfigStore:
             rows = cur.fetchall()
         for row in rows:
             yield str(row["key"]), str(row["value"])
+
+    # ------------------------------------------------------------------
+    # Network options helpers
+    # ------------------------------------------------------------------
+    def load_network_options(self) -> NetworkOptions:
+        proxy_url = self.get_setting("proxy.discord.url")
+        proxy_login = self.get_setting("proxy.discord.login")
+        proxy_password = self.get_setting("proxy.discord.password")
+
+        legacy_proxy = None
+        if not proxy_url:
+            legacy_proxy = self.get_setting("proxy.discord")
+            if legacy_proxy:
+                parsed = urlsplit(legacy_proxy)
+                if parsed.username or parsed.password:
+                    proxy_login = proxy_login or parsed.username or None
+                    proxy_password = proxy_password or parsed.password or None
+                    host = parsed.hostname or ""
+                    if parsed.port:
+                        host = f"{host}:{parsed.port}"
+                    components = (
+                        parsed.scheme,
+                        host,
+                        parsed.path,
+                        parsed.query,
+                        parsed.fragment,
+                    )
+                    proxy_url = urlunsplit(components)
+                else:
+                    proxy_url = legacy_proxy
+
+        if legacy_proxy and proxy_url and not self.get_setting("proxy.discord.url"):
+            self.set_setting("proxy.discord.url", proxy_url)
+            if proxy_login:
+                self.set_setting("proxy.discord.login", proxy_login)
+            if proxy_password:
+                self.set_setting("proxy.discord.password", proxy_password)
+            self.delete_setting("proxy.discord")
+
+        return NetworkOptions(
+            discord_proxy_url=proxy_url,
+            discord_proxy_login=proxy_login,
+            discord_proxy_password=proxy_password,
+            discord_user_agent=self.get_setting("ua.discord"),
+        )
 
     # ------------------------------------------------------------------
     # Admins
