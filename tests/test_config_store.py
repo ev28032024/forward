@@ -22,3 +22,41 @@ def test_channel_lifecycle(tmp_path: Path) -> None:
     assert channel.formatting.attachments_style == "links"
     assert channel.filters.whitelist == {"hello"}
     assert channel.last_message_id == "900"
+
+
+def test_filter_management(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "filters.sqlite")
+
+    assert store.add_filter(0, "whitelist", "Hello") is True
+    assert store.add_filter(0, "whitelist", "hello") is False
+    assert store.get_filter_config(0).whitelist == {"Hello"}
+
+    removed = store.remove_filter(0, "whitelist", "HELLO")
+    assert removed == 1
+    assert store.remove_filter(0, "whitelist", "HELLO") == 0
+
+    assert store.add_filter(0, "allowed_senders", " 1090758325299314818 ") is True
+    assert store.add_filter(0, "allowed_senders", "1090758325299314818") is False
+    assert store.add_filter(0, "allowed_senders", "@CoDeD") is True
+    allowed = store.get_filter_config(0).allowed_senders
+    assert allowed == {"1090758325299314818", "coded"}
+
+    assert store.remove_filter(0, "allowed_senders", "@coded") == 1
+    assert store.remove_filter(0, "allowed_senders", "coded") == 0
+
+    store.add_filter(0, "blacklist", "Spam")
+    assert store.get_filter_config(0).blacklist == {"Spam"}
+    cleared = store.clear_filters(0)
+    assert cleared >= 1
+    config = store.get_filter_config(0)
+    assert not any(
+        getattr(config, name)
+        for name in (
+            "whitelist",
+            "blacklist",
+            "allowed_senders",
+            "blocked_senders",
+            "allowed_types",
+            "blocked_types",
+        )
+    )

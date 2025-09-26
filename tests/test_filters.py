@@ -52,3 +52,22 @@ def test_filter_engine_blocks_stickers() -> None:
 
     assert decision.allowed is False
     assert decision.reason == "sticker_blocked"
+
+
+def test_filter_engine_allowed_and_blocked_senders_by_name() -> None:
+    allowed_config = FilterConfig(allowed_senders={"coded"})
+    allowed_engine = FilterEngine(allowed_config)
+
+    permitted = allowed_engine.evaluate(make_message(author_name="Coded", author_id="99"))
+    rejected = allowed_engine.evaluate(make_message(author_name="Other", author_id="99"))
+
+    assert permitted.allowed is True
+    assert rejected.allowed is False
+    assert rejected.reason == "sender_not_allowed"
+
+    blocked_config = FilterConfig(blocked_senders={"coded"})
+    blocked_engine = FilterEngine(blocked_config)
+    blocked = blocked_engine.evaluate(make_message(author_name="Coded", author_id="42"))
+
+    assert blocked.allowed is False
+    assert blocked.reason == "sender_blocked"

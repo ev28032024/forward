@@ -41,3 +41,15 @@ def parse_delay_setting(value: str | None, default: float = 0.0) -> float:
     except ValueError:
         return default
     return max(0.0, parsed)
+
+
+def normalize_username(username: str | None) -> str | None:
+    """Return a lowercase username without @ prefix."""
+
+    if username is None:
+        return None
+    normalized = username.strip()
+    if normalized.startswith("@"):
+        normalized = normalized[1:]
+    normalized = normalized.strip().lower()
+    return normalized or None
