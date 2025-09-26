@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 import aiohttp
@@ -11,6 +12,25 @@ from .models import DiscordMessage, NetworkOptions
 
 _API_BASE = "https://discord.com/api/v10"
 _DEFAULT_USER_AGENT = "DiscordBot (https://github.com, 1.0)"
+
+
+@dataclass(slots=True)
+class TokenCheckResult:
+    """Outcome of a Discord token validation attempt."""
+
+    ok: bool
+    display_name: str | None = None
+    error: str | None = None
+    status: int | None = None
+
+
+@dataclass(slots=True)
+class ProxyCheckResult:
+    """Outcome of a proxy health-check attempt."""
+
+    ok: bool
+    error: str | None = None
+    status: int | None = None
 
 
 class DiscordClient:
@@ -75,12 +95,114 @@ class DiscordClient:
     def _choose_user_agent(self) -> str:
         return self._network.discord_user_agent or _DEFAULT_USER_AGENT
 
-    def _build_proxy_auth(self) -> aiohttp.BasicAuth | None:
-        login = self._network.discord_proxy_login
-        password = self._network.discord_proxy_password
+    def _build_proxy_auth(
+        self, options: NetworkOptions | None = None
+    ) -> aiohttp.BasicAuth | None:
+        opts = options or self._network
+        login = opts.discord_proxy_login
+        password = opts.discord_proxy_password
         if login:
             return aiohttp.BasicAuth(login, password or "")
         return None
+
+    async def verify_token(
+        self,
+        token: str,
+        *,
+        network: NetworkOptions | None = None,
+    ) -> TokenCheckResult:
+        if not token:
+            return TokenCheckResult(ok=False, error="Токен не задан")
+
+        options = network or self._network
+        headers = {
+            "Authorization": token,
+            "User-Agent": options.discord_user_agent or self._choose_user_agent(),
+            "Accept": "application/json",
+        }
+        url = f"{_API_BASE}/users/@me"
+        proxy = options.discord_proxy_url
+        proxy_auth = self._build_proxy_auth(options)
+
+        async with self._lock:
+            try:
+                timeout_cfg = aiohttp.ClientTimeout(total=15)
+                async with self._session.get(
+                    url,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=timeout_cfg,
+                    proxy_auth=proxy_auth,
+                ) as resp:
+                    status = resp.status
+                    if status == 200:
+                        payload = await resp.json()
+                        username = str(payload.get("global_name") or payload.get("username") or "")
+                        display = username or ""
+                        if not display:
+                            display = str(payload.get("id") or "user")
+                        return TokenCheckResult(ok=True, display_name=display, status=status)
+                    if status == 401:
+                        return TokenCheckResult(
+                            ok=False,
+                            error="Discord отклонил токен (401). Проверьте правильность значения.",
+                            status=status,
+                        )
+                    return TokenCheckResult(
+                        ok=False,
+                        error=f"Discord ответил статусом {status}. Попробуйте позже.",
+                        status=status,
+                    )
+            except aiohttp.ClientError:
+                return TokenCheckResult(
+                    ok=False,
+                    error="Не удалось обратиться к Discord. Проверьте сеть или прокси.",
+                )
+
+    async def check_proxy(
+        self,
+        network: NetworkOptions,
+    ) -> ProxyCheckResult:
+        if not network.discord_proxy_url:
+            return ProxyCheckResult(ok=True)
+
+        proxy_auth = self._build_proxy_auth(network)
+        url = f"{_API_BASE}/gateway"
+        headers = {
+            "User-Agent": network.discord_user_agent or self._choose_user_agent(),
+            "Accept": "application/json",
+        }
+
+        async with self._lock:
+            try:
+                timeout_cfg = aiohttp.ClientTimeout(total=10)
+                async with self._session.get(
+                    url,
+                    headers=headers,
+                    proxy=network.discord_proxy_url,
+                    proxy_auth=proxy_auth,
+                    timeout=timeout_cfg,
+                ) as resp:
+                    status = resp.status
+                    if status == 200:
+                        await resp.read()
+                        return ProxyCheckResult(ok=True, status=status)
+                    if status in {401, 407}:
+                        return ProxyCheckResult(
+                            ok=False,
+                            error="Прокси отклоняет подключение. Проверьте логин и пароль.",
+                            status=status,
+                        )
+                    return ProxyCheckResult(
+                        ok=False,
+                        error=f"Прокси вернул статус {status}.",
+                        status=status,
+                    )
+            except aiohttp.ClientError:
+                return ProxyCheckResult(
+                    ok=False,
+                    error="Не удалось подключиться к прокси. Проверьте адрес и доступность.",
+                )
 
 
 def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessage:

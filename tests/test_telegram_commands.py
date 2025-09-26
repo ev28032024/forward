@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, cast
 
 from forward_monitor.config_store import ConfigStore
+from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
+from forward_monitor.models import NetworkOptions
 from forward_monitor.telegram import CommandContext, TelegramController
 
 
@@ -41,12 +43,33 @@ class DummyAPI:
         return None
 
 
+class DummyDiscordClient:
+    def __init__(self) -> None:
+        self.tokens: list[str] = []
+        self.proxies: list[str | None] = []
+
+    async def verify_token(
+        self, token: str, *, network: NetworkOptions | None = None
+    ) -> TokenCheckResult:
+        self.tokens.append(token)
+        return TokenCheckResult(ok=True, display_name="tester")
+
+    async def check_proxy(self, network: NetworkOptions) -> ProxyCheckResult:
+        self.proxies.append(getattr(network, "discord_proxy_url", None))
+        return ProxyCheckResult(ok=True)
+
+
 def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
         api = DummyAPI()
 
-        controller = TelegramController(api, store, on_change=lambda: None)
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
         admin = CommandContext(
             chat_id=1,
             user_id=1,

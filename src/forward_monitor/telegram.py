@@ -9,10 +9,12 @@ import sqlite3
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Protocol
+from urllib.parse import urlparse
 
 import aiohttp
 
 from .config_store import AdminRecord, ConfigStore
+from .discord import DiscordClient
 from .models import FormattedTelegramMessage
 
 _API_BASE = "https://api.telegram.org"
@@ -292,10 +294,12 @@ class TelegramController:
         api: TelegramAPIProtocol,
         store: ConfigStore,
         *,
+        discord_client: DiscordClient,
         on_change: Callable[[], None],
     ) -> None:
         self._api = api
         self._store = store
+        self._discord = discord_client
         self._offset = 0
         self._running = True
         self._on_change = on_change
@@ -745,12 +749,33 @@ class TelegramController:
     # Core configuration commands
     # ------------------------------------------------------------------
     async def cmd_set_discord_token(self, ctx: CommandContext) -> None:
-        if not ctx.args:
+        token = ctx.args.strip()
+        if not token:
             await self._api.send_message(ctx.chat_id, "Нужно передать токен")
             return
-        self._store.set_setting("discord.token", ctx.args.strip())
+        if token.lower().startswith("bot "):
+            await self._api.send_message(
+                ctx.chat_id,
+                "Укажите пользовательский токен без префикса Bot.",
+            )
+            return
+
+        network = self._store.load_network_options()
+        result = await self._discord.verify_token(token, network=network)
+        if not result.ok:
+            await self._api.send_message(
+                ctx.chat_id,
+                result.error or "Не удалось проверить токен Discord.",
+            )
+            return
+
+        self._store.set_setting("discord.token", token)
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Токен Discord обновлён")
+        display = result.display_name or "пользователь"
+        await self._api.send_message(
+            ctx.chat_id,
+            f"Токен Discord обновлён. Авторизация прошла успешно: {display}",
+        )
 
     async def cmd_set_proxy(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
@@ -760,28 +785,79 @@ class TelegramController:
                 "Использование: /set_proxy <url|clear> [логин] [пароль]",
             )
             return
-        action = parts[0].lower()
-        if action == "clear":
+        if parts[0].lower() == "clear":
+            if len(parts) > 1:
+                await self._api.send_message(
+                    ctx.chat_id,
+                    "Лишние параметры. Использование: /set_proxy clear",
+                )
+                return
             self._store.delete_setting("proxy.discord.url")
             self._store.delete_setting("proxy.discord.login")
             self._store.delete_setting("proxy.discord.password")
             self._store.delete_setting("proxy.discord")
-            message = "Прокси отключён"
+            self._on_change()
+            await self._api.send_message(ctx.chat_id, "Прокси отключён")
+            return
+
+        if len(parts) > 3:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Слишком много параметров. Использование: /set_proxy <url> [логин] [пароль]",
+            )
+            return
+
+        proxy_url = parts[0]
+        parsed = urlparse(proxy_url)
+        if not parsed.scheme or not parsed.netloc:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Укажите корректный URL прокси (например, http://host:port).",
+            )
+            return
+
+        allowed_schemes = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+        if parsed.scheme.lower() not in allowed_schemes:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Поддерживаются схемы http, https, socks4, socks5.",
+            )
+            return
+
+        proxy_login = parts[1] if len(parts) >= 2 else None
+        proxy_password = parts[2] if len(parts) >= 3 else None
+        if proxy_login and ":" in proxy_login:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Логин не должен содержать двоеточие.",
+            )
+            return
+
+        network = self._store.load_network_options()
+        network.discord_proxy_url = proxy_url
+        network.discord_proxy_login = proxy_login
+        network.discord_proxy_password = proxy_password
+
+        result = await self._discord.check_proxy(network)
+        if not result.ok:
+            await self._api.send_message(
+                ctx.chat_id,
+                result.error or "Прокси не отвечает. Проверьте настройки.",
+            )
+            return
+
+        self._store.set_setting("proxy.discord.url", proxy_url)
+        if proxy_login:
+            self._store.set_setting("proxy.discord.login", proxy_login)
         else:
-            url = parts[0]
-            self._store.set_setting("proxy.discord.url", url)
-            if len(parts) >= 2:
-                self._store.set_setting("proxy.discord.login", parts[1])
-            else:
-                self._store.delete_setting("proxy.discord.login")
-            if len(parts) >= 3:
-                self._store.set_setting("proxy.discord.password", parts[2])
-            else:
-                self._store.delete_setting("proxy.discord.password")
-            self._store.delete_setting("proxy.discord")
-            message = "Прокси обновлён"
+            self._store.delete_setting("proxy.discord.login")
+        if proxy_password:
+            self._store.set_setting("proxy.discord.password", proxy_password)
+        else:
+            self._store.delete_setting("proxy.discord.password")
+        self._store.delete_setting("proxy.discord")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, message)
+        await self._api.send_message(ctx.chat_id, "Прокси обновлён. Проверка прошла успешно.")
 
     async def cmd_set_user_agent(self, ctx: CommandContext) -> None:
         value = ctx.args.strip()

@@ -7,7 +7,6 @@ import logging
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
@@ -46,6 +45,7 @@ class ForwardMonitorApp:
             controller = TelegramController(
                 telegram_api,
                 self._store,
+                discord_client=discord_client,
                 on_change=self._signal_refresh,
             )
 
@@ -70,7 +70,7 @@ class ForwardMonitorApp:
         state = MonitorState(
             channels=[],
             runtime=runtime,
-            network=self._load_network_options(),
+            network=self._store.load_network_options(),
             discord_token=self._store.get_setting("discord.token"),
         )
 
@@ -155,7 +155,7 @@ class ForwardMonitorApp:
 
     def _reload_state(self) -> MonitorState:
         runtime = self._load_runtime()
-        network = self._load_network_options()
+        network = self._store.load_network_options()
         channels = self._store.load_channel_configurations()
         discord_token = self._store.get_setting("discord.token")
         return MonitorState(
@@ -204,52 +204,4 @@ class ForwardMonitorApp:
         )
 
     def _load_network_options(self) -> NetworkOptions:
-        def _float(key: str, default: float) -> float:
-            value = self._store.get_setting(key)
-            if value is None:
-                return default
-            try:
-                return float(value)
-            except ValueError:
-                return default
-
-        proxy_url = self._store.get_setting("proxy.discord.url")
-        proxy_login = self._store.get_setting("proxy.discord.login")
-        proxy_password = self._store.get_setting("proxy.discord.password")
-
-        legacy_proxy = None
-        if not proxy_url:
-            legacy_proxy = self._store.get_setting("proxy.discord")
-            if legacy_proxy:
-                parsed = urlsplit(legacy_proxy)
-                if parsed.username or parsed.password:
-                    proxy_login = proxy_login or parsed.username or None
-                    proxy_password = proxy_password or parsed.password or None
-                    host = parsed.hostname or ""
-                    if parsed.port:
-                        host = f"{host}:{parsed.port}"
-                    components = (
-                        parsed.scheme,
-                        host,
-                        parsed.path,
-                        parsed.query,
-                        parsed.fragment,
-                    )
-                    proxy_url = urlunsplit(components)
-                else:
-                    proxy_url = legacy_proxy
-
-        if legacy_proxy and proxy_url and not self._store.get_setting("proxy.discord.url"):
-            self._store.set_setting("proxy.discord.url", proxy_url)
-            if proxy_login:
-                self._store.set_setting("proxy.discord.login", proxy_login)
-            if proxy_password:
-                self._store.set_setting("proxy.discord.password", proxy_password)
-            self._store.delete_setting("proxy.discord")
-
-        return NetworkOptions(
-            discord_proxy_url=proxy_url,
-            discord_proxy_login=proxy_login,
-            discord_proxy_password=proxy_password,
-            discord_user_agent=self._store.get_setting("ua.discord"),
-        )
+        return self._store.load_network_options()
