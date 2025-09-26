@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
-
-import html
 
 import aiohttp
 
@@ -22,9 +21,7 @@ class TelegramAPIProtocol(Protocol):
         timeout: int = 30,
     ) -> list[dict[str, Any]]: ...
 
-    async def set_my_commands(
-        self, commands: Iterable[tuple[str, str]]
-    ) -> None: ...
+    async def set_my_commands(self, commands: Iterable[tuple[str, str]]) -> None: ...
 
     async def send_message(
         self,
@@ -365,10 +362,11 @@ class TelegramController:
     # Basic commands
     # ------------------------------------------------------------------
     async def cmd_start(self, ctx: CommandContext) -> None:
-        await self._api.send_message(
-            ctx.chat_id,
-            "✨ Forward Monitor готов к работе. Используйте /help, чтобы увидеть обновлённую панель команд.",
+        welcome_message = (
+            "✨ Forward Monitor готов к работе. "
+            "Используйте /help, чтобы увидеть обновлённую панель команд."
         )
+        await self._api.send_message(ctx.chat_id, welcome_message)
 
     async def cmd_help(self, ctx: CommandContext) -> None:
         lines = ["<b>📚 Панель управления Forward Monitor</b>", ""]
@@ -394,9 +392,12 @@ class TelegramController:
         proxy_login = self._store.get_setting("proxy.discord.login")
         proxy_password = self._store.get_setting("proxy.discord.password")
         user_agent = self._store.get_setting("ua.discord") or "по умолчанию"
-        poll = self._store.get_setting("runtime.poll", "2.0")
-        delay_min = self._store.get_setting("runtime.delay_min", "0")
-        delay_max = self._store.get_setting("runtime.delay_max", "0")
+        poll_value = self._store.get_setting("runtime.poll", "2.0")
+        poll = poll_value if poll_value is not None else "2.0"
+        delay_min_value = self._store.get_setting("runtime.delay_min", "0")
+        delay_min = delay_min_value if delay_min_value is not None else "0"
+        delay_max_value = self._store.get_setting("runtime.delay_max", "0")
+        delay_max = delay_max_value if delay_max_value is not None else "0"
         rate = self._store.get_setting("runtime.rate")
         if rate is None:
             legacy_discord = self._store.get_setting("runtime.discord_rate") or "4.0"
@@ -409,9 +410,7 @@ class TelegramController:
         if proxy_url:
             proxy_lines.append(f"• URL: {html.escape(proxy_url)}")
             if proxy_login:
-                proxy_lines.append(
-                    f"• Логин: {html.escape(proxy_login)}"
-                )
+                proxy_lines.append(f"• Логин: {html.escape(proxy_login)}")
             if proxy_password:
                 proxy_lines.append("• Пароль: ••••••")
         else:
@@ -422,8 +421,14 @@ class TelegramController:
         for record in channels[:8]:
             label = record.label or record.discord_id
             status_icon = "🟢" if record.active else "⚪️"
+            discord_id = html.escape(str(record.discord_id))
+            chat_id = html.escape(str(record.telegram_chat_id))
+            channel_label = html.escape(str(label))
             channel_lines.append(
-                f"{status_icon} <code>{html.escape(record.discord_id)}</code> → <code>{html.escape(record.telegram_chat_id)}</code> — {html.escape(label)}"
+                (
+                    f"{status_icon} <code>{discord_id}</code> → "
+                    f"<code>{chat_id}</code> — {channel_label}"
+                )
             )
         if len(channels) > 8:
             channel_lines.append(f"… и ещё {len(channels) - 8} каналов")
@@ -813,9 +818,7 @@ class TelegramController:
     async def _ensure_commands_registered(self) -> None:
         if self._commands_registered:
             return
-        await self._api.set_my_commands(
-            (info.name, info.summary) for info in BOT_COMMANDS
-        )
+        await self._api.set_my_commands((info.name, info.summary) for info in BOT_COMMANDS)
         self._commands_registered = True
 
 

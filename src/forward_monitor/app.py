@@ -228,7 +228,14 @@ class ForwardMonitorApp:
                     host = parsed.hostname or ""
                     if parsed.port:
                         host = f"{host}:{parsed.port}"
-                    proxy_url = urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+                    components = (
+                        parsed.scheme,
+                        host,
+                        parsed.path,
+                        parsed.query,
+                        parsed.fragment,
+                    )
+                    proxy_url = urlunsplit(components)
                 else:
                     proxy_url = legacy_proxy
 
