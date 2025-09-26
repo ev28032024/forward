@@ -52,20 +52,64 @@ def test_controller_respects_admin_permissions(tmp_path: Path) -> None:
             changed = True
 
         controller = TelegramController(api, store, on_change=on_change)
-        ctx = CommandContext(chat_id=1, user_id=100, username="user", args="token", message={})
+        ctx = CommandContext(
+            chat_id=1,
+            user_id=100,
+            username="user",
+            handle="user",
+            args="token",
+            message={},
+        )
 
         await controller._dispatch("set_discord_token", ctx)
         assert store.get_setting("discord.token") is None
-        assert any("только администраторам" in message for _, message in api.messages)
+        assert api.messages == []
 
         await controller._dispatch("claim", ctx)
-        assert store.list_admins() == [100]
+        admins = store.list_admins()
+        assert len(admins) == 1
+        assert admins[0].user_id == 100
+        assert admins[0].username == "user"
 
         await controller._dispatch("set_discord_token", ctx)
         assert store.get_setting("discord.token") == "token"
         assert changed is True
 
     import asyncio
+
+    asyncio.run(runner())
+
+
+def test_grant_admin_by_username(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(api, store, on_change=lambda: None)
+
+        store.add_admin(1, "root")
+        admin_ctx = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="Root",
+            handle="root",
+            args="@newbie",
+            message={},
+        )
+        await controller._dispatch("grant", admin_ctx)
+        admins = store.list_admins()
+        assert any(admin.username == "newbie" for admin in admins)
+
+        newcomer_ctx = CommandContext(
+            chat_id=1,
+            user_id=222,
+            username="Newbie",
+            handle="newbie",
+            args="",
+            message={},
+        )
+        store.remember_user(newcomer_ctx.user_id, newcomer_ctx.handle)
+        await controller._dispatch("status", newcomer_ctx)
+        assert any("Статус" in text for _, text in api.messages)
 
     asyncio.run(runner())
 

@@ -8,10 +8,20 @@ from typing import Any, Callable, Iterable, Protocol
 
 import aiohttp
 
-from .config_store import ConfigStore
+from .config_store import AdminRecord, ConfigStore
 from .models import FormattedTelegramMessage
 
 _API_BASE = "https://api.telegram.org"
+
+
+def _normalize_username(username: str | None) -> str | None:
+    if username is None:
+        return None
+    normalized = username.strip()
+    if normalized.startswith("@"):
+        normalized = normalized[1:]
+    normalized = normalized.strip().lower()
+    return normalized or None
 
 
 class TelegramAPIProtocol(Protocol):
@@ -131,6 +141,7 @@ class CommandContext:
     chat_id: int
     user_id: int
     username: str
+    handle: str | None
     args: str
     message: dict[str, Any]
 
@@ -151,13 +162,11 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="start",
         summary="Приветствие и краткая справка.",
         help_text="/start — Forward Monitor готов. Используйте /help для списка команд.",
-        admin_only=False,
     ),
     _CommandInfo(
         name="help",
         summary="Список команд управления.",
         help_text="/help — полный список команд.",
-        admin_only=False,
     ),
     _CommandInfo(
         name="claim",
@@ -169,7 +178,6 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="status",
         summary="Показать текущие настройки.",
         help_text="/status — текущая конфигурация",
-        admin_only=False,
     ),
     _CommandInfo(
         name="admins",
@@ -179,12 +187,12 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="grant",
         summary="Выдать права администрирования.",
-        help_text="/grant <id> — выдать права",
+        help_text="/grant <id|@username> — выдать права",
     ),
     _CommandInfo(
         name="revoke",
         summary="Отозвать права администрирования.",
-        help_text="/revoke <id> — отобрать права",
+        help_text="/revoke <id|@username> — отобрать права",
     ),
     _CommandInfo(
         name="set_discord_token",
@@ -336,48 +344,120 @@ class TelegramController:
         command, _, args = text.partition(" ")
         command = command.split("@")[0][1:].lower()
         sender = message["from"]
-        username = str(sender.get("username") or sender.get("first_name") or "user")
+        handle_raw = sender.get("username")
+        display_name = str(handle_raw or sender.get("first_name") or "user")
         ctx = CommandContext(
             chat_id=int(message["chat"]["id"]),
             user_id=int(sender["id"]),
-            username=username,
+            username=display_name,
+            handle=str(handle_raw) if handle_raw else None,
             args=args.strip(),
             message=message,
         )
+        self._store.remember_user(ctx.user_id, ctx.handle)
         await self._dispatch(command, ctx)
 
     async def _dispatch(self, command: str, ctx: CommandContext) -> None:
         handler = getattr(self, f"cmd_{command}", None)
         if handler is None:
-            await self._api.send_message(ctx.chat_id, f"Неизвестная команда: {command}")
+            if self._is_admin(ctx):
+                await self._api.send_message(
+                    ctx.chat_id,
+                    f"Неизвестная команда: {command}",
+                )
             return
-        info = _COMMAND_MAP.get(command)
-        requires_admin = info.admin_only if info else True
-        if requires_admin and ctx.user_id not in self._store.list_admins():
-            await self._api.send_message(ctx.chat_id, "Команда доступна только администраторам")
+        if command == "claim" and not self._store.has_admins():
+            await handler(ctx)
+            return
+        if not self._is_admin(ctx):
             return
         await handler(ctx)
+
+    def _is_admin(self, ctx: CommandContext) -> bool:
+        normalized_handle = _normalize_username(ctx.handle)
+        for admin in self._store.list_admins():
+            if admin.user_id is not None and admin.user_id == ctx.user_id:
+                return True
+            if (
+                normalized_handle
+                and admin.username is not None
+                and admin.username.lower() == normalized_handle
+            ):
+                return True
+        return False
+
+    def _format_admin(self, admin: AdminRecord) -> str:
+        parts: list[str] = []
+        if admin.username:
+            parts.append(f"@{html.escape(admin.username)}")
+        if admin.user_id is not None:
+            parts.append(f"<code>{admin.user_id}</code>")
+        if not parts:
+            return "—"
+        return " / ".join(parts)
 
     # ------------------------------------------------------------------
     # Basic commands
     # ------------------------------------------------------------------
     async def cmd_start(self, ctx: CommandContext) -> None:
         welcome_message = (
-            "✨ Forward Monitor готов к работе. "
-            "Используйте /help, чтобы увидеть панель команд."
+            "👋 <b>Forward Monitor</b> на связи.\n"
+            "Откройте <code>/help</code>, чтобы перейти в панель управления."
         )
-        await self._api.send_message(ctx.chat_id, welcome_message)
+        await self._api.send_message(
+            ctx.chat_id,
+            welcome_message,
+            parse_mode="HTML",
+        )
 
     async def cmd_help(self, ctx: CommandContext) -> None:
-        lines = ["<b>📚 Панель управления Forward Monitor</b>", ""]
-        for info in BOT_COMMANDS:
-            if info.name in {"start", "help"}:
-                continue
-            icon = "🔐" if info.admin_only else "✨"
-            lines.append(
-                f"{icon} <code>/{html.escape(info.name)}</code> — {html.escape(info.summary)}"
-            )
-            lines.append(f"<i>{html.escape(info.help_text)}</i>")
+        sections = [
+            (
+                "🔐 Администрирование",
+                ["claim", "status", "admins", "grant", "revoke"],
+            ),
+            (
+                "⚙️ Интеграция",
+                [
+                    "set_discord_token",
+                    "set_fallback_chat",
+                    "set_proxy",
+                    "set_user_agent",
+                    "set_poll",
+                    "set_delay",
+                    "set_rate",
+                ],
+            ),
+            ("📡 Каналы", ["add_channel", "remove_channel", "list_channels"]),
+            (
+                "🎨 Оформление",
+                [
+                    "set_header",
+                    "set_footer",
+                    "set_chip",
+                    "set_parse_mode",
+                    "set_disable_preview",
+                    "set_max_length",
+                    "set_attachments",
+                    "add_replace",
+                    "clear_replace",
+                ],
+            ),
+            ("🚦 Фильтры", ["add_filter", "clear_filter"]),
+        ]
+        lines = [
+            "<b>🛠️ Forward Monitor • Панель управления</b>",
+            "<i>Современный набор инструментов для синхронизации каналов.</i>",
+            "",
+        ]
+        for title, command_names in sections:
+            lines.append(f"<b>{title}</b>")
+            for name in command_names:
+                info = _COMMAND_MAP[name]
+                summary = html.escape(info.summary)
+                usage = html.escape(info.help_text)
+                lines.append(f"• <code>/{html.escape(info.name)}</code> — {summary}")
+                lines.append(f"  <i>{usage}</i>")
             lines.append("")
         await self._api.send_message(
             ctx.chat_id,
@@ -460,39 +540,103 @@ class TelegramController:
 
     async def cmd_claim(self, ctx: CommandContext) -> None:
         if self._store.has_admins():
-            await self._api.send_message(ctx.chat_id, "Администратор уже назначен")
+            if not self._is_admin(ctx):
+                return
+            self._store.add_admin(ctx.user_id, ctx.handle)
+            self._on_change()
+            await self._api.send_message(
+                ctx.chat_id,
+                "Ваши административные данные обновлены",
+            )
             return
-        self._store.add_admin(ctx.user_id)
+        self._store.add_admin(ctx.user_id, ctx.handle)
         self._on_change()
         await self._api.send_message(ctx.chat_id, "Вы назначены администратором")
 
     async def cmd_admins(self, ctx: CommandContext) -> None:
         admins = self._store.list_admins()
         if admins:
-            lines = ["Администраторы:", *[str(admin) for admin in admins]]
+            lines = ["<b>👑 Администраторы</b>", ""]
+            for admin in admins:
+                lines.append(f"• {self._format_admin(admin)}")
         else:
-            lines = ["Список пуст"]
-        await self._api.send_message(ctx.chat_id, "\n".join(lines))
+            lines = [
+                "<b>👑 Администраторы</b>",
+                "",
+                "Пока никого нет. Используйте <code>/grant</code>, чтобы добавить доступ.",
+            ]
+        await self._api.send_message(
+            ctx.chat_id,
+            "\n".join(lines),
+            parse_mode="HTML",
+        )
 
     async def cmd_grant(self, ctx: CommandContext) -> None:
-        try:
-            user_id = int(ctx.args)
-        except ValueError:
-            await self._api.send_message(ctx.chat_id, "Укажите ID пользователя")
+        target = ctx.args.strip()
+        if not target:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Укажите ID или @username",
+            )
             return
-        self._store.add_admin(user_id)
+        user_id: int | None
+        username: str | None
+        if target.lstrip("-").isdigit():
+            user_id = int(target)
+            username = None
+        else:
+            normalized_username = _normalize_username(target)
+            if normalized_username is None:
+                await self._api.send_message(ctx.chat_id, "Неверное имя пользователя")
+                return
+            username = normalized_username
+            user_id = self._store.resolve_user_id(username)
+        self._store.add_admin(user_id, username)
         self._on_change()
-        await self._api.send_message(ctx.chat_id, f"Выдан доступ {user_id}")
+        label = self._format_admin(AdminRecord(user_id=user_id, username=username))
+        if user_id is None:
+            await self._api.send_message(
+                ctx.chat_id,
+                f"Выдан доступ {label}. Активируется после первого обращения.",
+                parse_mode="HTML",
+            )
+        else:
+            await self._api.send_message(
+                ctx.chat_id,
+                f"Выдан доступ {label}",
+                parse_mode="HTML",
+            )
 
     async def cmd_revoke(self, ctx: CommandContext) -> None:
-        try:
-            user_id = int(ctx.args)
-        except ValueError:
-            await self._api.send_message(ctx.chat_id, "Укажите ID пользователя")
+        target = ctx.args.strip()
+        if not target:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Укажите ID или @username",
+            )
             return
-        self._store.remove_admin(user_id)
+        label: str
+        removed: bool
+        if target.lstrip("-").isdigit():
+            identifier = int(target)
+            removed = self._store.remove_admin(identifier)
+            label = self._format_admin(AdminRecord(user_id=identifier, username=None))
+        else:
+            normalized = _normalize_username(target)
+            if normalized is None:
+                await self._api.send_message(ctx.chat_id, "Неверное имя пользователя")
+                return
+            removed = self._store.remove_admin(normalized)
+            label = self._format_admin(AdminRecord(user_id=None, username=normalized))
+        if not removed:
+            await self._api.send_message(ctx.chat_id, "Администратор не найден")
+            return
         self._on_change()
-        await self._api.send_message(ctx.chat_id, f"Доступ отозван у {user_id}")
+        await self._api.send_message(
+            ctx.chat_id,
+            f"Доступ отозван у {label}",
+            parse_mode="HTML",
+        )
 
     # ------------------------------------------------------------------
     # Core configuration commands
