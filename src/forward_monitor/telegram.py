@@ -33,6 +33,10 @@ class TelegramAPIProtocol(Protocol):
 
     async def answer_callback_query(self, callback_id: str, text: str) -> None: ...
 
+    async def set_commands(
+        self, commands: Iterable[tuple[str, str]]
+    ) -> None: ...
+
 
 class TelegramAPI:
     """Lightweight Telegram Bot API wrapper."""
@@ -112,6 +116,28 @@ class TelegramAPI:
         except aiohttp.ClientError:
             return
 
+    async def set_commands(self, commands: Iterable[tuple[str, str]]) -> None:
+        url = f"{_API_BASE}/bot{self._token}/setMyCommands"
+        payload = {
+            "commands": [
+                {"command": name, "description": description[:256]}
+                for name, description in commands
+            ]
+        }
+        if not payload["commands"]:
+            return
+        try:
+            timeout_cfg = aiohttp.ClientTimeout(total=10)
+            async with self._session.post(
+                url,
+                json=payload,
+                proxy=self._proxy,
+                timeout=timeout_cfg,
+            ) as resp:
+                await resp.read()
+        except aiohttp.ClientError:
+            return
+
 
 @dataclass(slots=True)
 class CommandContext:
@@ -123,6 +149,115 @@ class CommandContext:
 
 
 AdminCheck = Callable[[str], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class BotCommandInfo:
+    name: str
+    description: str
+    usage: str | None = None
+    admin_only: bool = True
+
+    def command_tuple(self) -> tuple[str, str]:
+        return (self.name, self.description)
+
+    def help_line(self) -> str:
+        usage = f" {self.usage}" if self.usage else ""
+        role = "админ" if self.admin_only else "без прав"
+        return f"/{self.name}{usage} — {self.description} ({role})"
+
+
+BOT_COMMANDS: tuple[BotCommandInfo, ...] = (
+    BotCommandInfo("start", "краткое приветствие", admin_only=False),
+    BotCommandInfo("help", "список команд", admin_only=False),
+    BotCommandInfo(
+        "claim",
+        "стать администратором, если список пуст",
+        admin_only=False,
+    ),
+    BotCommandInfo("status", "текущее состояние и параметры", admin_only=False),
+    BotCommandInfo("admins", "список администраторов"),
+    BotCommandInfo("grant", "выдать права пользователю", "<id>"),
+    BotCommandInfo("revoke", "отобрать права у пользователя", "<id>"),
+    BotCommandInfo("set_discord_token", "сохранить токен Discord", "<token>"),
+    BotCommandInfo("set_fallback_chat", "задать fallback чат", "<chat_id>"),
+    BotCommandInfo(
+        "add_channel",
+        "добавить связку Discord → Telegram",
+        "<discord_id> <telegram_chat> [метка]",
+    ),
+    BotCommandInfo("remove_channel", "удалить связку", "<discord_id>"),
+    BotCommandInfo("list_channels", "показать все связки"),
+    BotCommandInfo("set_header", "настроить шапку сообщений", "<discord_id|all> <текст>"),
+    BotCommandInfo("set_footer", "настроить подпись сообщений", "<discord_id|all> <текст>"),
+    BotCommandInfo("set_chip", "настроить краткую подпись", "<discord_id|all> <текст>"),
+    BotCommandInfo(
+        "set_parse_mode",
+        "выбрать режим форматирования",
+        "<discord_id|all> <markdownv2|markdown|html|text>",
+    ),
+    BotCommandInfo(
+        "set_disable_preview",
+        "включить или выключить предпросмотр ссылок",
+        "<discord_id|all> <on|off>",
+    ),
+    BotCommandInfo(
+        "set_max_length",
+        "ограничить длину сообщений",
+        "<discord_id|all> <число>",
+    ),
+    BotCommandInfo(
+        "set_attachments",
+        "задать стиль списка вложений",
+        "<discord_id|all> <summary|links>",
+    ),
+    BotCommandInfo(
+        "add_filter",
+        "добавить фильтр",
+        "<discord_id|all> <тип> <значение>",
+    ),
+    BotCommandInfo(
+        "clear_filter",
+        "удалить фильтр",
+        "<discord_id|all> <тип> [значение]",
+    ),
+    BotCommandInfo(
+        "add_replace",
+        "добавить правило замены",
+        "<discord_id|all> шаблон => замена",
+    ),
+    BotCommandInfo(
+        "clear_replace",
+        "удалить правило замены",
+        "<discord_id|all> [шаблон]",
+    ),
+    BotCommandInfo(
+        "set_proxy",
+        "настроить прокси",
+        "<discord|telegram|clear> [url]",
+    ),
+    BotCommandInfo(
+        "set_user_agent",
+        "задать user-agent для Discord",
+        "<desktop|mobile> <ua>",
+    ),
+    BotCommandInfo(
+        "set_mobile_ratio",
+        "выбрать долю мобильных запросов",
+        "<0-1>",
+    ),
+    BotCommandInfo("set_poll", "обновить период опроса Discord", "<секунды>"),
+    BotCommandInfo(
+        "set_delay",
+        "задать паузу между сообщениями",
+        "<min_ms> <max_ms>",
+    ),
+    BotCommandInfo(
+        "set_rate",
+        "изменить лимиты запросов",
+        "<discord|telegram> <в_секунду>",
+    ),
+)
 
 
 class TelegramController:
@@ -142,6 +277,7 @@ class TelegramController:
         self._on_change = on_change
 
     async def run(self) -> None:
+        await self._sync_bot_commands()
         while self._running:
             updates = await self._api.get_updates(self._offset, timeout=25)
             for update in updates:
@@ -189,35 +325,7 @@ class TelegramController:
         )
 
     async def cmd_help(self, ctx: CommandContext) -> None:
-        commands = [
-            "/claim — стать администратором (если список пуст)",
-            "/admins — показать администраторов",
-            "/grant <id> — выдать права",
-            "/revoke <id> — отобрать права",
-            "/status — текущая конфигурация",
-            "/set_discord_token <token>",
-            "/add_channel <discord_id> <telegram_chat> [метка]",
-            "/remove_channel <discord_id>",
-            "/list_channels",
-            "/set_header <discord_id|all> <текст>",
-            "/set_footer <discord_id|all> <текст>",
-            "/set_chip <discord_id|all> <текст>",
-            "/set_parse_mode <discord_id|all> <markdownv2|markdown|html|text>",
-            "/set_disable_preview <discord_id|all> <on|off>",
-            "/set_max_length <discord_id|all> <число>",
-            "/set_attachments <discord_id|all> <summary|links>",
-            "/add_filter <discord_id|all> <тип> <значение>",
-            "/clear_filter <discord_id|all> <тип> [значение]",
-            "/add_replace <discord_id|all> шаблон => замена",
-            "/clear_replace <discord_id|all> [шаблон]",
-            "/set_proxy <discord|telegram|clear> [url]",
-            "/set_user_agent <desktop|mobile> <значение>",
-            "/set_mobile_ratio <0-1>",
-            "/set_poll <секунды>",
-            "/set_delay <min_ms> <max_ms>",
-            "/set_rate <discord|telegram> <в_секунду>",
-            "/set_fallback_chat <chat_id>",
-        ]
+        commands = [info.help_line() for info in BOT_COMMANDS]
         await self._api.send_message(ctx.chat_id, "\n".join(commands))
 
     async def cmd_status(self, ctx: CommandContext) -> None:
@@ -614,6 +722,16 @@ class TelegramController:
         if not ids or not pattern:
             return (None, "", "")
         return (ids, pattern, replacement)
+
+    async def _sync_bot_commands(self) -> None:
+        commands = [info.command_tuple() for info in BOT_COMMANDS]
+        if not commands:
+            return
+        try:
+            await self._api.set_commands(commands)
+        except Exception:
+            # Обновление списка команд — необязательная операция, поэтому ошибки игнорируются.
+            pass
 
 
 async def send_formatted(

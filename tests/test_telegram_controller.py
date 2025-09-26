@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Iterable
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.telegram import CommandContext, TelegramController
@@ -10,6 +11,7 @@ from forward_monitor.telegram import CommandContext, TelegramController
 class DummyAPI:
     def __init__(self) -> None:
         self.messages: list[tuple[int | str, str]] = []
+        self.commands: list[tuple[str, str]] = []
 
     def set_proxy(self, proxy: str | None) -> None:
         return None
@@ -34,6 +36,9 @@ class DummyAPI:
 
     async def answer_callback_query(self, callback_id: str, text: str) -> None:
         return None
+
+    async def set_commands(self, commands: Iterable[tuple[str, str]]) -> None:
+        self.commands = list(commands)
 
 
 def test_controller_respects_admin_permissions(tmp_path: Path) -> None:
