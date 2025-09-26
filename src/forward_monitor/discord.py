@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -12,6 +13,9 @@ from .models import DiscordMessage, NetworkOptions
 
 _API_BASE = "https://discord.com/api/v10"
 _DEFAULT_USER_AGENT = "DiscordBot (https://github.com, 1.0)"
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -84,9 +88,19 @@ class DiscordClient:
                     proxy_auth=proxy_auth,
                 ) as resp:
                     if resp.status >= 400:
+                        logger.warning(
+                            "Discord ответил статусом %s при получении сообщений канала %s",
+                            resp.status,
+                            channel_id,
+                        )
                         return []
                     data = await resp.json()
-            except aiohttp.ClientError:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Не удалось получить сообщения из Discord канала %s: %s",
+                    channel_id,
+                    exc,
+                )
                 return []
         return tuple(
             _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
@@ -153,7 +167,11 @@ class DiscordClient:
                         error=f"Discord ответил статусом {status}. Попробуйте позже.",
                         status=status,
                     )
-            except aiohttp.ClientError:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Не удалось проверить Discord токен: %s",
+                    exc,
+                )
                 return TokenCheckResult(
                     ok=False,
                     error="Не удалось обратиться к Discord. Проверьте сеть или прокси.",
@@ -198,7 +216,11 @@ class DiscordClient:
                         error=f"Прокси вернул статус {status}.",
                         status=status,
                     )
-            except aiohttp.ClientError:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Не удалось проверить прокси для Discord: %s",
+                    exc,
+                )
                 return ProxyCheckResult(
                     ok=False,
                     error="Не удалось подключиться к прокси. Проверьте адрес и доступность.",
@@ -215,8 +237,14 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
     content = str(payload.get("content") or "")
     attachments_raw = payload.get("attachments") or []
     embeds_raw = payload.get("embeds") or []
+    stickers_raw = (
+        payload.get("sticker_items")
+        or payload.get("stickers")
+        or []
+    )
     attachments = tuple(item for item in attachments_raw if isinstance(item, Mapping))
     embeds = tuple(item for item in embeds_raw if isinstance(item, Mapping))
+    stickers = tuple(item for item in stickers_raw if isinstance(item, Mapping))
 
     return DiscordMessage(
         id=message_id,
@@ -226,6 +254,7 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
         content=content,
         attachments=attachments,
         embeds=embeds,
+        stickers=stickers,
         timestamp=payload.get("timestamp"),
         edited_timestamp=payload.get("edited_timestamp"),
     )

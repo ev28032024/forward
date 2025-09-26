@@ -28,6 +28,9 @@ class FilterEngine:
         lowered = content.lower()
         author_id = message.author_id
 
+        if message.stickers:
+            return FilterDecision(False, "sticker_blocked")
+
         if self._config.allowed_senders and author_id not in self._config.allowed_senders:
             return FilterDecision(False, "sender_not_allowed")
         if author_id in self._config.blocked_senders:
@@ -51,6 +54,9 @@ class FilterEngine:
 def _infer_types(message: DiscordMessage) -> Iterable[str]:
     if message.content:
         yield "text"
+
+    if message.stickers:
+        yield "sticker"
 
     for attachment in message.attachments:
         content_type = str(attachment.get("content_type") or "").lower()

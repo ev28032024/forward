@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,10 +50,20 @@ class ForwardMonitorApp:
                 on_change=self._signal_refresh,
             )
 
+            async def run_monitor() -> None:
+                await self._monitor_loop(discord_client, telegram_api)
+
+            async def run_controller() -> None:
+                await controller.run()
+
             monitor_task = asyncio.create_task(
-                self._monitor_loop(discord_client, telegram_api), name="forward-monitor"
+                self._supervise("forward-monitor", run_monitor),
+                name="forward-monitor-supervisor",
             )
-            bot_task = asyncio.create_task(controller.run(), name="telegram-controller")
+            bot_task = asyncio.create_task(
+                self._supervise("telegram-controller", run_controller),
+                name="telegram-controller-supervisor",
+            )
 
             await asyncio.gather(monitor_task, bot_task)
 
@@ -92,13 +103,21 @@ class ForwardMonitorApp:
                 if self._refresh_event.is_set():
                     break
                 await discord_rate.wait()
-                await self._process_channel(
-                    channel,
-                    discord_client,
-                    telegram_api,
-                    telegram_rate,
-                    state.runtime,
-                )
+                try:
+                    await self._process_channel(
+                        channel,
+                        discord_client,
+                        telegram_api,
+                        telegram_rate,
+                        state.runtime,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Ошибка при обработке канала Discord %s", channel.discord_id
+                    )
+                    await asyncio.sleep(1.0)
 
             try:
                 await asyncio.wait_for(
@@ -107,6 +126,25 @@ class ForwardMonitorApp:
                 )
             except asyncio.TimeoutError:
                 pass
+
+    async def _supervise(
+        self,
+        name: str,
+        factory: Callable[[], Awaitable[None]],
+        *,
+        retry_delay: float = 5.0,
+    ) -> None:
+        while True:
+            try:
+                await factory()
+            except asyncio.CancelledError:
+                logger.info("Задача %s остановлена", name)
+                raise
+            except Exception:
+                logger.exception("Задача %s завершилась с ошибкой", name)
+            else:
+                logger.warning("Задача %s завершилась неожиданно, будет перезапущена", name)
+            await asyncio.sleep(retry_delay)
 
     async def _process_channel(
         self,
@@ -119,10 +157,20 @@ class ForwardMonitorApp:
         if not channel.active:
             return
 
-        messages = await discord_client.fetch_messages(
-            channel.discord_id,
-            after=channel.last_message_id,
-        )
+        try:
+            messages = await discord_client.fetch_messages(
+                channel.discord_id,
+                after=channel.last_message_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Ошибка при запросе сообщений Discord для канала %s",
+                channel.discord_id,
+            )
+            await asyncio.sleep(1.0)
+            return
         if not messages:
             return
 
@@ -139,7 +187,17 @@ class ForwardMonitorApp:
                 continue
             formatted = format_discord_message(msg, channel)
             await telegram_rate.wait()
-            await send_formatted(telegram_api, channel.telegram_chat_id, formatted)
+            try:
+                await send_formatted(telegram_api, channel.telegram_chat_id, formatted)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Не удалось отправить сообщение %s в Telegram чат %s",
+                    msg.id,
+                    channel.telegram_chat_id,
+                )
+                continue
             await self._sleep_within(runtime)
 
         if last_seen and channel.storage_id is not None:

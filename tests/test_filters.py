@@ -17,6 +17,7 @@ def make_message(**kwargs: Any) -> DiscordMessage:
         content=str(kwargs.get("content", "")),
         attachments=tuple(attachments),
         embeds=tuple(embeds),
+        stickers=tuple(kwargs.get("stickers", ())),
     )
 
 
@@ -41,3 +42,13 @@ def test_filter_engine_types() -> None:
 
     assert engine.evaluate(image_message).allowed is True
     assert engine.evaluate(file_message).allowed is False
+
+
+def test_filter_engine_blocks_stickers() -> None:
+    engine = FilterEngine(FilterConfig())
+    sticker_message = make_message(stickers=[{"id": "1", "name": "hi"}])
+
+    decision = engine.evaluate(sticker_message)
+
+    assert decision.allowed is False
+    assert decision.reason == "sticker_blocked"

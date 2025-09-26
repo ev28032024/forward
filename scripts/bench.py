@@ -59,6 +59,7 @@ def _sample_message() -> "DiscordMessageType":
         content="foo" * 20,
         attachments=tuple(attachments),
         embeds=tuple(embeds),
+        stickers=(),
     )
 
 
