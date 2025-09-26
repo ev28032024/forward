@@ -47,7 +47,14 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
         api = DummyAPI()
 
         controller = TelegramController(api, store, on_change=lambda: None)
-        admin = CommandContext(chat_id=1, user_id=1, username="admin", args="", message={})
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
 
         await controller._dispatch("claim", admin)
         admin.args = "123 456 Label"

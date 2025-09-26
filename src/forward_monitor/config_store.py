@@ -14,6 +14,14 @@ _DB_PRAGMA = "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=NORMAL;" "PRAGMA for
 
 
 @dataclass(slots=True)
+class AdminRecord:
+    """Admin identity stored in the configuration."""
+
+    user_id: int | None
+    username: str | None
+
+
+@dataclass(slots=True)
 class ChannelRecord:
     """Raw channel record loaded from SQLite."""
 
@@ -50,7 +58,14 @@ class ConfigStore:
                 );
 
                 CREATE TABLE IF NOT EXISTS admins (
-                    user_id INTEGER PRIMARY KEY
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE,
+                    username TEXT UNIQUE COLLATE NOCASE
+                );
+
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT UNIQUE COLLATE NOCASE
                 );
 
                 CREATE TABLE IF NOT EXISTS channels (
@@ -86,7 +101,43 @@ class ConfigStore:
                 );
                 """
             )
+            self._migrate_admins(cur)
             self._conn.commit()
+
+    def _migrate_admins(self, cur: sqlite3.Cursor) -> None:
+        cur.execute("PRAGMA table_info(admins)")
+        columns = {str(row[1]) for row in cur.fetchall()}
+        expected = {"id", "user_id", "username"}
+        if columns == expected:
+            return
+        if columns == {"user_id"}:
+            cur.executescript(
+                """
+                ALTER TABLE admins RENAME TO admins_legacy;
+                CREATE TABLE admins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE,
+                    username TEXT UNIQUE COLLATE NOCASE
+                );
+                INSERT INTO admins(user_id)
+                SELECT user_id FROM admins_legacy;
+                DROP TABLE admins_legacy;
+                """
+            )
+            return
+        if not columns:
+            cur.executescript(
+                """
+                DROP TABLE IF EXISTS admins;
+                CREATE TABLE admins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE,
+                    username TEXT UNIQUE COLLATE NOCASE
+                );
+                """
+            )
+            return
+        raise RuntimeError("Unsupported admins schema detected")
 
     # ------------------------------------------------------------------
     # Basic settings
@@ -126,30 +177,97 @@ class ConfigStore:
     # ------------------------------------------------------------------
     # Admins
     # ------------------------------------------------------------------
-    def list_admins(self) -> list[int]:
-        with closing(self._conn.cursor()) as cur:
-            cur.execute("SELECT user_id FROM admins ORDER BY user_id ASC")
-            rows = cur.fetchall()
-        return [int(row["user_id"]) for row in rows]
-
-    def add_admin(self, user_id: int) -> None:
+    def list_admins(self) -> list[AdminRecord]:
         with closing(self._conn.cursor()) as cur:
             cur.execute(
-                "INSERT OR IGNORE INTO admins(user_id) VALUES(?)",
-                (int(user_id),),
+                "SELECT user_id, username FROM admins ORDER BY "
+                "COALESCE(username, CAST(user_id AS TEXT)) COLLATE NOCASE"
             )
+            rows = cur.fetchall()
+        return [
+            AdminRecord(
+                user_id=int(row["user_id"]) if row["user_id"] is not None else None,
+                username=str(row["username"]) if row["username"] else None,
+            )
+            for row in rows
+        ]
+
+    def add_admin(self, user_id: int | None = None, username: str | None = None) -> None:
+        normalized = _normalize_username(username)
+        with closing(self._conn.cursor()) as cur:
+            if user_id is not None:
+                cur.execute(
+                    "INSERT INTO admins(user_id, username) VALUES(?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username",
+                    (int(user_id), normalized),
+                )
+            elif normalized is not None:
+                cur.execute(
+                    "INSERT INTO admins(username) VALUES(?) "
+                    "ON CONFLICT(username) DO UPDATE SET username=excluded.username",
+                    (normalized,),
+                )
+            else:
+                raise ValueError("Either user_id or username must be provided")
             self._conn.commit()
 
-    def remove_admin(self, user_id: int) -> None:
+    def remove_admin(self, identifier: int | str) -> bool:
         with closing(self._conn.cursor()) as cur:
-            cur.execute("DELETE FROM admins WHERE user_id=?", (int(user_id),))
+            if isinstance(identifier, int):
+                cur.execute("DELETE FROM admins WHERE user_id=?", (int(identifier),))
+            else:
+                normalized = _normalize_username(identifier)
+                cur.execute(
+                    "DELETE FROM admins WHERE username=? COLLATE NOCASE",
+                    (normalized,),
+                )
+            deleted = cur.rowcount > 0
             self._conn.commit()
+        return deleted
 
     def has_admins(self) -> bool:
         with closing(self._conn.cursor()) as cur:
             cur.execute("SELECT 1 FROM admins LIMIT 1")
             row = cur.fetchone()
         return bool(row)
+
+    def remember_user(self, user_id: int, username: str | None) -> None:
+        normalized = _normalize_username(username)
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                "INSERT INTO user_profiles(user_id, username) VALUES(?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username",
+                (int(user_id), normalized),
+            )
+            if normalized is not None:
+                cur.execute(
+                    "INSERT INTO user_profiles(user_id, username) VALUES(?, ?) "
+                    "ON CONFLICT(username) DO UPDATE SET user_id=excluded.user_id, "
+                    "username=excluded.username",
+                    (int(user_id), normalized),
+                )
+                cur.execute(
+                    "UPDATE admins SET user_id=COALESCE(user_id, ?), username=? "
+                    "WHERE username=? COLLATE NOCASE",
+                    (int(user_id), normalized, normalized),
+                )
+                cur.execute(
+                    "UPDATE admins SET username=? WHERE user_id=?",
+                    (normalized, int(user_id)),
+                )
+            self._conn.commit()
+
+    def resolve_user_id(self, username: str) -> int | None:
+        normalized = _normalize_username(username)
+        if normalized is None:
+            return None
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                "SELECT user_id FROM user_profiles WHERE username=? COLLATE NOCASE",
+                (normalized,),
+            )
+            row = cur.fetchone()
+        return int(row["user_id"]) if row and row["user_id"] is not None else None
 
     # ------------------------------------------------------------------
     # Channels
@@ -375,6 +493,16 @@ class ConfigStore:
     # ------------------------------------------------------------------
     def close(self) -> None:
         self._conn.close()
+
+
+def _normalize_username(username: str | None) -> str | None:
+    if username is None:
+        return None
+    normalized = username.strip()
+    if normalized.startswith("@"):
+        normalized = normalized[1:]
+    normalized = normalized.strip().lower()
+    return normalized or None
 
 
 def _filter_target(filters: FilterConfig, filter_type: str) -> set[str] | None:
