@@ -155,7 +155,7 @@ def _chunk_text(text: str, limit: int, ellipsis: str) -> list[str]:
     return chunks
 
 
-_CHANNEL_MENTION_RE = re.compile(r"<#[0-9]+>")
+_CHANNEL_MENTION_RE = re.compile(r"<#([0-9]+)>")
 _EXTRA_SPACE_RE = re.compile(r"[ \t]{2,}")
 _TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
 
@@ -163,7 +163,7 @@ _TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
 def _sanitize_content(text: str) -> str:
     if not text:
         return ""
-    cleaned = _CHANNEL_MENTION_RE.sub("", text)
+    cleaned = _CHANNEL_MENTION_RE.sub(lambda match: f"#{match.group(1)}", text)
     cleaned = _EXTRA_SPACE_RE.sub(" ", cleaned)
     cleaned = _TRIPLE_NEWLINES_RE.sub("\n\n", cleaned)
     return cleaned.strip()

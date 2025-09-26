@@ -77,8 +77,8 @@ class RuntimeOptions:
     """Tunable behaviour of the monitor loop."""
 
     poll_interval: float = 2.0
-    min_delay_ms: int = 0
-    max_delay_ms: int = 0
+    min_delay_seconds: float = 0.0
+    max_delay_seconds: float = 0.0
     rate_per_second: float = 8.0
 
 

@@ -17,7 +17,7 @@ from .filters import FilterEngine
 from .formatting import format_discord_message
 from .models import ChannelConfig, NetworkOptions, RuntimeOptions
 from .telegram import TelegramAPI, TelegramController, send_formatted
-from .utils import RateLimiter
+from .utils import RateLimiter, parse_delay_setting
 
 logger = logging.getLogger(__name__)
 
@@ -205,11 +205,13 @@ class ForwardMonitorApp:
             channel.last_message_id = last_seen
 
     async def _sleep_within(self, runtime: RuntimeOptions) -> None:
-        delay_ms = 0
-        if runtime.max_delay_ms > 0:
-            delay_ms = random.randint(runtime.min_delay_ms, runtime.max_delay_ms)
-        if delay_ms:
-            await asyncio.sleep(delay_ms / 1000)
+        delay_seconds = 0.0
+        if runtime.max_delay_seconds > 0:
+            delay_seconds = random.uniform(
+                runtime.min_delay_seconds, runtime.max_delay_seconds
+            )
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
 
     def _reload_state(self) -> MonitorState:
         runtime = self._load_runtime()
@@ -233,15 +235,6 @@ class ForwardMonitorApp:
             except ValueError:
                 return default
 
-        def _int(key: str, default: int) -> int:
-            value = self._store.get_setting(key)
-            if value is None:
-                return default
-            try:
-                return int(value)
-            except ValueError:
-                return default
-
         rate = self._store.get_setting("runtime.rate")
         if rate is not None:
             try:
@@ -254,10 +247,15 @@ class ForwardMonitorApp:
             legacy_telegram = _float("runtime.telegram_rate", legacy_discord)
             rate_value = max(legacy_discord, legacy_telegram)
 
+        min_delay = parse_delay_setting(self._store.get_setting("runtime.delay_min"), 0.0)
+        max_delay = parse_delay_setting(self._store.get_setting("runtime.delay_max"), 0.0)
+        if max_delay < min_delay:
+            max_delay = min_delay
+
         return RuntimeOptions(
             poll_interval=_float("runtime.poll", 2.0),
-            min_delay_ms=_int("runtime.delay_min", 0),
-            max_delay_ms=_int("runtime.delay_max", 0),
+            min_delay_seconds=min_delay,
+            max_delay_seconds=max_delay,
             rate_per_second=rate_value,
         )
 

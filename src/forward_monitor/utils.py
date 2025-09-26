@@ -25,3 +25,19 @@ class RateLimiter:
             if now < self._next_time:
                 await asyncio.sleep(self._next_time - now)
             self._next_time = time.perf_counter() + self._interval
+
+
+def parse_delay_setting(value: str | None, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    stripped = value.strip()
+    if not stripped:
+        return default
+    try:
+        if any(symbol in stripped for symbol in ".eE"):
+            parsed = float(stripped)
+        else:
+            parsed = float(int(stripped) / 1000)
+    except ValueError:
+        return default
+    return max(0.0, parsed)
