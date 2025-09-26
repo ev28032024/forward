@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
 
+import html
+
 import aiohttp
 
 from .config_store import ConfigStore
@@ -14,8 +16,6 @@ _API_BASE = "https://api.telegram.org"
 
 
 class TelegramAPIProtocol(Protocol):
-    def set_proxy(self, proxy: str | None) -> None: ...
-
     async def get_updates(
         self,
         offset: int | None = None,
@@ -44,10 +44,6 @@ class TelegramAPI:
     def __init__(self, token: str, session: aiohttp.ClientSession):
         self._token = token
         self._session = session
-        self._proxy: str | None = None
-
-    def set_proxy(self, proxy: str | None) -> None:
-        self._proxy = proxy
 
     async def get_updates(
         self,
@@ -64,7 +60,6 @@ class TelegramAPI:
                 url,
                 params=params,
                 timeout=timeout_cfg,
-                proxy=self._proxy,
             ) as resp:
                 payload = await resp.json(content_type=None)
         except aiohttp.ClientError:
@@ -86,7 +81,6 @@ class TelegramAPI:
             async with self._session.post(
                 url,
                 json=payload,
-                proxy=self._proxy,
                 timeout=timeout_cfg,
             ) as resp:
                 await resp.read()
@@ -114,7 +108,6 @@ class TelegramAPI:
             async with self._session.post(
                 url,
                 json=data,
-                proxy=self._proxy,
                 timeout=timeout_cfg,
             ) as resp:
                 await resp.read()
@@ -129,7 +122,6 @@ class TelegramAPI:
             async with self._session.post(
                 url,
                 json=data,
-                proxy=self._proxy,
                 timeout=timeout_cfg,
             ) as resp:
                 await resp.read()
@@ -274,18 +266,13 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     ),
     _CommandInfo(
         name="set_proxy",
-        summary="Настроить прокси-серверы.",
-        help_text="/set_proxy <discord|telegram|clear> [url]",
+        summary="Настроить прокси Discord.",
+        help_text="/set_proxy <url|clear> [логин] [пароль]",
     ),
     _CommandInfo(
         name="set_user_agent",
         summary="Сохранить user-agent Discord.",
-        help_text="/set_user_agent <desktop|mobile> <значение>",
-    ),
-    _CommandInfo(
-        name="set_mobile_ratio",
-        summary="Установить долю мобильных запросов.",
-        help_text="/set_mobile_ratio <0-1>",
+        help_text="/set_user_agent <значение>",
     ),
     _CommandInfo(
         name="set_poll",
@@ -300,7 +287,7 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="set_rate",
         summary="Настроить лимиты запросов.",
-        help_text="/set_rate <discord|telegram> <в_секунду>",
+        help_text="/set_rate <в_секунду>",
     ),
     _CommandInfo(
         name="set_fallback_chat",
@@ -380,48 +367,91 @@ class TelegramController:
     async def cmd_start(self, ctx: CommandContext) -> None:
         await self._api.send_message(
             ctx.chat_id,
-            "Forward Monitor готов. Используйте /help для списка команд.",
+            "✨ Forward Monitor готов к работе. Используйте /help, чтобы увидеть обновлённую панель команд.",
         )
 
     async def cmd_help(self, ctx: CommandContext) -> None:
+        lines = ["<b>📚 Панель управления Forward Monitor</b>", ""]
+        for info in BOT_COMMANDS:
+            if info.name in {"start", "help"}:
+                continue
+            icon = "🔐" if info.admin_only else "✨"
+            lines.append(
+                f"{icon} <code>/{html.escape(info.name)}</code> — {html.escape(info.summary)}"
+            )
+            lines.append(f"<i>{html.escape(info.help_text)}</i>")
+            lines.append("")
         await self._api.send_message(
             ctx.chat_id,
-            "\n".join(
-                info.help_text for info in BOT_COMMANDS if info.name not in {"start", "help"}
-            ),
+            "\n".join(lines),
+            parse_mode="HTML",
         )
 
     async def cmd_status(self, ctx: CommandContext) -> None:
-        discord_token = "установлен" if self._store.get_setting("discord.token") else "нет"
+        discord_token = "✅ установлено" if self._store.get_setting("discord.token") else "⛔ нет"
         fallback = self._store.get_setting("telegram.fallback_chat") or "не задан"
-        proxies = {
-            "discord": self._store.get_setting("proxy.discord") or "-",
-            "telegram": self._store.get_setting("proxy.telegram") or "-",
-        }
-        ua = {
-            "desktop": self._store.get_setting("ua.discord.desktop") or "по умолчанию",
-            "mobile": self._store.get_setting("ua.discord.mobile") or "по умолчанию",
-            "ratio": self._store.get_setting("ua.discord.mobile_ratio") or "0",
-        }
+        proxy_url = self._store.get_setting("proxy.discord.url")
+        proxy_login = self._store.get_setting("proxy.discord.login")
+        proxy_password = self._store.get_setting("proxy.discord.password")
+        user_agent = self._store.get_setting("ua.discord") or "по умолчанию"
         poll = self._store.get_setting("runtime.poll", "2.0")
         delay_min = self._store.get_setting("runtime.delay_min", "0")
         delay_max = self._store.get_setting("runtime.delay_max", "0")
-        rate_d = self._store.get_setting("runtime.discord_rate", "4")
-        rate_t = self._store.get_setting("runtime.telegram_rate", "25")
+        rate = self._store.get_setting("runtime.rate")
+        if rate is None:
+            legacy_discord = self._store.get_setting("runtime.discord_rate") or "4.0"
+            legacy_telegram = self._store.get_setting("runtime.telegram_rate") or legacy_discord
+            rate_display = f"{legacy_discord}/{legacy_telegram} (legacy)"
+        else:
+            rate_display = f"{rate}"
+
+        proxy_lines: list[str] = []
+        if proxy_url:
+            proxy_lines.append(f"• URL: {html.escape(proxy_url)}")
+            if proxy_login:
+                proxy_lines.append(
+                    f"• Логин: {html.escape(proxy_login)}"
+                )
+            if proxy_password:
+                proxy_lines.append("• Пароль: ••••••")
+        else:
+            proxy_lines.append("• не задан")
+
         channels = self._store.list_channels()
+        channel_lines = []
+        for record in channels[:8]:
+            label = record.label or record.discord_id
+            status_icon = "🟢" if record.active else "⚪️"
+            channel_lines.append(
+                f"{status_icon} <code>{html.escape(record.discord_id)}</code> → <code>{html.escape(record.telegram_chat_id)}</code> — {html.escape(label)}"
+            )
+        if len(channels) > 8:
+            channel_lines.append(f"… и ещё {len(channels) - 8} каналов")
+        if not channel_lines:
+            channel_lines.append("Каналы не настроены")
+
         lines = [
-            f"Discord токен: {discord_token}",
-            f"Fallback чат: {fallback}",
-            f"Прокси Discord: {proxies['discord']}",
-            f"Прокси Telegram: {proxies['telegram']}",
-            f"User-Agent desktop: {ua['desktop']}",
-            f"User-Agent mobile: {ua['mobile']} (ratio {ua['ratio']})",
-            f"Опрос Discord: {poll} c",
-            f"Пауза: {delay_min}-{delay_max} мс",
-            f"Лимиты: Discord {rate_d}/c, Telegram {rate_t}/c",
-            f"Каналы: {len(channels)}",
+            "<b>⚙️ Статус Forward Monitor</b>",
+            "",
+            f"🔑 <b>Discord токен:</b> {discord_token}",
+            f"💬 <b>Fallback чат:</b> {html.escape(fallback)}",
+            "",
+            "<b>🌐 Прокси Discord</b>",
+            *proxy_lines,
+            "",
+            f"🧾 <b>User-Agent:</b> {html.escape(user_agent)}",
+            f"⏱️ <b>Интервал опроса:</b> {html.escape(poll)} с",
+            f"🎲 <b>Задержка:</b> {html.escape(delay_min)}–{html.escape(delay_max)} мс",
+            f"🚦 <b>Лимит:</b> {html.escape(rate_display)} запрос/с",
+            "",
+            "<b>📡 Каналы</b>",
+            *channel_lines,
         ]
-        await self._api.send_message(ctx.chat_id, "\n".join(lines))
+        await self._api.send_message(
+            ctx.chat_id,
+            "\n".join(lines),
+            parse_mode="HTML",
+        )
 
     async def cmd_claim(self, ctx: CommandContext) -> None:
         if self._store.has_admins():
@@ -483,50 +513,46 @@ class TelegramController:
         if not parts:
             await self._api.send_message(
                 ctx.chat_id,
-                "Использование: /set_proxy <discord|telegram|clear> [url]",
+                "Использование: /set_proxy <url|clear> [логин] [пароль]",
             )
             return
-        target = parts[0].lower()
-        if target == "clear":
+        action = parts[0].lower()
+        if action == "clear":
+            self._store.delete_setting("proxy.discord.url")
+            self._store.delete_setting("proxy.discord.login")
+            self._store.delete_setting("proxy.discord.password")
             self._store.delete_setting("proxy.discord")
-            self._store.delete_setting("proxy.telegram")
-        elif target in {"discord", "telegram"}:
-            if len(parts) < 2:
-                await self._api.send_message(ctx.chat_id, "Нужно указать URL прокси")
-                return
-            self._store.set_setting(f"proxy.{target}", parts[1])
+            message = "Прокси отключён"
         else:
-            await self._api.send_message(ctx.chat_id, "Неизвестная цель")
-            return
+            url = parts[0]
+            self._store.set_setting("proxy.discord.url", url)
+            if len(parts) >= 2:
+                self._store.set_setting("proxy.discord.login", parts[1])
+            else:
+                self._store.delete_setting("proxy.discord.login")
+            if len(parts) >= 3:
+                self._store.set_setting("proxy.discord.password", parts[2])
+            else:
+                self._store.delete_setting("proxy.discord.password")
+            self._store.delete_setting("proxy.discord")
+            message = "Прокси обновлён"
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Прокси обновлены")
+        await self._api.send_message(ctx.chat_id, message)
 
     async def cmd_set_user_agent(self, ctx: CommandContext) -> None:
-        parts = ctx.args.split(maxsplit=1)
-        if len(parts) < 2:
+        value = ctx.args.strip()
+        if not value:
             await self._api.send_message(
                 ctx.chat_id,
-                "Использование: /set_user_agent <desktop|mobile> <ua>",
+                "Использование: /set_user_agent <значение>",
             )
             return
-        target, value = parts[0].lower(), parts[1].strip()
-        if target not in {"desktop", "mobile"}:
-            await self._api.send_message(ctx.chat_id, "Только desktop или mobile")
-            return
-        self._store.set_setting(f"ua.discord.{target}", value)
+        self._store.set_setting("ua.discord", value)
+        self._store.delete_setting("ua.discord.desktop")
+        self._store.delete_setting("ua.discord.mobile")
+        self._store.delete_setting("ua.discord.mobile_ratio")
         self._on_change()
         await self._api.send_message(ctx.chat_id, "User-Agent сохранён")
-
-    async def cmd_set_mobile_ratio(self, ctx: CommandContext) -> None:
-        try:
-            value = float(ctx.args)
-        except ValueError:
-            await self._api.send_message(ctx.chat_id, "Укажите число от 0 до 1")
-            return
-        value = max(0.0, min(1.0, value))
-        self._store.set_setting("ua.discord.mobile_ratio", f"{value:.3f}")
-        self._on_change()
-        await self._api.send_message(ctx.chat_id, "Доля мобильных запросов обновлена")
 
     async def cmd_set_poll(self, ctx: CommandContext) -> None:
         try:
@@ -558,25 +584,23 @@ class TelegramController:
         await self._api.send_message(ctx.chat_id, "Диапазон задержек сохранён")
 
     async def cmd_set_rate(self, ctx: CommandContext) -> None:
-        parts = ctx.args.split()
-        if len(parts) != 2:
+        value_str = ctx.args.strip()
+        if not value_str:
             await self._api.send_message(
                 ctx.chat_id,
-                "Использование: /set_rate <discord|telegram> <в_секунду>",
+                "Использование: /set_rate <в_секунду>",
             )
             return
-        target, value_str = parts
         try:
             value = float(value_str)
         except ValueError:
             await self._api.send_message(ctx.chat_id, "Неверное число")
             return
-        if target not in {"discord", "telegram"}:
-            await self._api.send_message(ctx.chat_id, "Неверная цель")
-            return
-        self._store.set_setting(f"runtime.{target}_rate", f"{max(0.1, value):.2f}")
+        self._store.set_setting("runtime.rate", f"{max(0.1, value):.2f}")
+        self._store.delete_setting("runtime.discord_rate")
+        self._store.delete_setting("runtime.telegram_rate")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Лимит обновлён")
+        await self._api.send_message(ctx.chat_id, "Единый лимит обновлён")
 
     # ------------------------------------------------------------------
     # Channel management
