@@ -103,6 +103,7 @@ class DiscordMessage:
     content: str
     attachments: Sequence[Mapping[str, Any]]
     embeds: Sequence[Mapping[str, Any]]
+    stickers: Sequence[Mapping[str, Any]]
     timestamp: str | None = None
     edited_timestamp: str | None = None
 

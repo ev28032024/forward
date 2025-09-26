@@ -84,7 +84,7 @@ class TelegramAPI:
                 timeout=timeout_cfg,
             ) as resp:
                 payload = await resp.json(content_type=None)
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             return []
         if not payload.get("ok"):
             return []
@@ -106,7 +106,7 @@ class TelegramAPI:
                 timeout=timeout_cfg,
             ) as resp:
                 await resp.read()
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             return
 
     async def send_message(
@@ -133,7 +133,7 @@ class TelegramAPI:
                 timeout=timeout_cfg,
             ) as resp:
                 await resp.read()
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             return
 
     async def answer_callback_query(self, callback_id: str, text: str) -> None:
@@ -147,7 +147,7 @@ class TelegramAPI:
                 timeout=timeout_cfg,
             ) as resp:
                 await resp.read()
-        except aiohttp.ClientError:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             return
 
 

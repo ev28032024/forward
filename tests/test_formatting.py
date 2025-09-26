@@ -35,6 +35,7 @@ def test_formatting_includes_label_and_author() -> None:
             },
         ),
         embeds=(),
+        stickers=(),
     )
     formatted = format_discord_message(message, sample_channel())
     assert formatted.text.startswith("Label • Author")
@@ -53,6 +54,26 @@ def test_formatting_chunks_long_text() -> None:
         content="long text " * 20,
         attachments=(),
         embeds=(),
+        stickers=(),
     )
     formatted = format_discord_message(message, channel)
     assert len(formatted.extra_messages) >= 1
+
+
+def test_channel_mentions_removed_from_content() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="2",
+        channel_id="123",
+        author_id="99",
+        author_name="Author",
+        content="See <#1234567890> for details",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+    )
+
+    formatted = format_discord_message(message, channel)
+
+    assert "<#" not in formatted.text
+    assert "See" in formatted.text

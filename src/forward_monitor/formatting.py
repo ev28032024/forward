@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -18,7 +19,7 @@ def format_discord_message(
     """Convert a Discord message into Telegram text respecting the channel profile."""
 
     formatting = channel.formatting
-    content = message.content or ""
+    content = _sanitize_content(message.content or "")
     embed_text = "\n".join(_clean_embed_text(message.embeds))
     attachment_lines = list(
         _summarise_attachments(message.attachments, formatting.attachments_style)
@@ -63,7 +64,15 @@ def _clean_embed_text(embeds: Sequence[EmbedPayload]) -> Iterable[str]:
             segment for segment in (title, description, "\n".join(fields_text), url) if segment
         ]
         if segments:
-            yield "\n".join(segments)
+            cleaned_segments = [
+                part
+                for part in (
+                    _sanitize_content(segment) for segment in segments if segment
+                )
+                if part
+            ]
+            if cleaned_segments:
+                yield "\n".join(cleaned_segments)
 
 
 def _summarise_attachments(
@@ -144,3 +153,17 @@ def _chunk_text(text: str, limit: int, ellipsis: str) -> list[str]:
         chunks.append(chunk)
         remaining = remaining[split:].lstrip()
     return chunks
+
+
+_CHANNEL_MENTION_RE = re.compile(r"<#[0-9]+>")
+_EXTRA_SPACE_RE = re.compile(r"[ \t]{2,}")
+_TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
+
+
+def _sanitize_content(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = _CHANNEL_MENTION_RE.sub("", text)
+    cleaned = _EXTRA_SPACE_RE.sub(" ", cleaned)
+    cleaned = _TRIPLE_NEWLINES_RE.sub("\n\n", cleaned)
+    return cleaned.strip()
