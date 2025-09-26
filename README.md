@@ -1,89 +1,83 @@
-# Forward Monitor
+# Forward Monitor (Telegram-first)
 
-Forward Monitor — асинхронный мост между каналами Discord и чатами Telegram. Он деликатно очищает и форматирует сообщения, пересылает вложения и поддерживает тонкую настройку поведения для каждого канала.
+Forward Monitor — лёгкий мост между Discord и Telegram. Теперь все настройки живут в Telegram-боте: вы запускаете процесс один раз, привязываете администраторов и управляете каналами, фильтрами и прокси прямо из чата.
 
-## Основное
-- **Форматирование.** Чипы, заголовки, подвал, автоматические замены текста, аккуратная работа с Markdown и HTML.
-- **Вложения.** Текстовые сводки для файлов и embed-блоков, сохранение ссылок и описаний.
-- **Фильтры.** Гибкие белые и чёрные списки по словам, авторам и типам контента.
-- **Скорость и устойчивость.** Раздельные лимиты отправки, поддержка прокси-пулов, сохранение состояния между перезапусками.
-
-## Требования
-- Python 3.11+
-- Аккаунт или бот Discord с действующим токеном
-- Бот Telegram с токеном BotFather
+## Возможности
+- **Полностью удалённое управление.** Добавление каналов, настройка фильтров, выбор токенов, user-agent'ов и прокси осуществляется командами бота.
+- **Быстрая обработка.** Минимум зависимостей, компактная в памяти архитектура, асинхронные клиенты для обоих API.
+- **Гибкие фильтры.** Белые и чёрные списки слов, отправителей и типов вложений, find/replace-правила для текста.
+- **Информативное форматирование.** Настраиваемые шапки и подписи, Markdown/HTML/текстовый режимы, краткие или полные списки вложений, автоматическое разбиение на сообщения.
+- **Сетевые опции.** Прокси и user-agent для Discord и Telegram, регулировка доли мобильных запросов, независимые лимиты скорости.
 
 ## Установка
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-cp config.example.yml config.yml
-python -m forward_monitor --config config.yml
 ```
 
-## Конфигурация
-Настройка выполняется YAML-файлом. Подробные значения и комментарии приведены в [`config.example.yml`](config.example.yml). Ниже кратко описаны ключевые блоки.
+## Запуск
+1. Получите токен Telegram-бота у BotFather.
+2. Запустите монитор:
+   ```bash
+   export FORWARD_TELEGRAM_TOKEN="123:ABC"
+   python -m forward_monitor --db-path forward.db
+   ```
+3. Откройте чат с ботом и отправьте `/start`, затем `/claim`, чтобы назначить себя администратором.
+4. Настраивайте каналы и параметры командами (см. ниже).
 
-### telegram
-- `token` *(обязательно)* — токен бота Telegram.
-- `chat` *(обязательно)* — fallback-канал или чат.
-- `rate_limit.*` — скорость (`per_second`, `per_minute`), параллелизм (`concurrency`), случайные задержки (`jitter_min_ms`, `jitter_max_ms`) и `cooldown_seconds`. Значение `null` включает дефолты API.
-- `formatting` — профиль разметки: `parse_mode`, `disable_link_preview`, `max_length`, `ellipsis`, `attachments_style`.
+> **Примечание.** Токен Discord задаётся из Telegram командой `/set_discord_token`. До этого момента мост не будет опрашивать каналы.
 
-### discord
-- `token` *(обязательно)* — пользовательский, бот или bearer-токен.
-- `token_type` — `auto` (по умолчанию) выбирает схему авторизации, можно задать `user`, `bot` или `bearer`.
-- `rate_limit.*` — ограничения запросов к API Discord: скорость, параллельные отправки, случайные задержки и `cooldown_seconds`.
+## Основные команды
+Команды вводятся в чате с ботом. В скобках указано, нужно ли быть администратором.
 
-### forward
-- `defaults.filters` — списки `whitelist`/`blacklist`, `allowed_senders`/`blocked_senders`, `allowed_types`/`blocked_types` (`text`, `attachment`, `image`, `video`, `audio`, `file`, `document`, `other`).
-- `defaults.text` — декоративные элементы (чипы, заголовки, подвал) и правила find/replace.
-- `defaults.formatting` — глобальное переопределение профиля Telegram.
-- `channels[]` — пары Discord → Telegram. Можно задавать `name` и собственные `filters`, `text`, `formatting`; параметры дополняют `defaults`.
+- `/start` — краткое приветствие (без прав).
+- `/help` — полный список команд (без прав).
+- `/claim` — стать первым администратором (без прав, если список пуст).
+- `/admins` — список администраторов (админ).
+- `/grant <id>` / `/revoke <id>` — выдать/отобрать права (админ).
+- `/status` — текущее состояние, каналы, лимиты (без прав).
+- `/set_discord_token <token>` — сохранить токен Discord (админ).
+- `/set_fallback_chat <chat_id>` — задать запасной чат для служебных сообщений (админ).
+- `/add_channel <discord_id> <telegram_chat> [метка]` — добавить связку (админ).
+- `/remove_channel <discord_id>` — удалить связку (админ).
+- `/list_channels` — показать текущие связки (админ).
+- `/set_header|/set_footer|/set_chip <discord_id|all> <текст>` — декор сообщений (админ).
+- `/set_parse_mode <discord_id|all> <markdownv2|markdown|html|text>` — режим форматирования (админ).
+- `/set_disable_preview <discord_id|all> <on|off>` — предпросмотр ссылок (админ).
+- `/set_max_length <discord_id|all> <число>` — максимум символов (админ).
+- `/set_attachments <discord_id|all> <summary|links>` — стиль сводки вложений (админ).
+- `/add_filter <discord_id|all> <тип> <значение>` — добавить фильтр (тип: `whitelist`, `blacklist`, `allowed_senders`, `blocked_senders`, `allowed_types`, `blocked_types`).
+- `/clear_filter <discord_id|all> <тип> [значение]` — удалить фильтры.
+- `/add_replace <discord_id|all> шаблон => замена` — find/replace.
+- `/clear_replace <discord_id|all> [шаблон]` — удалить find/replace.
+- `/set_proxy <discord|telegram|clear> [url]` — прокси для сервисов.
+- `/set_user_agent <desktop|mobile> <ua>` — user-agent для Discord.
+- `/set_mobile_ratio <0-1>` — доля запросов от мобильного UA.
+- `/set_poll <секунды>` — период опроса Discord.
+- `/set_delay <min_ms> <max_ms>` — случайная пауза между отправками.
+- `/set_rate <discord|telegram> <в_секунду>` — предел запросов в секунду.
 
-### network
-- `user_agents.desktop`/`mobile` — переопределение встроенных списков user-agent'ов.
-- `mobile_ratio` — доля запросов, имитирующих мобильных клиентов.
-- `proxies.pool` — общий пул прокси, опциональные `username`, `password`, `rotate_url`.
-- `proxies.discord`/`telegram` — отдельные настройки для каждого сервиса.
-- `proxies.healthcheck` — URL проверки, таймаут и интервал восстановления пула.
+Команды `all` или `*` на месте идентификатора канала меняют глобальные значения для всех связок.
 
-### runtime
-- `poll_every` — интервал опроса Discord.
-- `max_messages`, `max_fetch_seconds` — лимиты количества сообщений и ожидания API.
-- `delays.min`/`delays.max` — случайные паузы перед отправкой в Telegram.
+## Схема работы
+1. Бот Telegram принимает команды и сохраняет настройки в локальную SQLite-базу (`forward.db`).
+2. Монитор регулярно опрашивает указанные Discord-каналы, применяет фильтры и преобразования.
+3. Сообщения отправляются в Telegram с учётом лимитов и настроек оформления.
 
-## Минимальный пример
-```yaml
-telegram:
-  token: "TELEGRAM_BOT_TOKEN"
-  chat: "@fallback_channel"
-
-discord:
-  token: "DISCORD_USER_TOKEN"
-
-forward:
-  channels:
-    - discord: 123456789012345678
-      telegram: "-1001234567890"
-```
-
-## Рабочий цикл
-1. Discord опрашивается с шагом `runtime.poll_every`.
-2. Сообщения проходят фильтры, замены и очистку Markdown и HTML.
-3. В Telegram уходит основное сообщение и компактные сводки вложений.
-
-## Разработка и проверки
+## Тесты и проверка
 ```bash
-pip install -U ruff mypy pytest pytest-asyncio aresponses pre-commit
-pre-commit install
-pre-commit install --hook-type pre-push
-make ci
+pytest
 ```
 
-- `ruff` — форматирование и статический анализ.
-- `mypy` — проверка аннотаций типов.
-- `pytest` — регрессионные тесты.
+## Бенчмарк
+Скрипт `scripts/bench.py` сравнивает скорость форматирования старого и нового пайплайнов.
 
-Все коммиты и merge-запросы должны проходить `make ci`.
+```bash
+python scripts/bench.py
+```
+
+Результаты и выводы — в [bench.md](bench.md).
+
+## Лицензия
+MIT
