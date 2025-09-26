@@ -114,6 +114,73 @@ def test_grant_admin_by_username(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_non_admin_cannot_invoke_commands_after_admin_exists(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(api, store, on_change=lambda: None)
+
+        admin_ctx = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="Admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+        await controller._dispatch("claim", admin_ctx)
+
+        outsider_ctx = CommandContext(
+            chat_id=1,
+            user_id=200,
+            username="Visitor",
+            handle="visitor",
+            args="",
+            message={},
+        )
+
+        before = len(api.messages)
+        await controller._dispatch("status", outsider_ctx)
+        assert len(api.messages) == before
+
+        await controller._dispatch("help", outsider_ctx)
+        assert len(api.messages) == before
+
+    asyncio.run(runner())
+
+
+def test_controller_handles_command_errors(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(api, store, on_change=lambda: None)
+
+        admin_ctx = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="Admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+        await controller._dispatch("claim", admin_ctx)
+
+        async def failing(_: CommandContext) -> None:
+            raise RuntimeError("boom")
+
+        controller.cmd_status = failing  # type: ignore[assignment]
+
+        before = len(api.messages)
+        await controller._dispatch("status", admin_ctx)
+        assert len(api.messages) == before + 1
+        assert "ошиб" in api.messages[-1][1].lower()
+
+        await controller._dispatch("help", admin_ctx)
+        assert any("Основные команды" in text for _, text in api.messages)
+
+    asyncio.run(runner())
+
+
 def test_controller_registers_bot_commands(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")

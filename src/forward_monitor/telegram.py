@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
+import logging
+import sqlite3
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Awaitable, Callable, Iterable, Protocol
 
 import aiohttp
 
@@ -190,7 +193,6 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="status",
         summary="Краткий обзор настроек.",
         help_text="/status — показать токен, сеть, фильтры и каналы.",
-        admin_only=False,
     ),
     _CommandInfo(
         name="admins",
@@ -344,16 +346,47 @@ class TelegramController:
                     f"Неизвестная команда: {command}",
                 )
             return
+
         info = _COMMAND_MAP.get(command)
-        if command == "claim" and not self._store.has_admins():
+        has_admins = self._store.has_admins()
+        is_admin = self._is_admin(ctx)
+
+        if command == "claim" and not has_admins:
+            await self._execute_command(handler, ctx, notify_on_error=True)
+            return
+
+        if not is_admin:
+            if not has_admins and info is not None and not info.admin_only:
+                await self._execute_command(handler, ctx, notify_on_error=False)
+            return
+
+        await self._execute_command(handler, ctx, notify_on_error=True)
+
+    async def _execute_command(
+        self,
+        handler: Callable[[CommandContext], Awaitable[None]],
+        ctx: CommandContext,
+        *,
+        notify_on_error: bool,
+    ) -> None:
+        try:
             await handler(ctx)
-            return
-        if info is not None and not info.admin_only:
-            await handler(ctx)
-            return
-        if not self._is_admin(ctx):
-            return
-        await handler(ctx)
+        except asyncio.CancelledError:
+            raise
+        except sqlite3.Error:
+            logger.exception("Database error while executing command %s", handler.__name__)
+            if notify_on_error:
+                await self._api.send_message(
+                    ctx.chat_id,
+                    "Не удалось выполнить команду из-за ошибки базы данных. Попробуйте позже.",
+                )
+        except Exception:
+            logger.exception("Unexpected error while executing command %s", handler.__name__)
+            if notify_on_error:
+                await self._api.send_message(
+                    ctx.chat_id,
+                    "Команда завершилась с внутренней ошибкой. Попробуйте позже.",
+                )
 
     def _is_admin(self, ctx: CommandContext) -> bool:
         normalized_handle = _normalize_username(ctx.handle)
@@ -576,7 +609,7 @@ class TelegramController:
                     f"{', '.join(details)}"
                 )
         else:
-            channel_lines = ["<b>📡 Каналы</b>", "• не настроены"]
+            channel_lines = ["<b>📡 Каналы</b>", "• Не настроены"]
 
         lines = [
             "<b>⚙️ Статус Forward Monitor</b>",
@@ -992,3 +1025,6 @@ async def send_formatted(
             parse_mode=message.parse_mode,
             disable_preview=message.disable_preview,
         )
+
+
+logger = logging.getLogger(__name__)
