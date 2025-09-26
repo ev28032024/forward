@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import re
 import statistics
-import time
-
-from pathlib import Path
 import sys
+import time
+from html import escape
+from itertools import chain
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from forward_monitor.models import ChannelConfig as ChannelConfigType
+    from forward_monitor.models import DiscordMessage as DiscordMessageType
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from forward_monitor.formatting import format_discord_message
-from forward_monitor.models import ChannelConfig, DiscordMessage, FilterConfig, FormattingOptions, ReplacementRule
 
+def _sample_channel() -> "ChannelConfigType":
+    from forward_monitor.models import (
+        ChannelConfig,
+        FilterConfig,
+        FormattingOptions,
+        ReplacementRule,
+    )
 
-def _sample_channel() -> ChannelConfig:
     return ChannelConfig(
         discord_id="1",
         telegram_chat_id="2",
@@ -30,7 +41,9 @@ def _sample_channel() -> ChannelConfig:
     )
 
 
-def _sample_message() -> DiscordMessage:
+def _sample_message() -> "DiscordMessageType":
+    from forward_monitor.models import DiscordMessage
+
     attachments = [
         {"url": "https://cdn.example.com/file.png", "filename": "file.png", "size": 2048},
         {"url": "https://cdn.example.com/info.txt", "filename": "info.txt", "size": 8192},
@@ -61,28 +74,25 @@ class LegacyFormatter:
     def __init__(self) -> None:
         self._channel = _sample_channel()
 
-    def run(self, message: DiscordMessage) -> None:
-        from html import escape
-        from itertools import chain
-        import re
-
+    def run(self, message: "DiscordMessageType") -> None:
         text = message.content.replace("foo", "bar")
         # Simulate legacy regex cleanup
         text = re.sub(r"\s+", " ", text)
         for _ in range(5):
             text = re.sub(r"[A-Z]", lambda m: m.group(0).lower(), text)
             text = re.sub(r"[aeiou]", "*", text)
-        attachments = [
-            f"{item.get('filename')}: {item.get('url')}" for item in message.attachments
-        ]
-        embed_parts = []
+        attachments = [f"{item.get('filename')}: {item.get('url')}" for item in message.attachments]
+        embed_parts: list[str] = []
         for embed in message.embeds:
             embed_parts.extend(
                 part
                 for part in (
                     embed.get("title", ""),
                     embed.get("description", ""),
-                    "\n".join(f"{field.get('name')}: {field.get('value')}" for field in embed.get("fields", [])),
+                    "\n".join(
+                        f"{field.get('name')}: {field.get('value')}"
+                        for field in embed.get("fields", [])
+                    ),
                 )
                 if part
             )
@@ -101,11 +111,59 @@ class LegacyFormatter:
             joined[: self._channel.formatting.max_length]
 
 
-def _time(callable_obj, iterations: int) -> float:
+def _time(callable_obj: Callable[[], None], iterations: int) -> float:
     start = time.perf_counter()
     for _ in range(iterations):
         callable_obj()
     return time.perf_counter() - start
+
+
+def benchmark_formatter(iterations: int) -> None:
+    from forward_monitor.formatting import format_discord_message
+
+    channel = _sample_channel()
+    message = _sample_message()
+
+    for _ in range(iterations):
+        format_discord_message(message, channel)
+
+
+async def benchmark_forwarding(iterations: int) -> None:
+    from forward_monitor.formatting import format_discord_message
+    from forward_monitor.telegram import TelegramAPIProtocol, send_formatted
+
+    channel = _sample_channel()
+    message = _sample_message()
+
+    class _NoopAPI:
+        def set_proxy(self, proxy: str | None) -> None:
+            return None
+
+        async def get_updates(
+            self,
+            offset: int | None = None,
+            timeout: int = 30,
+        ) -> list[dict[str, object]]:
+            return []
+
+        async def send_message(
+            self,
+            chat_id: int | str,
+            text: str,
+            *,
+            parse_mode: str | None = None,
+            disable_preview: bool = True,
+        ) -> None:
+            return None
+
+        async def answer_callback_query(self, callback_id: str, text: str) -> None:
+            return None
+
+    api: TelegramAPIProtocol = _NoopAPI()
+
+    for _ in range(iterations):
+        formatted = format_discord_message(message, channel)
+        await send_formatted(api, channel.telegram_chat_id, formatted)
 
 
 def main() -> None:
@@ -115,6 +173,8 @@ def main() -> None:
     legacy = LegacyFormatter()
 
     def run_new() -> None:
+        from forward_monitor.formatting import format_discord_message
+
         format_discord_message(message, new_channel)
 
     def run_old() -> None:

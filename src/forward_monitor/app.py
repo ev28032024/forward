@@ -42,7 +42,11 @@ class ForwardMonitorApp:
         async with aiohttp.ClientSession() as session:
             discord_client = DiscordClient(session)
             telegram_api = TelegramAPI(self._telegram_token, session)
-            controller = TelegramController(telegram_api, self._store, on_change=self._signal_refresh)
+            controller = TelegramController(
+                telegram_api,
+                self._store,
+                on_change=self._signal_refresh,
+            )
 
             monitor_task = asyncio.create_task(
                 self._monitor_loop(discord_client, telegram_api), name="forward-monitor"
@@ -78,9 +82,7 @@ class ForwardMonitorApp:
                 telegram_api.set_proxy(state.network.telegram_proxy)
                 discord_rate.update_rate(state.runtime.discord_rate_per_second)
                 telegram_rate.update_rate(state.runtime.telegram_rate_per_second)
-                logger.info(
-                    "Конфигурация обновлена: %d каналов", len(state.channels)
-                )
+                logger.info("Конфигурация обновлена: %d каналов", len(state.channels))
 
             if not state.discord_token:
                 await asyncio.sleep(3.0)
@@ -99,7 +101,10 @@ class ForwardMonitorApp:
                 )
 
             try:
-                await asyncio.wait_for(self._refresh_event.wait(), timeout=state.runtime.poll_interval)
+                await asyncio.wait_for(
+                    self._refresh_event.wait(),
+                    timeout=state.runtime.poll_interval,
+                )
             except asyncio.TimeoutError:
                 pass
 
@@ -114,7 +119,10 @@ class ForwardMonitorApp:
         if not channel.active:
             return
 
-        messages = await discord_client.fetch_messages(channel.discord_id, after=channel.last_message_id)
+        messages = await discord_client.fetch_messages(
+            channel.discord_id,
+            after=channel.last_message_id,
+        )
         if not messages:
             return
 

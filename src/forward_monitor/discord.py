@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Iterable, Sequence
+from typing import Any, Mapping, Sequence
 
 import aiohttp
 
@@ -55,13 +55,22 @@ class DiscordClient:
 
         async with self._lock:
             try:
-                async with self._session.get(url, headers=headers, params=params, proxy=proxy, timeout=15) as resp:
+                timeout_cfg = aiohttp.ClientTimeout(total=15)
+                async with self._session.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    proxy=proxy,
+                    timeout=timeout_cfg,
+                ) as resp:
                     if resp.status >= 400:
                         return []
                     data = await resp.json()
             except aiohttp.ClientError:
                 return []
-        return tuple(_parse_message(payload, channel_id) for payload in data if isinstance(payload, dict))
+        return tuple(
+            _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
+        )
 
     def _choose_user_agent(self) -> str:
         options = self._network
@@ -70,18 +79,18 @@ class DiscordClient:
         return options.discord_user_agent_desktop or _DEFAULT_DESKTOP_UA
 
 
-def _parse_message(payload: dict, channel_id: str) -> DiscordMessage:
+def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessage:
     message_id = str(payload.get("id") or "0")
     author = payload.get("author") or {}
     author_id = str(author.get("id") or "0")
     author_name = (
-        str(author.get("global_name") or "")
-        or str(author.get("username") or "")
-        or "Unknown"
+        str(author.get("global_name") or "") or str(author.get("username") or "") or "Unknown"
     )
     content = str(payload.get("content") or "")
-    attachments = payload.get("attachments") or []
-    embeds = payload.get("embeds") or []
+    attachments_raw = payload.get("attachments") or []
+    embeds_raw = payload.get("embeds") or []
+    attachments = tuple(item for item in attachments_raw if isinstance(item, Mapping))
+    embeds = tuple(item for item in embeds_raw if isinstance(item, Mapping))
 
     return DiscordMessage(
         id=message_id,
@@ -89,8 +98,8 @@ def _parse_message(payload: dict, channel_id: str) -> DiscordMessage:
         author_id=author_id,
         author_name=author_name,
         content=content,
-        attachments=tuple(attachments if isinstance(attachments, Iterable) else ()),
-        embeds=tuple(embeds if isinstance(embeds, Iterable) else ()),
+        attachments=attachments,
+        embeds=embeds,
         timestamp=payload.get("timestamp"),
         edited_timestamp=payload.get("edited_timestamp"),
     )

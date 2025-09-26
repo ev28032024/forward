@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from forward_monitor.formatting import format_discord_message
-from forward_monitor.models import ChannelConfig, DiscordMessage, FilterConfig, FormattingOptions, ReplacementRule
+from forward_monitor.models import (
+    ChannelConfig,
+    DiscordMessage,
+    FilterConfig,
+    FormattingOptions,
+    ReplacementRule,
+)
 
 
 def sample_channel(**overrides: object) -> ChannelConfig:
@@ -28,7 +34,13 @@ def test_formatting_includes_header_footer_and_chip() -> None:
         author_id="99",
         author_name="Author",
         content="foo content",
-        attachments=({"url": "https://example.com/file.txt", "filename": "file.txt", "size": 1024},),
+        attachments=(
+            {
+                "url": "https://example.com/file.txt",
+                "filename": "file.txt",
+                "size": 1024,
+            },
+        ),
         embeds=(),
     )
     formatted = format_discord_message(message, sample_channel())

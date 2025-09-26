@@ -11,12 +11,29 @@ class DummyAPI:
     def __init__(self) -> None:
         self.messages: list[str] = []
 
-    async def get_updates(self, offset: int | None = None, timeout: int = 30):
+    def set_proxy(self, proxy: str | None) -> None:
+        return None
+
+    async def get_updates(
+        self,
+        offset: int | None = None,
+        timeout: int = 30,
+    ) -> list[dict[str, object]]:
         await asyncio.sleep(0)
         return []
 
-    async def send_message(self, chat_id: int, text: str, **_: object) -> None:
+    async def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+        disable_preview: bool = True,
+    ) -> None:
         self.messages.append(text)
+
+    async def answer_callback_query(self, callback_id: str, text: str) -> None:
+        return None
 
 
 def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:

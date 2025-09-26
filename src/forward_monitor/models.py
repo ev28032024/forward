@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 
 @dataclass(slots=True)
@@ -79,7 +79,9 @@ class ChannelConfig:
             formatting=formatting or self.formatting,
             filters=filters or self.filters,
             replacements=tuple(replacements or self.replacements),
-            last_message_id=last_message_id if last_message_id is not None else self.last_message_id,
+            last_message_id=(
+                last_message_id if last_message_id is not None else self.last_message_id
+            ),
             active=self.active,
             storage_id=self.storage_id,
         )
@@ -116,8 +118,8 @@ class DiscordMessage:
     author_id: str
     author_name: str
     content: str
-    attachments: Sequence[dict]
-    embeds: Sequence[dict]
+    attachments: Sequence[Mapping[str, Any]]
+    embeds: Sequence[Mapping[str, Any]]
     timestamp: str | None = None
     edited_timestamp: str | None = None
 
