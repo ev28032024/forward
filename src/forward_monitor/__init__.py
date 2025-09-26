@@ -1,4 +1,9 @@
-from .config import MonitorConfig
-from .monitor import run_monitor
+"""Forward Monitor: Discord to Telegram forwarding bridge."""
 
-__all__ = ["MonitorConfig", "run_monitor"]
+from __future__ import annotations
+
+__all__ = [
+    "__version__",
+]
+
+__version__ = "1.0.0"

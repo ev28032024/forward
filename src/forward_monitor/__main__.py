@@ -1,78 +1,32 @@
+"""Command line entry point."""
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
-import sys
+import os
 from pathlib import Path
 
-from .config import MonitorConfig
-from .monitor import run_monitor
-from .structured_logging import configure_bridge_logging, log_event
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Monitor Discord channels and forward updates to Telegram",
-    )
-    parser.add_argument(
-        "--config",
-        required=True,
-        help="Path to the YAML configuration file",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run a single iteration and exit",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        help="Logging level (DEBUG, INFO, WARNING, ERROR)",
-    )
-    return parser.parse_args()
+from .app import ForwardMonitorApp
 
 
 def main() -> None:
-    args = parse_args()
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    configure_bridge_logging(log_level)
+    parser = argparse.ArgumentParser(description="Forward Discord updates to Telegram")
+    parser.add_argument("--db-path", default="forward.db", help="Путь к файлу хранилища")
+    parser.add_argument("--telegram-token", help="Токен Telegram бота. Можно передать через FORWARD_TELEGRAM_TOKEN")
+    parser.add_argument("--log-level", default="INFO", help="Уровень логирования")
+    args = parser.parse_args()
 
-    config_path = Path(args.config)
-    try:
-        config = MonitorConfig.from_file(config_path)
-        asyncio.run(run_monitor(config, once=args.once))
-    except KeyboardInterrupt:
-        logging.getLogger(__name__).info("Monitor interrupted by user")
-        sys.exit(0)
-    except (FileNotFoundError, ValueError, OSError) as exc:
-        logging.getLogger(__name__).error("Failed to start monitor: %s", exc)
-        log_event(
-            "startup_failed",
-            level=logging.ERROR,
-            discord_channel_id=None,
-            discord_message_id=None,
-            telegram_chat_id=None,
-            attempt=1,
-            outcome="failure",
-            latency_ms=None,
-            extra={"reason": str(exc)},
-        )
-        sys.exit(1)
-    except RuntimeError as exc:
-        logging.getLogger(__name__).error("Monitor terminated: %s", exc)
-        log_event(
-            "startup_failed",
-            level=logging.ERROR,
-            discord_channel_id=None,
-            discord_message_id=None,
-            telegram_chat_id=None,
-            attempt=1,
-            outcome="failure",
-            latency_ms=None,
-            extra={"reason": str(exc)},
-        )
-        sys.exit(1)
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    token = args.telegram_token or os.getenv("FORWARD_TELEGRAM_TOKEN")
+    if not token:
+        parser.error("Нужно передать --telegram-token или переменную окружения FORWARD_TELEGRAM_TOKEN")
+
+    app = ForwardMonitorApp(db_path=Path(args.db_path), telegram_token=token)
+    asyncio.run(app.run())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from forward_monitor.config_store import ConfigStore
+
+
+def test_channel_lifecycle(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "db.sqlite")
+    store.set_setting("formatting.header", "Глобальный заголовок")
+    store.add_filter(0, "whitelist", "hello")
+    store.add_replacement(0, "foo", "bar")
+
+    record = store.add_channel("123", "456", "Label")
+    store.set_channel_option(record.id, "formatting.header", "Частный заголовок")
+    store.set_last_message(record.id, "900")
+
+    configs = store.load_channel_configurations()
+    assert len(configs) == 1
+    channel = configs[0]
+    assert channel.label == "Label"
+    assert channel.formatting.header == "Частный заголовок"
+    assert channel.filters.whitelist == {"hello"}
+    assert channel.replacements[0].pattern == "foo"
+    assert channel.last_message_id == "900"
