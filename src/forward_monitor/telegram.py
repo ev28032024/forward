@@ -6,7 +6,6 @@ import asyncio
 import html
 import logging
 import sqlite3
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Protocol
 from urllib.parse import urlparse
@@ -29,9 +28,20 @@ _FILTER_LABELS = {
     "blocked_types": "запрещённые типы",
 }
 
+_FILTER_TYPES: tuple[str, ...] = tuple(_FILTER_LABELS.keys())
+
 
 def _format_seconds(value: float) -> str:
     return (f"{value:.2f}").rstrip("0").rstrip(".") or "0"
+
+
+def _format_rate(value: float) -> str:
+    formatted = f"{value:.2f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0")
+        if formatted.endswith("."):
+            formatted += "0"
+    return formatted
 
 
 def _normalize_username(username: str | None) -> str | None:
@@ -352,7 +362,12 @@ class TelegramController:
             if self._is_admin(ctx):
                 await self._api.send_message(
                     ctx.chat_id,
-                    f"Неизвестная команда: {command}",
+                    (
+                        "ℹ️ <b>Команда не найдена</b>\n"
+                        f"Не удалось распознать <code>/{html.escape(command)}</code>. "
+                        "Откройте <code>/help</code> для полного списка."
+                    ),
+                    parse_mode="HTML",
                 )
             return
 
@@ -387,14 +402,22 @@ class TelegramController:
             if notify_on_error:
                 await self._api.send_message(
                     ctx.chat_id,
-                    "Не удалось выполнить команду из-за ошибки базы данных. Попробуйте позже.",
+                    (
+                        "⚠️ <b>Ошибка базы данных</b>\n"
+                        "Не удалось выполнить команду. Попробуйте немного позже."
+                    ),
+                    parse_mode="HTML",
                 )
         except Exception:
             logger.exception("Unexpected error while executing command %s", handler.__name__)
             if notify_on_error:
                 await self._api.send_message(
                     ctx.chat_id,
-                    "Команда завершилась с внутренней ошибкой. Попробуйте позже.",
+                    (
+                        "⚠️ <b>Внутренняя ошибка</b>\n"
+                        "Команда завершилась неудачно. Попробуйте повторить позже."
+                    ),
+                    parse_mode="HTML",
                 )
 
     def _is_admin(self, ctx: CommandContext) -> bool:
@@ -535,13 +558,32 @@ class TelegramController:
         delay_max_value = parse_delay_setting(delay_max_raw, 0.0)
         if delay_max_value < delay_min_value:
             delay_max_value = delay_min_value
-        rate = self._store.get_setting("runtime.rate")
-        if rate is None:
-            legacy_discord = self._store.get_setting("runtime.discord_rate") or "4.0"
-            legacy_telegram = self._store.get_setting("runtime.telegram_rate") or legacy_discord
-            rate_display = f"{legacy_discord}/{legacy_telegram} (наследие)"
+        def _safe_float(value: str | None, fallback: float) -> float:
+            if value is None:
+                return fallback
+            try:
+                return float(value)
+            except ValueError:
+                return fallback
+
+        rate_value: float | None
+        rate_raw = self._store.get_setting("runtime.rate")
+        if rate_raw is not None:
+            try:
+                rate_value = float(rate_raw)
+            except ValueError:
+                rate_value = None
         else:
-            rate_display = rate
+            rate_value = None
+
+        if rate_value is None:
+            legacy_discord = _safe_float(self._store.get_setting("runtime.discord_rate"), 4.0)
+            legacy_telegram = _safe_float(
+                self._store.get_setting("runtime.telegram_rate"), legacy_discord
+            )
+            rate_value = max(legacy_discord, legacy_telegram)
+
+        rate_display = _format_rate(rate_value)
 
         formatting_settings = {
             key.removeprefix("formatting."): value
@@ -557,15 +599,24 @@ class TelegramController:
         )
         preview_desc = "без предпросмотра" if disable_preview_default else "с предпросмотром"
 
-        filter_counts = Counter(ftype for ftype, _ in self._store.iter_filters(0))
-        if filter_counts:
-            filter_parts = [
-                f"{_FILTER_LABELS.get(ftype, ftype)} — {count}"
-                for ftype, count in sorted(filter_counts.items())
-            ]
-            filters_default = ", ".join(filter_parts)
-        else:
-            filters_default = "нет"
+        default_filters: dict[str, set[str]] = {name: set() for name in _FILTER_TYPES}
+        for filter_type, value in self._store.iter_filters(0):
+            default_filters.setdefault(filter_type, set()).add(value)
+
+        def _describe_filters(filter_sets: dict[str, set[str]], *, indent: str) -> list[str]:
+            rows: list[str] = []
+            for filter_type in _FILTER_TYPES:
+                values = sorted(filter_sets.get(filter_type, set()))
+                if not values:
+                    continue
+                label = html.escape(_FILTER_LABELS.get(filter_type, filter_type))
+                rendered_values = ", ".join(
+                    f"<code>{html.escape(value)}</code>" for value in values
+                )
+                rows.append(f"{indent}• {label}: {rendered_values}")
+            if not rows:
+                rows.append(f"{indent}• нет активных фильтров")
+            return rows
 
         proxy_lines: list[str] = []
         if proxy_url:
@@ -578,49 +629,72 @@ class TelegramController:
             proxy_lines.append("• отключён")
 
         channel_configs = self._store.load_channel_configurations()
+        has_default_filters = any(default_filters[name] for name in _FILTER_TYPES)
+
         if channel_configs:
             channel_lines: list[str] = ["<b>📡 Каналы</b>"]
+            default_filter_sets = default_filters
             for channel in channel_configs:
                 status_icon = "🟢" if channel.active else "⚪️"
-                overrides: list[str] = []
-                if channel.formatting.disable_preview != disable_preview_default:
-                    overrides.append(
-                        "предпросмотр: выкл"
-                        if channel.formatting.disable_preview
-                        else "предпросмотр: вкл"
-                    )
-                if str(channel.formatting.max_length) != str(max_length_default):
-                    overrides.append(f"max {channel.formatting.max_length}")
-                if channel.formatting.attachments_style.lower() != attachments_default.lower():
-                    style_text = (
-                        "кратко"
-                        if channel.formatting.attachments_style.lower() == "summary"
-                        else "ссылки"
-                    )
-                    overrides.append(f"вложения: {style_text}")
-                filter_total = sum(
-                    len(getattr(channel.filters, attr))
-                    for attr in (
-                        "whitelist",
-                        "blacklist",
-                        "allowed_senders",
-                        "blocked_senders",
-                        "allowed_types",
-                        "blocked_types",
-                    )
-                )
-                details = [
-                    f"Discord <code>{html.escape(channel.discord_id)}</code>",
-                    f"Telegram <code>{html.escape(channel.telegram_chat_id)}</code>",
-                ]
-                if overrides:
-                    details.append("; ".join(overrides))
-                if filter_total:
-                    details.append(f"фильтры: {filter_total}")
+                channel_lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
                 channel_lines.append(
-                    f"{status_icon} <b>{html.escape(channel.label)}</b> — "
-                    f"{', '.join(details)}"
+                    f"&nbsp;&nbsp;• Discord: <code>{html.escape(channel.discord_id)}</code>"
                 )
+                channel_lines.append(
+                    f"&nbsp;&nbsp;• Telegram: <code>{html.escape(channel.telegram_chat_id)}</code>"
+                )
+                channel_lines.append(
+                    "&nbsp;&nbsp;• Предпросмотр ссылок: "
+                    + (
+                        "выключен"
+                        if channel.formatting.disable_preview
+                        else "включен"
+                    )
+                )
+                channel_lines.append(
+                    f"&nbsp;&nbsp;• Максимальная длина: {channel.formatting.max_length} символов"
+                )
+                attachment_mode = (
+                    "краткий список"
+                    if channel.formatting.attachments_style.lower() == "summary"
+                    else "список ссылок"
+                )
+                channel_lines.append(
+                    "&nbsp;&nbsp;• Вложения: " + attachment_mode
+                )
+
+                channel_filter_sets: dict[str, set[str]] = {
+                    "whitelist": set(channel.filters.whitelist),
+                    "blacklist": set(channel.filters.blacklist),
+                    "allowed_senders": set(channel.filters.allowed_senders),
+                    "blocked_senders": set(channel.filters.blocked_senders),
+                    "allowed_types": set(channel.filters.allowed_types),
+                    "blocked_types": set(channel.filters.blocked_types),
+                }
+
+                extra_filters = {
+                    key: values - default_filter_sets.get(key, set())
+                    for key, values in channel_filter_sets.items()
+                }
+                if any(extra_filters[name] for name in _FILTER_TYPES):
+                    channel_lines.append("&nbsp;&nbsp;• Дополнительные фильтры:")
+                    channel_lines.extend(
+                        _describe_filters(extra_filters, indent="&nbsp;&nbsp;&nbsp;&nbsp;")
+                    )
+                else:
+                    if has_default_filters:
+                        channel_lines.append(
+                            "&nbsp;&nbsp;• Дополнительные фильтры: нет, "
+                            "используются глобальные"
+                        )
+                    else:
+                        channel_lines.append(
+                            "&nbsp;&nbsp;• Дополнительные фильтры: нет"
+                        )
+
+                channel_lines.append("")
+            if channel_lines[-1] == "":
+                channel_lines.pop()
         else:
             channel_lines = ["<b>📡 Каналы</b>", "• Не настроены"]
 
@@ -631,7 +705,7 @@ class TelegramController:
             f"• Discord токен: {html.escape(token_status)}",
             f"• User-Agent: {html.escape(user_agent)}",
             "",
-            "<b>Сеть</b>",
+            "<b>Прокси сервер</b>",
             *proxy_lines,
             "",
             "<b>Режим работы</b>",
@@ -645,10 +719,18 @@ class TelegramController:
             f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
             f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
             f"• Вложения: {html.escape(attachments_desc)}",
-            f"• Глобальные фильтры: {html.escape(filters_default)}",
+        ]
+
+        if has_default_filters:
+            lines.append("• Глобальные фильтры:")
+            lines.extend(_describe_filters(default_filters, indent="&nbsp;&nbsp;"))
+        else:
+            lines.append("• Глобальные фильтры: нет")
+
+        lines.extend([
             "",
             *channel_lines,
-        ]
+        ])
         await self._api.send_message(
             ctx.chat_id,
             "\n".join(lines),
