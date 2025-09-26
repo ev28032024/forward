@@ -11,7 +11,6 @@ def test_links_style_shows_urls() -> None:
         label="Test",
         formatting=FormattingOptions(attachments_style="links"),
         filters=FilterConfig(),
-        replacements=(),
         last_message_id=None,
         storage_id=1,
     )

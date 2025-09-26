@@ -61,16 +61,16 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
         await controller._dispatch("add_channel", admin)
         assert store.get_channel("123") is not None
 
-        admin.args = "123 привет"
-        await controller._dispatch("set_header", admin)
+        admin.args = "123 on"
+        await controller._dispatch("set_disable_preview", admin)
         record = store.get_channel("123")
         assert record is not None
         options = dict(store.iter_channel_options(record.id))
-        assert options["formatting.header"] == "привет"
+        assert options["formatting.disable_preview"] == "true"
 
-        admin.args = "all markdown"
-        await controller._dispatch("set_parse_mode", admin)
-        assert store.get_setting("formatting.parse_mode") == "markdown"
+        admin.args = "all links"
+        await controller._dispatch("set_attachments", admin)
+        assert store.get_setting("formatting.attachments_style") == "links"
 
     import asyncio
 

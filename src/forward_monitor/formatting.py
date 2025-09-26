@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import html
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
-from .models import ChannelConfig, DiscordMessage, FormattedTelegramMessage, ReplacementRule
+from .models import ChannelConfig, DiscordMessage, FormattedTelegramMessage
 
 EmbedPayload = Mapping[str, Any]
 AttachmentPayload = Mapping[str, Any]
@@ -19,17 +18,14 @@ def format_discord_message(
     """Convert a Discord message into Telegram text respecting the channel profile."""
 
     formatting = channel.formatting
-    content = apply_replacements(message.content or "", channel.replacements)
+    content = message.content or ""
     embed_text = "\n".join(_clean_embed_text(message.embeds))
     attachment_lines = list(
         _summarise_attachments(message.attachments, formatting.attachments_style)
     )
 
     blocks: list[str] = []
-    if formatting.header:
-        blocks.append(formatting.header)
-
-    chip = _build_chip(channel.label, message.author_name, formatting.chip)
+    chip = _build_chip(channel.label, message.author_name)
     if chip:
         blocks.append(chip)
 
@@ -39,28 +35,15 @@ def format_discord_message(
         blocks.append(embed_text)
     if attachment_lines:
         blocks.extend(attachment_lines)
-    if formatting.footer:
-        blocks.append(formatting.footer)
-
     joined = "\n".join(line for line in blocks if line)
-    escaped = _escape(joined, formatting.parse_mode)
-    chunks = _chunk_text(escaped, formatting.max_length, formatting.ellipsis)
-    parse_mode = None if formatting.parse_mode.lower() == "text" else formatting.parse_mode
+    chunks = _chunk_text(joined, formatting.max_length, formatting.ellipsis)
 
     return FormattedTelegramMessage(
         text=chunks[0] if chunks else "",
         extra_messages=tuple(chunks[1:]),
-        parse_mode=parse_mode,
+        parse_mode=None,
         disable_preview=formatting.disable_preview,
     )
-
-
-def apply_replacements(text: str, replacements: Sequence[ReplacementRule]) -> str:
-    result = text
-    for rule in replacements:
-        if rule.pattern:
-            result = result.replace(rule.pattern, rule.replacement)
-    return result
 
 
 def _clean_embed_text(embeds: Sequence[EmbedPayload]) -> Iterable[str]:
@@ -129,35 +112,11 @@ def _human_size(value: float | int | None) -> str:
     return f"{size:.1f}{units[index]}"
 
 
-def _build_chip(label: str, author: str, chip: str) -> str:
-    parts = [part for part in (label, author, chip) if part]
+def _build_chip(label: str, author: str) -> str:
+    parts = [part for part in (label, author) if part]
     if not parts:
         return ""
     return " • ".join(parts)
-
-
-def _escape(text: str, parse_mode: str) -> str:
-    mode = parse_mode.lower()
-    if mode == "markdownv2":
-        return _escape_markdown_v2(text)
-    if mode == "markdown":
-        return _escape_markdown(text)
-    if mode == "html":
-        return html.escape(text)
-    return text
-
-
-def _escape_markdown_v2(text: str) -> str:
-    for char in "_[]()~`>#+-=|{}.!":
-        text = text.replace(char, f"\\{char}")
-    return text.replace("*", "\\*")
-
-
-def _escape_markdown(text: str) -> str:
-    specials = "*_`[]()"
-    for char in specials:
-        text = text.replace(char, f"\\{char}")
-    return text
 
 
 def _chunk_text(text: str, limit: int, ellipsis: str) -> list[str]:

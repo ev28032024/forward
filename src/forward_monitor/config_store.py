@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from .models import ChannelConfig, FilterConfig, FormattingOptions, ReplacementRule
+from .models import ChannelConfig, FilterConfig, FormattingOptions
 
 _DB_PRAGMA = "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=NORMAL;" "PRAGMA foreign_keys=ON;"
 
@@ -92,13 +92,6 @@ class ConfigStore:
                     UNIQUE(channel_id, filter_type, value)
                 );
 
-                CREATE TABLE IF NOT EXISTS replacements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel_id INTEGER NOT NULL,
-                    pattern TEXT NOT NULL,
-                    replacement TEXT NOT NULL,
-                    UNIQUE(channel_id, pattern)
-                );
                 """
             )
             self._migrate_admins(cur)
@@ -377,7 +370,7 @@ class ConfigStore:
             self._conn.commit()
 
     # ------------------------------------------------------------------
-    # Filters & replacements
+    # Filters
     # ------------------------------------------------------------------
     def add_filter(self, channel_id: int, filter_type: str, value: str) -> None:
         with closing(self._conn.cursor()) as cur:
@@ -413,52 +406,18 @@ class ConfigStore:
         for row in rows:
             yield str(row["filter_type"]), str(row["value"])
 
-    def add_replacement(self, channel_id: int, pattern: str, replacement: str) -> None:
-        with closing(self._conn.cursor()) as cur:
-            cur.execute(
-                "INSERT INTO replacements(channel_id, pattern, replacement) VALUES(?, ?, ?)"
-                " ON CONFLICT(channel_id, pattern) DO UPDATE SET replacement=excluded.replacement",
-                (channel_id, pattern, replacement),
-            )
-            self._conn.commit()
-
-    def remove_replacement(self, channel_id: int, pattern: str | None = None) -> int:
-        with closing(self._conn.cursor()) as cur:
-            if pattern is None:
-                cur.execute("DELETE FROM replacements WHERE channel_id=?", (channel_id,))
-            else:
-                cur.execute(
-                    "DELETE FROM replacements WHERE channel_id=? AND pattern=?",
-                    (channel_id, pattern),
-                )
-            removed = cur.rowcount
-            self._conn.commit()
-        return removed
-
-    def iter_replacements(self, channel_id: int) -> Iterator[ReplacementRule]:
-        with closing(self._conn.cursor()) as cur:
-            cur.execute(
-                "SELECT pattern, replacement FROM replacements WHERE channel_id=?",
-                (channel_id,),
-            )
-            rows = cur.fetchall()
-        for row in rows:
-            yield ReplacementRule(pattern=str(row["pattern"]), replacement=str(row["replacement"]))
-
     # ------------------------------------------------------------------
     # Composite loads
     # ------------------------------------------------------------------
     def load_channel_configurations(self) -> list[ChannelConfig]:
         defaults = self._load_default_options()
         default_filters = self._load_filter_config(0)
-        default_replacements = list(self.iter_replacements(0))
         configs: list[ChannelConfig] = []
         for record in self.list_channels():
             formatting = defaults["formatting"].copy()
             channel_options = dict(self.iter_channel_options(record.id))
             channel_formatting = _formatting_from_options(formatting, channel_options)
             filters = default_filters.merge(self._load_filter_config(record.id))
-            replacements = [*default_replacements, *self.iter_replacements(record.id)]
             configs.append(
                 ChannelConfig(
                     discord_id=record.discord_id,
@@ -466,7 +425,6 @@ class ConfigStore:
                     label=record.label or record.discord_id,
                     formatting=channel_formatting,
                     filters=filters,
-                    replacements=tuple(replacements),
                     last_message_id=record.last_message_id,
                     active=record.active,
                     storage_id=record.id,
@@ -528,12 +486,8 @@ def _formatting_from_options(
     }
     options = {**base, **formatting_overrides}
     return FormattingOptions(
-        parse_mode=options.get("parse_mode", "MarkdownV2"),
         disable_preview=options.get("disable_preview", "true").lower() == "true",
         max_length=int(options.get("max_length", "3500")),
         ellipsis=options.get("ellipsis", "…"),
         attachments_style=options.get("attachments_style", "summary"),
-        header=options.get("header", ""),
-        footer=options.get("footer", ""),
-        chip=options.get("chip", ""),
     )

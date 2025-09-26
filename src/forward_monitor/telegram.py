@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
 
@@ -12,6 +13,15 @@ from .config_store import AdminRecord, ConfigStore
 from .models import FormattedTelegramMessage
 
 _API_BASE = "https://api.telegram.org"
+
+_FILTER_LABELS = {
+    "whitelist": "белый список",
+    "blacklist": "чёрный список",
+    "allowed_senders": "разрешённые авторы",
+    "blocked_senders": "запрещённые авторы",
+    "allowed_types": "разрешённые типы",
+    "blocked_types": "запрещённые типы",
+}
 
 
 def _normalize_username(username: str | None) -> str | None:
@@ -160,13 +170,15 @@ class _CommandInfo:
 BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="start",
-        summary="Приветствие и краткая справка.",
-        help_text="/start — Forward Monitor готов. Используйте /help для списка команд.",
+        summary="Приветствие бота.",
+        help_text="/start — короткое приветствие и напоминание про /help.",
+        admin_only=False,
     ),
     _CommandInfo(
         name="help",
-        summary="Список команд управления.",
-        help_text="/help — полный список команд.",
+        summary="Показать справку.",
+        help_text="/help — открыть структурированное описание команд.",
+        admin_only=False,
     ),
     _CommandInfo(
         name="claim",
@@ -176,8 +188,9 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     ),
     _CommandInfo(
         name="status",
-        summary="Показать текущие настройки.",
-        help_text="/status — текущая конфигурация",
+        summary="Краткий обзор настроек.",
+        help_text="/status — показать токен, сеть, фильтры и каналы.",
+        admin_only=False,
     ),
     _CommandInfo(
         name="admins",
@@ -202,7 +215,7 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="add_channel",
         summary="Добавить связку каналов.",
-        help_text="/add_channel <discord_id> <telegram_chat> [метка]",
+        help_text="/add_channel <discord_id> <telegram_chat> <название>",
     ),
     _CommandInfo(
         name="remove_channel",
@@ -213,26 +226,6 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="list_channels",
         summary="Показать все связки каналов.",
         help_text="/list_channels",
-    ),
-    _CommandInfo(
-        name="set_header",
-        summary="Задать шапку сообщений.",
-        help_text="/set_header <discord_id|all> <текст>",
-    ),
-    _CommandInfo(
-        name="set_footer",
-        summary="Задать подпись сообщений.",
-        help_text="/set_footer <discord_id|all> <текст>",
-    ),
-    _CommandInfo(
-        name="set_chip",
-        summary="Задать маркер-стикер.",
-        help_text="/set_chip <discord_id|all> <текст>",
-    ),
-    _CommandInfo(
-        name="set_parse_mode",
-        summary="Выбрать режим форматирования.",
-        help_text="/set_parse_mode <discord_id|all> <markdownv2|markdown|html|text>",
     ),
     _CommandInfo(
         name="set_disable_preview",
@@ -260,16 +253,6 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         help_text="/clear_filter <discord_id|all> <тип> [значение]",
     ),
     _CommandInfo(
-        name="add_replace",
-        summary="Добавить правило замены.",
-        help_text="/add_replace <discord_id|all> шаблон => замена",
-    ),
-    _CommandInfo(
-        name="clear_replace",
-        summary="Удалить правила замены.",
-        help_text="/clear_replace <discord_id|all> [шаблон]",
-    ),
-    _CommandInfo(
         name="set_proxy",
         summary="Настроить прокси Discord.",
         help_text="/set_proxy <url|clear> [логин] [пароль]",
@@ -293,11 +276,6 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="set_rate",
         summary="Настроить лимиты запросов.",
         help_text="/set_rate <в_секунду>",
-    ),
-    _CommandInfo(
-        name="set_fallback_chat",
-        summary="Указать резервный чат Telegram.",
-        help_text="/set_fallback_chat <chat_id>",
     ),
 )
 
@@ -366,7 +344,11 @@ class TelegramController:
                     f"Неизвестная команда: {command}",
                 )
             return
+        info = _COMMAND_MAP.get(command)
         if command == "claim" and not self._store.has_admins():
+            await handler(ctx)
+            return
+        if info is not None and not info.admin_only:
             await handler(ctx)
             return
         if not self._is_admin(ctx):
@@ -411,53 +393,86 @@ class TelegramController:
         )
 
     async def cmd_help(self, ctx: CommandContext) -> None:
-        sections = [
+        sections: list[tuple[str, list[tuple[str, str]]]] = [
             (
-                "🔐 Администрирование",
-                ["claim", "status", "admins", "grant", "revoke"],
-            ),
-            (
-                "⚙️ Интеграция",
+                "🚀 Старт",
                 [
-                    "set_discord_token",
-                    "set_fallback_chat",
-                    "set_proxy",
-                    "set_user_agent",
-                    "set_poll",
-                    "set_delay",
-                    "set_rate",
+                    ("/start", "Приветствие и проверка связи."),
+                    ("/help", "Эта справка."),
+                    ("/status", "Краткий отчёт по настройкам."),
                 ],
             ),
-            ("📡 Каналы", ["add_channel", "remove_channel", "list_channels"]),
             (
-                "🎨 Оформление",
+                "👑 Администрирование",
                 [
-                    "set_header",
-                    "set_footer",
-                    "set_chip",
-                    "set_parse_mode",
-                    "set_disable_preview",
-                    "set_max_length",
-                    "set_attachments",
-                    "add_replace",
-                    "clear_replace",
+                    ("/claim", "Занять роль первого администратора."),
+                    ("/admins", "Показать текущий список администраторов."),
+                    ("/grant <id|@user>", "Выдать права указанному пользователю."),
+                    ("/revoke <id|@user>", "Удалить права администратора."),
                 ],
             ),
-            ("🚦 Фильтры", ["add_filter", "clear_filter"]),
+            (
+                "📡 Каналы",
+                [
+                    (
+                        "/add_channel <discord_id> <telegram_chat> <название>",
+                        "Создать новую связку и задать видимое имя.",
+                    ),
+                    ("/remove_channel <discord_id>", "Удалить связку."),
+                    ("/list_channels", "Краткий перечень настроенных связок."),
+                ],
+            ),
+            (
+                "⚙️ Подключение",
+                [
+                    ("/set_discord_token <token>", "Сохранить токен Discord."),
+                    ("/set_proxy <url|clear> [логин] [пароль]", "Настроить или отключить прокси."),
+                    ("/set_user_agent <строка>", "Передавать собственный User-Agent."),
+                ],
+            ),
+            (
+                "⏱ Режим работы",
+                [
+                    ("/set_poll <секунды>", "Частота опроса Discord."),
+                    ("/set_delay <min_ms> <max_ms>", "Случайная пауза между сообщениями."),
+                    ("/set_rate <в_секунду>", "Общий лимит запросов в секунду."),
+                ],
+            ),
+            (
+                "🧹 Отображение и фильтры",
+                [
+                    (
+                        "/set_disable_preview <discord_id|all> <on|off>",
+                        "Управлять предпросмотром ссылок.",
+                    ),
+                    (
+                        "/set_max_length <discord_id|all> <число>",
+                        "Разбивать длинные тексты на части.",
+                    ),
+                    (
+                        "/set_attachments <discord_id|all> <summary|links>",
+                        "Выбрать формат блока вложений.",
+                    ),
+                    (
+                        "/add_filter <discord_id|all> <тип> <значение>",
+                        "Добавить фильтр (whitelist, blacklist и т.д.).",
+                    ),
+                    (
+                        "/clear_filter <discord_id|all> <тип> [значение]",
+                        "Удалить фильтр полностью или по значению.",
+                    ),
+                ],
+            ),
         ]
         lines = [
-            "<b>🛠️ Forward Monitor • Панель управления</b>",
-            "<i>Современный набор инструментов для синхронизации каналов.</i>",
+            "<b>🛠️ Forward Monitor • Основные команды</b>",
+            "<i>Все настройки выполняются из этого чата: категории ниже.</i>",
             "",
         ]
-        for title, command_names in sections:
+        for title, commands in sections:
             lines.append(f"<b>{title}</b>")
-            for name in command_names:
-                info = _COMMAND_MAP[name]
-                summary = html.escape(info.summary)
-                usage = html.escape(info.help_text)
-                lines.append(f"• <code>/{html.escape(info.name)}</code> — {summary}")
-                lines.append(f"  <i>{usage}</i>")
+            for command, description in commands:
+                lines.append(f"• <code>{html.escape(command)}</code> — {html.escape(description)}")
             lines.append("")
         await self._api.send_message(
             ctx.chat_id,
@@ -466,25 +481,45 @@ class TelegramController:
         )
 
     async def cmd_status(self, ctx: CommandContext) -> None:
-        discord_token = "✅ установлено" if self._store.get_setting("discord.token") else "⛔ нет"
-        fallback = self._store.get_setting("telegram.fallback_chat") or "не задан"
+        token_status = "есть" if self._store.get_setting("discord.token") else "не задан"
         proxy_url = self._store.get_setting("proxy.discord.url")
         proxy_login = self._store.get_setting("proxy.discord.login")
         proxy_password = self._store.get_setting("proxy.discord.password")
-        user_agent = self._store.get_setting("ua.discord") or "по умолчанию"
-        poll_value = self._store.get_setting("runtime.poll", "2.0")
-        poll = poll_value if poll_value is not None else "2.0"
-        delay_min_value = self._store.get_setting("runtime.delay_min", "0")
-        delay_min = delay_min_value if delay_min_value is not None else "0"
-        delay_max_value = self._store.get_setting("runtime.delay_max", "0")
-        delay_max = delay_max_value if delay_max_value is not None else "0"
+        user_agent = self._store.get_setting("ua.discord") or "стандартный"
+        poll = self._store.get_setting("runtime.poll") or "2.0"
+        delay_min = self._store.get_setting("runtime.delay_min") or "0"
+        delay_max = self._store.get_setting("runtime.delay_max") or "0"
         rate = self._store.get_setting("runtime.rate")
         if rate is None:
             legacy_discord = self._store.get_setting("runtime.discord_rate") or "4.0"
             legacy_telegram = self._store.get_setting("runtime.telegram_rate") or legacy_discord
-            rate_display = f"{legacy_discord}/{legacy_telegram} (legacy)"
+            rate_display = f"{legacy_discord}/{legacy_telegram} (наследие)"
         else:
-            rate_display = f"{rate}"
+            rate_display = rate
+
+        formatting_settings = {
+            key.removeprefix("formatting."): value
+            for key, value in self._store.iter_settings("formatting.")
+        }
+        disable_preview_default = (
+            formatting_settings.get("disable_preview", "true").lower() != "false"
+        )
+        max_length_default = formatting_settings.get("max_length", "3500")
+        attachments_default = formatting_settings.get("attachments_style", "summary")
+        attachments_desc = (
+            "краткий список" if attachments_default.lower() == "summary" else "список ссылок"
+        )
+        preview_desc = "без предпросмотра" if disable_preview_default else "с предпросмотром"
+
+        filter_counts = Counter(ftype for ftype, _ in self._store.iter_filters(0))
+        if filter_counts:
+            filter_parts = [
+                f"{_FILTER_LABELS.get(ftype, ftype)} — {count}"
+                for ftype, count in sorted(filter_counts.items())
+            ]
+            filters_default = ", ".join(filter_parts)
+        else:
+            filters_default = "нет"
 
         proxy_lines: list[str] = []
         if proxy_url:
@@ -494,42 +529,77 @@ class TelegramController:
             if proxy_password:
                 proxy_lines.append("• Пароль: ••••••")
         else:
-            proxy_lines.append("• не задан")
+            proxy_lines.append("• отключён")
 
-        channels = self._store.list_channels()
-        channel_lines = []
-        for record in channels[:8]:
-            label = record.label or record.discord_id
-            status_icon = "🟢" if record.active else "⚪️"
-            discord_id = html.escape(str(record.discord_id))
-            chat_id = html.escape(str(record.telegram_chat_id))
-            channel_label = html.escape(str(label))
-            channel_lines.append(
-                (
-                    f"{status_icon} <code>{discord_id}</code> → "
-                    f"<code>{chat_id}</code> — {channel_label}"
+        channel_configs = self._store.load_channel_configurations()
+        if channel_configs:
+            channel_lines: list[str] = ["<b>📡 Каналы</b>"]
+            for channel in channel_configs:
+                status_icon = "🟢" if channel.active else "⚪️"
+                overrides: list[str] = []
+                if channel.formatting.disable_preview != disable_preview_default:
+                    overrides.append(
+                        "предпросмотр: выкл"
+                        if channel.formatting.disable_preview
+                        else "предпросмотр: вкл"
+                    )
+                if str(channel.formatting.max_length) != str(max_length_default):
+                    overrides.append(f"max {channel.formatting.max_length}")
+                if channel.formatting.attachments_style.lower() != attachments_default.lower():
+                    style_text = (
+                        "кратко"
+                        if channel.formatting.attachments_style.lower() == "summary"
+                        else "ссылки"
+                    )
+                    overrides.append(f"вложения: {style_text}")
+                filter_total = sum(
+                    len(getattr(channel.filters, attr))
+                    for attr in (
+                        "whitelist",
+                        "blacklist",
+                        "allowed_senders",
+                        "blocked_senders",
+                        "allowed_types",
+                        "blocked_types",
+                    )
                 )
-            )
-        if len(channels) > 8:
-            channel_lines.append(f"… и ещё {len(channels) - 8} каналов")
-        if not channel_lines:
-            channel_lines.append("Каналы не настроены")
+                details = [
+                    f"Discord <code>{html.escape(channel.discord_id)}</code>",
+                    f"Telegram <code>{html.escape(channel.telegram_chat_id)}</code>",
+                ]
+                if overrides:
+                    details.append("; ".join(overrides))
+                if filter_total:
+                    details.append(f"фильтры: {filter_total}")
+                channel_lines.append(
+                    f"{status_icon} <b>{html.escape(channel.label)}</b> — "
+                    f"{', '.join(details)}"
+                )
+        else:
+            channel_lines = ["<b>📡 Каналы</b>", "• не настроены"]
 
         lines = [
             "<b>⚙️ Статус Forward Monitor</b>",
             "",
-            f"🔑 <b>Discord токен:</b> {discord_token}",
-            f"💬 <b>Fallback чат:</b> {html.escape(fallback)}",
+            "<b>Подключение</b>",
+            f"• Discord токен: {html.escape(token_status)}",
+            f"• User-Agent: {html.escape(user_agent)}",
             "",
-            "<b>🌐 Прокси Discord</b>",
+            "<b>Сеть</b>",
             *proxy_lines,
             "",
-            f"🧾 <b>User-Agent:</b> {html.escape(user_agent)}",
-            f"⏱️ <b>Интервал опроса:</b> {html.escape(poll)} с",
-            f"🎲 <b>Задержка:</b> {html.escape(delay_min)}–{html.escape(delay_max)} мс",
-            f"🚦 <b>Лимит:</b> {html.escape(rate_display)} запрос/с",
+            "<b>Режим работы</b>",
+            f"• Интервал опроса: {html.escape(str(poll))} с",
+            f"• Пауза между сообщениями: "
+            f"{html.escape(str(delay_min))}–{html.escape(str(delay_max))} мс",
+            f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
             "",
-            "<b>📡 Каналы</b>",
+            "<b>Оформление по умолчанию</b>",
+            f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
+            f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
+            f"• Вложения: {html.escape(attachments_desc)}",
+            f"• Глобальные фильтры: {html.escape(filters_default)}",
+            "",
             *channel_lines,
         ]
         await self._api.send_message(
@@ -649,14 +719,6 @@ class TelegramController:
         self._on_change()
         await self._api.send_message(ctx.chat_id, "Токен Discord обновлён")
 
-    async def cmd_set_fallback_chat(self, ctx: CommandContext) -> None:
-        if not ctx.args:
-            await self._api.send_message(ctx.chat_id, "Укажите chat_id")
-            return
-        self._store.set_setting("telegram.fallback_chat", ctx.args.strip())
-        self._on_change()
-        await self._api.send_message(ctx.chat_id, "Fallback чат обновлён")
-
     async def cmd_set_proxy(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if not parts:
@@ -756,14 +818,17 @@ class TelegramController:
     # ------------------------------------------------------------------
     async def cmd_add_channel(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
-        if len(parts) < 2:
+        if len(parts) < 3:
             await self._api.send_message(
                 ctx.chat_id,
-                "Использование: /add_channel <discord_id> <telegram_chat> [метка]",
+                "Использование: /add_channel <discord_id> <telegram_chat> <название>",
             )
             return
-        discord_id, telegram_chat = parts[0], parts[1]
-        label = " ".join(parts[2:]) if len(parts) > 2 else discord_id
+        discord_id, telegram_chat, *label_parts = parts
+        label = " ".join(label_parts).strip()
+        if not label:
+            await self._api.send_message(ctx.chat_id, "Укажите название канала")
+            return
         if self._store.get_channel(discord_id):
             await self._api.send_message(ctx.chat_id, "Канал уже существует")
             return
@@ -785,31 +850,22 @@ class TelegramController:
     async def cmd_list_channels(self, ctx: CommandContext) -> None:
         channels = self._store.list_channels()
         if not channels:
-            await self._api.send_message(ctx.chat_id, "Список пуст")
+            await self._api.send_message(ctx.chat_id, "Каналы не настроены")
             return
-        lines = [
-            "Каналы:",
-            *[
-                f"{record.discord_id} → {record.telegram_chat_id} [{record.label}]"
-                for record in channels
-            ],
-        ]
-        await self._api.send_message(ctx.chat_id, "\n".join(lines))
-
-    async def cmd_set_header(self, ctx: CommandContext) -> None:
-        await self._set_format_option(ctx, "header")
-
-    async def cmd_set_footer(self, ctx: CommandContext) -> None:
-        await self._set_format_option(ctx, "footer")
-
-    async def cmd_set_chip(self, ctx: CommandContext) -> None:
-        await self._set_format_option(ctx, "chip")
-
-    async def cmd_set_parse_mode(self, ctx: CommandContext) -> None:
-        await self._set_format_option(
-            ctx,
-            "parse_mode",
-            allowed={"markdownv2", "markdown", "html", "text"},
+        lines = ["<b>📡 Настроенные каналы</b>", ""]
+        for record in channels:
+            label = html.escape(record.label or record.discord_id)
+            discord_id = html.escape(record.discord_id)
+            chat_id = html.escape(record.telegram_chat_id)
+            status_icon = "🟢" if record.active else "⚪️"
+            lines.append(
+                f"{status_icon} <b>{label}</b> — Discord <code>{discord_id}</code> → "
+                f"Telegram <code>{chat_id}</code>"
+            )
+        await self._api.send_message(
+            ctx.chat_id,
+            "\n".join(lines),
+            parse_mode="HTML",
         )
 
     async def cmd_set_disable_preview(self, ctx: CommandContext) -> None:
@@ -863,39 +919,6 @@ class TelegramController:
         self._on_change()
         await self._api.send_message(ctx.chat_id, f"Удалено {removed} записей")
 
-    async def cmd_add_replace(self, ctx: CommandContext) -> None:
-        target, pattern, replacement = self._parse_replace_args(ctx)
-        if target is None:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /add_replace <discord_id|all> шаблон => замена",
-            )
-            return
-        for channel_id in target:
-            self._store.add_replacement(channel_id, pattern, replacement)
-        self._on_change()
-        await self._api.send_message(ctx.chat_id, "Замена сохранена")
-
-    async def cmd_clear_replace(self, ctx: CommandContext) -> None:
-        parts = ctx.args.split(maxsplit=1)
-        if not parts:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /clear_replace <discord_id|all> [шаблон]",
-            )
-            return
-        target_key = parts[0]
-        pattern = parts[1] if len(parts) == 2 else None
-        channel_ids = self._resolve_channel_ids(target_key)
-        if not channel_ids:
-            await self._api.send_message(ctx.chat_id, "Канал не найден")
-            return
-        removed = 0
-        for channel_id in channel_ids:
-            removed += self._store.remove_replacement(channel_id, pattern)
-        self._on_change()
-        await self._api.send_message(ctx.chat_id, f"Удалено {removed} замен")
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -923,8 +946,6 @@ class TelegramController:
             except ValueError:
                 await self._api.send_message(ctx.chat_id, "Введите целое число")
                 return
-        elif option == "parse_mode":
-            value = value.lower()
 
         if target_key.lower() in {"all", "*"}:
             self._store.set_setting(f"formatting.{option}", value)
@@ -945,19 +966,6 @@ class TelegramController:
         if not record:
             return []
         return [record.id]
-
-    def _parse_replace_args(self, ctx: CommandContext) -> tuple[list[int] | None, str, str]:
-        parts = ctx.args.split(maxsplit=1)
-        if len(parts) < 2:
-            return (None, "", "")
-        target_key, rest = parts
-        if "=>" not in rest:
-            return (None, "", "")
-        pattern, replacement = [segment.strip() for segment in rest.split("=>", 1)]
-        ids = self._resolve_channel_ids(target_key)
-        if not ids or not pattern:
-            return (None, "", "")
-        return (ids, pattern, replacement)
 
     async def _ensure_commands_registered(self) -> None:
         if self._commands_registered:

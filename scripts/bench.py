@@ -22,12 +22,7 @@ if str(SRC) not in sys.path:
 
 
 def _sample_channel() -> "ChannelConfigType":
-    from forward_monitor.models import (
-        ChannelConfig,
-        FilterConfig,
-        FormattingOptions,
-        ReplacementRule,
-    )
+    from forward_monitor.models import ChannelConfig, FilterConfig, FormattingOptions
 
     return ChannelConfig(
         discord_id="1",
@@ -35,7 +30,6 @@ def _sample_channel() -> "ChannelConfigType":
         label="Bench",
         formatting=FormattingOptions(max_length=1000, attachments_style="summary"),
         filters=FilterConfig(),
-        replacements=(ReplacementRule(pattern="foo", replacement="bar"),),
         last_message_id=None,
         storage_id=1,
     )
@@ -98,12 +92,10 @@ class LegacyFormatter:
             )
         lines = list(
             chain(
-                [self._channel.formatting.header or ""],
                 [self._channel.label + " • " + message.author_name],
                 [text],
                 embed_parts,
                 attachments,
-                [self._channel.formatting.footer or ""],
             )
         )
         joined = "\n".join(filter(None, (escape(line) for line in lines)))
