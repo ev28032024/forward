@@ -364,7 +364,7 @@ class TelegramController:
     async def cmd_start(self, ctx: CommandContext) -> None:
         welcome_message = (
             "✨ Forward Monitor готов к работе. "
-            "Используйте /help, чтобы увидеть обновлённую панель команд."
+            "Используйте /help, чтобы увидеть панель команд."
         )
         await self._api.send_message(ctx.chat_id, welcome_message)
 
