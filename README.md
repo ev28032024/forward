@@ -1,6 +1,6 @@
-# Forward Monitor (Telegram-first)
+# Forward Monitor
 
-#### Forward Monitor — лёгкий мост между Discord и Telegram.
+#### Лёгкий мост между Discord и Telegram.
 
 ## Установка
 ```bash
