@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Iterable
 
 from forward_monitor.config_store import ConfigStore
-from forward_monitor.telegram import CommandContext, TelegramController
+from forward_monitor.telegram import BOT_COMMANDS, CommandContext, TelegramController
 
 
 class DummyAPI:
     def __init__(self) -> None:
         self.messages: list[tuple[int | str, str]] = []
+        self.commands: list[tuple[str, str]] = []
 
     def set_proxy(self, proxy: str | None) -> None:
         return None
@@ -21,6 +23,9 @@ class DummyAPI:
     ) -> list[dict[str, object]]:
         await asyncio.sleep(0)
         return []
+
+    async def set_my_commands(self, commands: Iterable[tuple[str, str]]) -> None:
+        self.commands = list(commands)
 
     async def send_message(
         self,
@@ -61,5 +66,18 @@ def test_controller_respects_admin_permissions(tmp_path: Path) -> None:
         assert changed is True
 
     import asyncio
+
+    asyncio.run(runner())
+
+
+def test_controller_registers_bot_commands(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(api, store, on_change=lambda: None)
+        controller.stop()
+        await controller.run()
+        expected = [(info.name, info.summary) for info in BOT_COMMANDS]
+        assert api.commands == expected
 
     asyncio.run(runner())
