@@ -7,7 +7,7 @@ import html
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable, Protocol
+from typing import Any, Awaitable, Callable, Iterable, Protocol, Sequence
 from urllib.parse import urlparse
 
 import aiohttp
@@ -653,46 +653,86 @@ class TelegramController:
                 if not values:
                     continue
                 label = html.escape(_FILTER_LABELS.get(filter_type, filter_type))
-                rendered_values = ", ".join(
-                    html.escape(display)
-                    for display in sorted(values.values(), key=str.lower)
-                )
-                rows.append(f"{indent}• {label}: {rendered_values}")
+                rows.append(f"{indent}• <b>{label}</b>")
+                for display in sorted(values.values(), key=str.lower):
+                    rows.append(
+                        f"{indent}{_NBSP}{_NBSP}◦ {html.escape(display)}"
+                    )
             if not rows and empty_message:
                 rows.append(f"{indent}{empty_message}")
             return rows
 
         proxy_lines: list[str] = []
         if proxy_url:
-            proxy_lines.append(f"• URL: {html.escape(proxy_url)}")
+            proxy_lines.append(f"• URL: <code>{html.escape(proxy_url)}</code>")
             if proxy_login:
-                proxy_lines.append(f"• Логин: {html.escape(proxy_login)}")
+                proxy_lines.append(f"• Логин: <code>{html.escape(proxy_login)}</code>")
             if proxy_password:
                 proxy_lines.append("• Пароль: ••••••")
+            if not proxy_login and not proxy_password:
+                proxy_lines.append("• Без авторизации")
         else:
-            proxy_lines.append("• отключён")
+            proxy_lines.append("• Отключён")
 
         channel_configs = self._store.load_channel_configurations()
         default_filter_sets = _collect_filter_sets(default_filter_config)
         has_default_filters = any(default_filter_sets[name] for name in _FILTER_TYPES)
 
+        lines: list[str] = [
+            "<b>⚙️ Forward Monitor — статус</b>",
+            "",
+            "<b>🔌 Подключения</b>",
+            f"• Discord токен: <b>{html.escape(token_status)}</b>",
+            f"• User-Agent: <code>{html.escape(user_agent)}</code>",
+            "",
+            "<b>🌐 Прокси</b>",
+            *proxy_lines,
+            "",
+            "<b>⏱️ Режим работы</b>",
+            f"• Опрос Discord: {html.escape(str(poll))} с",
+            "• Пауза между сообщениями: "
+            f"{html.escape(_format_seconds(delay_min_value))}–"
+            f"{html.escape(_format_seconds(delay_max_value))} с",
+            f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
+            "",
+            "<b>🎨 Оформление по умолчанию</b>",
+            f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
+            f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
+            f"• Вложения: {html.escape(attachments_desc)}",
+            f"• Режим мониторинга: {html.escape(monitoring_default_desc)}",
+            "",
+            "<b>🚦 Глобальные фильтры</b>",
+        ]
+
+        if has_default_filters:
+            lines.extend(
+                _describe_filters(
+                    default_filter_sets,
+                    indent=_INDENT,
+                    empty_message="• Нет активных фильтров",
+                )
+            )
+        else:
+            lines.append(f"{_INDENT}• Нет активных фильтров")
+
+        lines.append("")
+        lines.append("<b>📡 Каналы</b>")
         if channel_configs:
-            channel_lines: list[str] = ["<b>📡 Каналы</b>"]
             for channel in channel_configs:
                 status_icon = "🟢" if channel.active else "⚪️"
-                channel_lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
-                channel_lines.append(
+                lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
+                lines.append(
                     f"{_INDENT}• Discord: <code>{html.escape(channel.discord_id)}</code>"
                 )
-                channel_lines.append(
+                lines.append(
                     f"{_INDENT}• Telegram: <code>{html.escape(channel.telegram_chat_id)}</code>"
                 )
                 if channel.telegram_thread_id is not None:
                     thread_value = html.escape(str(channel.telegram_thread_id))
-                    channel_lines.append(
+                    lines.append(
                         f"{_INDENT}• Тема: <code>{thread_value}</code>"
                     )
-                channel_lines.append(
+                lines.append(
                     f"{_INDENT}• Предпросмотр ссылок: "
                     + (
                         "выключен"
@@ -700,7 +740,7 @@ class TelegramController:
                         else "включен"
                     )
                 )
-                channel_lines.append(
+                lines.append(
                     f"{_INDENT}• Максимальная длина: {channel.formatting.max_length} символов"
                 )
                 attachment_mode = (
@@ -708,10 +748,8 @@ class TelegramController:
                     if channel.formatting.attachments_style.lower() == "summary"
                     else "список ссылок"
                 )
-                channel_lines.append(
-                    f"{_INDENT}• Вложения: " + attachment_mode
-                )
-                channel_lines.append(
+                lines.append(f"{_INDENT}• Вложения: {attachment_mode}")
+                lines.append(
                     f"{_INDENT}• Режим: "
                     + (
                         "закреплённые сообщения"
@@ -730,8 +768,8 @@ class TelegramController:
                     for key in _FILTER_TYPES
                 }
                 if any(extra_filters[name] for name in _FILTER_TYPES):
-                    channel_lines.append(f"{_INDENT}• Дополнительные фильтры:")
-                    channel_lines.extend(
+                    lines.append(f"{_INDENT}• Дополнительные фильтры")
+                    lines.extend(
                         _describe_filters(
                             extra_filters,
                             indent=_DOUBLE_INDENT,
@@ -740,66 +778,25 @@ class TelegramController:
                     )
                 else:
                     if has_default_filters:
-                        channel_lines.append(
-                            f"{_INDENT}• Дополнительные фильтры: нет, "
-                            "используются глобальные"
+                        lines.append(
+                            f"{_INDENT}• Дополнительные фильтры: нет, используются глобальные"
                         )
                     else:
-                        channel_lines.append(
-                            f"{_INDENT}• Дополнительные фильтры: нет"
-                        )
+                        lines.append(f"{_INDENT}• Дополнительные фильтры: нет")
 
-                channel_lines.append("")
-            if channel_lines[-1] == "":
-                channel_lines.pop()
+                lines.append("")
         else:
-            channel_lines = ["<b>📡 Каналы</b>", "• Не настроены"]
+            lines.append(f"{_INDENT}• Не настроены")
 
-        lines = [
-            "<b>⚙️ Статус Forward Monitor</b>",
-            "",
-            "<b>Подключение</b>",
-            f"• Discord токен: {html.escape(token_status)}",
-            f"• User-Agent: {html.escape(user_agent)}",
-            "",
-            "<b>Прокси сервер</b>",
-            *proxy_lines,
-            "",
-            "<b>Режим работы</b>",
-            f"• Интервал опроса: {html.escape(str(poll))} с",
-            "• Пауза между сообщениями: "
-            f"{html.escape(_format_seconds(delay_min_value))}–"
-            f"{html.escape(_format_seconds(delay_max_value))} с",
-            f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
-            "",
-            "<b>Оформление по умолчанию</b>",
-            f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
-            f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
-            f"• Вложения: {html.escape(attachments_desc)}",
-            f"• Режим мониторинга: {html.escape(monitoring_default_desc)}",
-        ]
+        while lines and lines[-1] == "":
+            lines.pop()
 
-        if has_default_filters:
-            lines.append("• Глобальные фильтры:")
-            lines.extend(
-                _describe_filters(
-                    default_filter_sets,
-                    indent=_INDENT,
-                    empty_message="• Нет активных фильтров",
-                )
+        for chunk in _split_html_lines(lines):
+            await self._api.send_message(
+                ctx.chat_id,
+                chunk,
+                parse_mode="HTML",
             )
-        else:
-            lines.append("• Глобальные фильтры: нет")
-
-        lines.extend([
-            "",
-            *channel_lines,
-        ])
-        await self._api.send_message(
-            ctx.chat_id,
-            "\n".join(lines),
-            parse_mode="HTML",
-        )
 
     async def cmd_claim(self, ctx: CommandContext) -> None:
         if self._store.has_admins():
@@ -1091,6 +1088,38 @@ class TelegramController:
                 "Использование: /add_channel <discord_id> <telegram_chat[:thread]> <название>",
             )
             return
+
+        mode_override: str | None = None
+        mode_aliases = {
+            "messages": "messages",
+            "message": "messages",
+            "default": "messages",
+            "pinned": "pinned",
+            "pin": "pinned",
+            "pins": "pinned",
+        }
+        tail = parts[-1].lower()
+        if tail.startswith("mode="):
+            candidate = tail.split("=", 1)[1]
+            mode_override = mode_aliases.get(candidate)
+            if mode_override is None:
+                await self._api.send_message(
+                    ctx.chat_id,
+                    "Допустимые режимы: messages, pinned",
+                )
+                return
+            parts = parts[:-1]
+        elif tail in mode_aliases:
+            mode_override = mode_aliases[tail]
+            parts = parts[:-1]
+
+        if len(parts) < 3:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /add_channel <discord_id> <telegram_chat[:thread]> <название>",
+            )
+            return
+
         discord_id, telegram_chat_raw, *label_parts = parts
         label = " ".join(label_parts).strip()
         if not label:
@@ -1137,17 +1166,64 @@ class TelegramController:
                         ),
                     )
                     last_message_id = latest.id
-        self._store.add_channel(
+        record = self._store.add_channel(
             discord_id,
             telegram_chat,
             label,
             telegram_thread_id=thread_id,
             last_message_id=last_message_id,
         )
+
+        default_mode = (
+            self._store.get_setting("monitoring.mode") or "messages"
+        ).strip().lower()
+        mode_to_apply = mode_override or default_mode
+        explicit_override = mode_override is not None
+
+        if explicit_override:
+            self._store.set_channel_option(
+                record.id, "monitoring.mode", mode_to_apply
+            )
+        else:
+            if mode_to_apply != default_mode:
+                self._store.set_channel_option(
+                    record.id, "monitoring.mode", mode_to_apply
+                )
+            else:
+                self._store.delete_channel_option(record.id, "monitoring.mode")
+
+        mode_label = "новые сообщения"
+        if mode_to_apply == "messages":
+            self._store.clear_known_pinned_messages(record.id)
+            self._store.set_pinned_synced(record.id, synced=False)
+        else:
+            mode_label = "закреплённые сообщения"
+            pinned_messages = None
+            if token:
+                try:
+                    pinned_messages = list(
+                        await self._discord.fetch_pinned_messages(discord_id)
+                    )
+                except Exception:  # pragma: no cover - network failure logged
+                    logger.exception(
+                        "Не удалось получить закреплённые сообщения канала %s при создании связки",
+                        discord_id,
+                    )
+                    pinned_messages = None
+            if pinned_messages is not None:
+                self._store.set_known_pinned_messages(
+                    record.id, (msg.id for msg in pinned_messages)
+                )
+                self._store.set_pinned_synced(record.id, synced=True)
+            else:
+                self._store.set_known_pinned_messages(record.id, [])
+                self._store.set_pinned_synced(record.id, synced=False)
+
         self._on_change()
         response = f"Связка {discord_id} → {telegram_chat} создана"
         if thread_id is not None:
             response += f" (тема {thread_id})"
+        response += f" • режим: {mode_label}"
         await self._api.send_message(ctx.chat_id, response)
 
     async def cmd_set_thread(self, ctx: CommandContext) -> None:
@@ -1278,6 +1354,7 @@ class TelegramController:
         if normalized_mode == "messages":
             self._store.delete_channel_option(record.id, "monitoring.mode")
             self._store.clear_known_pinned_messages(record.id)
+            self._store.set_pinned_synced(record.id, synced=False)
             self._on_change()
             await self._api.send_message(ctx.chat_id, "Канал переключён на обычные сообщения")
             return
@@ -1298,6 +1375,9 @@ class TelegramController:
                 record.id,
                 (msg.id for msg in pinned_messages),
             )
+            self._store.set_pinned_synced(record.id, synced=True)
+        else:
+            self._store.set_pinned_synced(record.id, synced=False)
         self._on_change()
         await self._api.send_message(
             ctx.chat_id,
@@ -1467,6 +1547,56 @@ async def send_formatted(
             disable_preview=message.disable_preview,
             message_thread_id=thread_id,
         )
+
+
+def _split_html_lines(lines: Sequence[str], limit: int = 3500) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        parts = _split_single_line(line, limit)
+        for part in parts:
+            part_len = len(part)
+            extra = part_len + (1 if current else 0)
+            if current and current_len + extra > limit:
+                chunks.append("\n".join(current))
+                current = [part]
+                current_len = part_len
+            else:
+                if current:
+                    current_len += 1
+                current.append(part)
+                current_len += part_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
+def _split_single_line(text: str, limit: int) -> list[str]:
+    if not text:
+        return [""]
+    if len(text) <= limit:
+        return [text]
+
+    parts: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            parts.append(remaining)
+            break
+        split = remaining.rfind(", ", 0, limit)
+        if split == -1 or split < limit // 2:
+            split = remaining.rfind(" ", 0, limit)
+        if split == -1 or split < limit // 2:
+            split = limit
+        chunk = remaining[:split].rstrip()
+        if not chunk:
+            chunk = remaining[:limit]
+            split = limit
+        parts.append(chunk)
+        remaining = remaining[split:].lstrip(", ")
+    return parts
 
 
 logger = logging.getLogger(__name__)

@@ -59,6 +59,7 @@ class ChannelConfig:
     added_at: datetime | None = None
     pinned_only: bool = False
     known_pinned_ids: Set[str] = field(default_factory=set)
+    pinned_synced: bool = False
 
     def with_updates(
         self,
@@ -83,6 +84,7 @@ class ChannelConfig:
             added_at=added_at if added_at is not None else self.added_at,
             pinned_only=self.pinned_only,
             known_pinned_ids=set(self.known_pinned_ids),
+            pinned_synced=self.pinned_synced,
         )
 
 

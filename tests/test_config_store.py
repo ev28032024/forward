@@ -34,13 +34,16 @@ def test_channel_lifecycle(tmp_path: Path) -> None:
     assert channel.added_at is not None
     assert channel.pinned_only is False
     assert channel.known_pinned_ids == set()
+    assert channel.pinned_synced is False
 
     store.set_channel_option(record.id, "monitoring.mode", "pinned")
     store.set_known_pinned_messages(record.id, ["10", "20"])
+    store.set_pinned_synced(record.id, synced=True)
     configs = store.load_channel_configurations()
     channel = configs[0]
     assert channel.pinned_only is True
     assert channel.known_pinned_ids == {"10", "20"}
+    assert channel.pinned_synced is True
 
 
 def test_filter_management(tmp_path: Path) -> None:

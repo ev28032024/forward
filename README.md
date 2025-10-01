@@ -36,7 +36,7 @@ pip install -e .[dev]
 - `/revoke <id|@user>` — отозвать права (админ).
 
 ### Каналы
-- `/add_channel <discord_id> <telegram_chat> <название>` — создать связку и задать видимое имя (админ).
+- `/add_channel <discord_id> <telegram_chat[:thread]> <название> [messages|pinned]` — создать связку, задать видимое имя и сразу выбрать режим мониторинга (админ).
 - `/remove_channel <discord_id>` — удалить связку (админ).
 - `/list_channels` — список активных связок (админ).
 
