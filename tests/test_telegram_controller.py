@@ -36,6 +36,7 @@ class DummyAPI:
         *,
         parse_mode: str | None = None,
         disable_preview: bool = True,
+        message_thread_id: int | None = None,
     ) -> None:
         self.messages.append((chat_id, text))
 

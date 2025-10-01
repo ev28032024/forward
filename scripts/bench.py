@@ -27,6 +27,7 @@ def _sample_channel() -> "ChannelConfigType":
     return ChannelConfig(
         discord_id="1",
         telegram_chat_id="2",
+        telegram_thread_id=None,
         label="Bench",
         formatting=FormattingOptions(max_length=1000, attachments_style="summary"),
         filters=FilterConfig(),
@@ -149,6 +150,7 @@ async def benchmark_forwarding(iterations: int) -> None:
             *,
             parse_mode: str | None = None,
             disable_preview: bool = True,
+            message_thread_id: int | None = None,
         ) -> None:
             return None
 
@@ -159,7 +161,12 @@ async def benchmark_forwarding(iterations: int) -> None:
 
     for _ in range(iterations):
         formatted = format_discord_message(message, channel)
-        await send_formatted(api, channel.telegram_chat_id, formatted)
+        await send_formatted(
+            api,
+            channel.telegram_chat_id,
+            formatted,
+            thread_id=channel.telegram_thread_id,
+        )
 
 
 def main() -> None:

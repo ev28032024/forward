@@ -188,7 +188,12 @@ class ForwardMonitorApp:
             formatted = format_discord_message(msg, channel)
             await telegram_rate.wait()
             try:
-                await send_formatted(telegram_api, channel.telegram_chat_id, formatted)
+                await send_formatted(
+                    telegram_api,
+                    channel.telegram_chat_id,
+                    formatted,
+                    thread_id=channel.telegram_thread_id,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:

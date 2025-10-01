@@ -30,6 +30,7 @@ class ChannelRecord:
     id: int
     discord_id: str
     telegram_chat_id: str
+    telegram_thread_id: int | None
     label: str
     active: bool
     last_message_id: str | None
@@ -74,6 +75,7 @@ class ConfigStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     discord_id TEXT NOT NULL UNIQUE,
                     telegram_chat_id TEXT NOT NULL,
+                    telegram_thread_id TEXT,
                     label TEXT DEFAULT '',
                     active INTEGER DEFAULT 1,
                     last_message_id TEXT
@@ -97,6 +99,7 @@ class ConfigStore:
                 """
             )
             self._migrate_admins(cur)
+            self._migrate_channels(cur)
             self._conn.commit()
 
     def _migrate_admins(self, cur: sqlite3.Cursor) -> None:
@@ -133,6 +136,16 @@ class ConfigStore:
             )
             return
         raise RuntimeError("Unsupported admins schema detected")
+
+    def _migrate_channels(self, cur: sqlite3.Cursor) -> None:
+        cur.execute("PRAGMA table_info(channels)")
+        columns = {str(row[1]) for row in cur.fetchall()}
+        if not columns:
+            return
+        if "telegram_thread_id" not in columns:
+            cur.execute(
+                "ALTER TABLE channels ADD COLUMN telegram_thread_id TEXT"
+            )
 
     # ------------------------------------------------------------------
     # Basic settings
@@ -312,11 +325,27 @@ class ConfigStore:
     # ------------------------------------------------------------------
     # Channels
     # ------------------------------------------------------------------
-    def add_channel(self, discord_id: str, telegram_chat_id: str, label: str = "") -> ChannelRecord:
+    def add_channel(
+        self,
+        discord_id: str,
+        telegram_chat_id: str,
+        label: str = "",
+        *,
+        telegram_thread_id: int | None = None,
+    ) -> ChannelRecord:
         with closing(self._conn.cursor()) as cur:
             cur.execute(
-                "INSERT INTO channels(discord_id, telegram_chat_id, label) VALUES(?, ?, ?)",
-                (discord_id, telegram_chat_id, label),
+                (
+                    "INSERT INTO channels("
+                    "discord_id, telegram_chat_id, label, telegram_thread_id"
+                    ") VALUES(?, ?, ?, ?)"
+                ),
+                (
+                    discord_id,
+                    telegram_chat_id,
+                    label,
+                    str(int(telegram_thread_id)) if telegram_thread_id is not None else None,
+                ),
             )
             channel_id_raw = cur.lastrowid
             if channel_id_raw is None:
@@ -327,6 +356,7 @@ class ConfigStore:
             id=channel_id,
             discord_id=discord_id,
             telegram_chat_id=telegram_chat_id,
+            telegram_thread_id=telegram_thread_id,
             label=label,
             active=True,
             last_message_id=None,
@@ -342,8 +372,10 @@ class ConfigStore:
     def list_channels(self) -> list[ChannelRecord]:
         with closing(self._conn.cursor()) as cur:
             cur.execute(
-                "SELECT id, discord_id, telegram_chat_id, label, active, last_message_id"
-                " FROM channels ORDER BY discord_id"
+                (
+                    "SELECT id, discord_id, telegram_chat_id, telegram_thread_id, "
+                    "label, active, last_message_id FROM channels ORDER BY discord_id"
+                )
             )
             rows = cur.fetchall()
         return [
@@ -351,6 +383,7 @@ class ConfigStore:
                 id=int(row["id"]),
                 discord_id=str(row["discord_id"]),
                 telegram_chat_id=str(row["telegram_chat_id"]),
+                telegram_thread_id=_parse_thread_id(row["telegram_thread_id"]),
                 label=str(row["label"] or ""),
                 active=bool(row["active"]),
                 last_message_id=str(row["last_message_id"]) if row["last_message_id"] else None,
@@ -361,8 +394,10 @@ class ConfigStore:
     def get_channel(self, discord_id: str) -> ChannelRecord | None:
         with closing(self._conn.cursor()) as cur:
             cur.execute(
-                "SELECT id, discord_id, telegram_chat_id, label, active, last_message_id"
-                " FROM channels WHERE discord_id=?",
+                (
+                    "SELECT id, discord_id, telegram_chat_id, telegram_thread_id, "
+                    "label, active, last_message_id FROM channels WHERE discord_id=?"
+                ),
                 (discord_id,),
             )
             row = cur.fetchone()
@@ -372,6 +407,7 @@ class ConfigStore:
             id=int(row["id"]),
             discord_id=str(row["discord_id"]),
             telegram_chat_id=str(row["telegram_chat_id"]),
+            telegram_thread_id=_parse_thread_id(row["telegram_thread_id"]),
             label=str(row["label"] or ""),
             active=bool(row["active"]),
             last_message_id=str(row["last_message_id"]) if row["last_message_id"] else None,
@@ -395,6 +431,17 @@ class ConfigStore:
             cur.execute(
                 "DELETE FROM channel_options WHERE channel_id=? AND option_key=?",
                 (channel_id, option_key),
+            )
+            self._conn.commit()
+
+    def set_channel_thread(self, channel_id: int, thread_id: int | None) -> None:
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                "UPDATE channels SET telegram_thread_id=? WHERE id=?",
+                (
+                    str(int(thread_id)) if thread_id is not None else None,
+                    channel_id,
+                ),
             )
             self._conn.commit()
 
@@ -513,6 +560,7 @@ class ConfigStore:
                 ChannelConfig(
                     discord_id=record.discord_id,
                     telegram_chat_id=record.telegram_chat_id,
+                    telegram_thread_id=record.telegram_thread_id,
                     label=record.label or record.discord_id,
                     formatting=channel_formatting,
                     filters=filters,
@@ -561,6 +609,16 @@ class ConfigStore:
 _TEXT_FILTER_TYPES = {"whitelist", "blacklist"}
 _SENDER_FILTER_TYPES = {"allowed_senders", "blocked_senders"}
 _TYPE_FILTER_TYPES = {"allowed_types", "blocked_types"}
+
+
+def _parse_thread_id(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed
 
 
 def normalize_filter_value(filter_type: str, value: str) -> tuple[str, str] | None:
