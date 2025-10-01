@@ -365,6 +365,8 @@ class ConfigStore:
                 raise RuntimeError("Failed to insert channel record")
             channel_id = int(channel_id_raw)
             self._conn.commit()
+        # Ensure pinned state is initialised lazily to avoid replaying all pins.
+        self.set_channel_option(channel_id, "state.pinned_synced", "false")
         return ChannelRecord(
             id=channel_id,
             discord_id=discord_id,
@@ -485,6 +487,14 @@ class ConfigStore:
 
     def clear_known_pinned_messages(self, channel_id: int) -> None:
         self.delete_channel_option(channel_id, "state.pinned_ids")
+        self.delete_channel_option(channel_id, "state.pinned_synced")
+
+    def set_pinned_synced(self, channel_id: int, *, synced: bool) -> None:
+        self.set_channel_option(
+            channel_id,
+            "state.pinned_synced",
+            "true" if synced else "false",
+        )
 
     # ------------------------------------------------------------------
     # Filters
@@ -583,7 +593,7 @@ class ConfigStore:
             channel_options = dict(self.iter_channel_options(record.id))
             channel_formatting = _formatting_from_options(formatting, channel_options)
             filters = default_filters.merge(self._load_filter_config(record.id))
-            pinned_only, known_pinned_ids = _monitoring_from_options(
+            pinned_only, known_pinned_ids, pinned_synced = _monitoring_from_options(
                 defaults.get("monitoring", {}), channel_options
             )
             configs.append(
@@ -600,6 +610,7 @@ class ConfigStore:
                     added_at=record.added_at,
                     pinned_only=pinned_only,
                     known_pinned_ids=known_pinned_ids,
+                    pinned_synced=pinned_synced,
                 )
             )
         return configs
@@ -739,13 +750,25 @@ def _filter_target(filters: FilterConfig, filter_type: str) -> set[str] | None:
 
 def _monitoring_from_options(
     defaults: dict[str, str], options: dict[str, str]
-) -> tuple[bool, set[str]]:
+) -> tuple[bool, set[str], bool]:
     default_mode = defaults.get("mode", "messages").strip().lower()
     mode_raw = options.get("monitoring.mode", default_mode)
     mode = str(mode_raw).strip().lower()
     pinned_only = mode == "pinned"
     known_pinned = _parse_known_pinned(options.get("state.pinned_ids"))
-    return pinned_only, known_pinned
+    pinned_synced = _parse_bool_option(options.get("state.pinned_synced"))
+    return pinned_only, known_pinned, pinned_synced
+
+
+def _parse_bool_option(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return False
 
 
 def _parse_known_pinned(payload: str | None) -> set[str]:

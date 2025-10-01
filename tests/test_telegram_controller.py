@@ -141,7 +141,7 @@ def test_grant_admin_by_username(tmp_path: Path) -> None:
         )
         store.remember_user(newcomer_ctx.user_id, newcomer_ctx.handle)
         await controller._dispatch("status", newcomer_ctx)
-        assert any("Статус" in text for _, text in api.messages)
+        assert any("статус" in text.lower() for _, text in api.messages)
 
     asyncio.run(runner())
 

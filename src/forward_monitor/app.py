@@ -274,6 +274,17 @@ class ForwardMonitorApp:
 
         current_ids = {msg.id for msg in messages}
         previous_known = set(channel.known_pinned_ids)
+
+        if not channel.pinned_synced:
+            if channel.storage_id is not None:
+                self._store.set_known_pinned_messages(channel.storage_id, current_ids)
+                self._store.set_pinned_synced(channel.storage_id, synced=True)
+                channel.known_pinned_ids = set(current_ids)
+                channel.pinned_synced = True
+            else:
+                channel.pinned_synced = True
+            return
+
         new_ids = current_ids - previous_known
 
         if not messages:
@@ -339,7 +350,9 @@ class ForwardMonitorApp:
 
         if updated_known != channel.known_pinned_ids:
             self._store.set_known_pinned_messages(channel.storage_id, updated_known)
+            self._store.set_pinned_synced(channel.storage_id, synced=True)
             channel.known_pinned_ids = updated_known
+            channel.pinned_synced = True
 
     async def _sleep_within(self, runtime: RuntimeOptions) -> None:
         delay_seconds = 0.0

@@ -28,5 +28,6 @@ def test_links_style_shows_urls() -> None:
     )
     formatted = format_discord_message(message, channel)
     body = formatted.text.replace("\\", "")
+    assert formatted.parse_mode == "HTML"
     assert "https://example.com/a.png" in body
-    assert "Вложения" not in body
+    assert "Ссылки на вложения" in body

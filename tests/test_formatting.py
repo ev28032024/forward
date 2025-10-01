@@ -40,7 +40,8 @@ def test_formatting_includes_label_and_author() -> None:
         role_ids=set(),
     )
     formatted = format_discord_message(message, sample_channel())
-    assert formatted.text.startswith("Label • Author")
+    assert formatted.parse_mode == "HTML"
+    assert formatted.text.startswith("<b>Label</b> • <b>Author</b>")
     assert "original content" in formatted.text
     assert "file.txt" in formatted.text
 
@@ -79,5 +80,6 @@ def test_channel_mentions_converted_in_content() -> None:
 
     formatted = format_discord_message(message, channel)
 
+    assert formatted.parse_mode == "HTML"
     assert "#1234567890" in formatted.text
     assert "See" in formatted.text

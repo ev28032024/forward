@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
@@ -20,9 +21,9 @@ def format_discord_message(
 
     formatting = channel.formatting
     content = _sanitize_content(message.content or "")
-    embed_text = "\n".join(_clean_embed_text(message.embeds))
-    attachment_lines = list(
-        _summarise_attachments(message.attachments, formatting.attachments_style)
+    embed_blocks = list(_clean_embed_text(message.embeds))
+    attachments_block = _render_attachments_block(
+        message.attachments, formatting.attachments_style
     )
 
     blocks: list[str] = []
@@ -31,18 +32,19 @@ def format_discord_message(
         blocks.append(chip)
 
     if content:
-        blocks.append(content)
-    if embed_text:
-        blocks.append(embed_text)
-    if attachment_lines:
-        blocks.extend(attachment_lines)
-    joined = "\n".join(line for line in blocks if line)
-    chunks = _chunk_text(joined, formatting.max_length, formatting.ellipsis)
+        blocks.append(_escape_multiline(content))
+    for embed in embed_blocks:
+        blocks.append(_escape_multiline(embed))
+    if attachments_block:
+        blocks.append(attachments_block)
+
+    combined = "\n\n".join(block for block in blocks if block)
+    chunks = _chunk_html_text(combined, formatting.max_length, formatting.ellipsis)
 
     return FormattedTelegramMessage(
         text=chunks[0] if chunks else "",
         extra_messages=tuple(chunks[1:]),
-        parse_mode=None,
+        parse_mode="HTML",
         disable_preview=formatting.disable_preview,
     )
 
@@ -104,9 +106,24 @@ def _summarise_attachments(
             parts = [part for part in (filename, content_type, size_text, url) if part]
             lines.append(" • ".join(parts))
     if lines:
-        header = "Вложения:" if style == "summary" else "Ссылки на вложения:"
+        header = "Вложения" if style == "summary" else "Ссылки на вложения"
         return [header, *lines]
     return []
+
+
+def _render_attachments_block(
+    attachments: Sequence[AttachmentPayload], style: str
+) -> str:
+    summary = list(_summarise_attachments(attachments, style))
+    if not summary:
+        return ""
+    header_text = summary[0].rstrip(":")
+    icon = "🔗" if style.lower() == "links" else "📎"
+    header = f"{icon} <b>{_escape(header_text)}</b>"
+    lines = [f"• {_escape(line)}" for line in summary[1:]]
+    if lines:
+        return "\n".join([header, *lines])
+    return header
 
 
 def _human_size(value: float | int | None) -> str:
@@ -122,15 +139,19 @@ def _human_size(value: float | int | None) -> str:
 
 
 def _build_chip(label: str, author: str) -> str:
-    parts = [part for part in (label, author) if part]
-    if not parts:
-        return ""
+    parts: list[str] = []
+    if label:
+        parts.append(f"<b>{_escape(label)}</b>")
+    if author:
+        parts.append(f"<b>{_escape(author)}</b>")
     return " • ".join(parts)
 
 
-def _chunk_text(text: str, limit: int, ellipsis: str) -> list[str]:
+def _chunk_html_text(text: str, limit: int, ellipsis: str) -> list[str]:
+    if not text:
+        return []
     if limit <= 0 or len(text) <= limit:
-        return [text] if text else []
+        return [text]
 
     remaining = text
     chunks: list[str] = []
@@ -146,13 +167,26 @@ def _chunk_text(text: str, limit: int, ellipsis: str) -> list[str]:
             split = limit
 
         chunk = remaining[:split].rstrip()
-        if chunk and split < len(remaining):
-            chunk = f"{chunk}{ellipsis}"
-        elif not chunk:
+        tail = remaining[split:].lstrip("\n")
+        if chunk:
+            if tail:
+                chunk = f"{chunk}{ellipsis}"
+            chunks.append(chunk)
+        else:
             chunk = remaining[:limit]
-        chunks.append(chunk)
-        remaining = remaining[split:].lstrip()
+            chunk = f"{chunk}{ellipsis}" if len(remaining) > limit else chunk
+            chunks.append(chunk)
+            tail = remaining[limit:]
+        remaining = tail.lstrip()
     return chunks
+
+
+def _escape(text: str) -> str:
+    return html.escape(text, quote=False)
+
+
+def _escape_multiline(text: str) -> str:
+    return "\n".join(_escape(line) for line in text.splitlines())
 
 
 _CHANNEL_MENTION_RE = re.compile(r"<#([0-9]+)>")

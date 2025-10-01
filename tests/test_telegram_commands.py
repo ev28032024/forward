@@ -147,11 +147,20 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
         await controller._dispatch("set_monitoring", admin)
         configs = store.load_channel_configurations()
         assert configs[0].pinned_only is True
+        assert configs[0].pinned_synced is True
 
         admin.args = "123 messages"
         await controller._dispatch("set_monitoring", admin)
         configs = store.load_channel_configurations()
         assert configs[0].pinned_only is False
+        assert configs[0].pinned_synced is False
+
+        admin.args = "999 111 Label pinned"
+        dummy_client.messages = []
+        await controller._dispatch("add_channel", admin)
+        configs = [cfg for cfg in store.load_channel_configurations() if cfg.discord_id == "999"]
+        assert configs and configs[0].pinned_only is True
+        assert configs[0].pinned_synced is True
 
     import asyncio
 
