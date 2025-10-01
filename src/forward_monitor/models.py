@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 
@@ -51,6 +52,7 @@ class ChannelConfig:
     last_message_id: str | None
     active: bool = True
     storage_id: int | None = None
+    added_at: datetime | None = None
 
     def with_updates(
         self,
@@ -58,6 +60,7 @@ class ChannelConfig:
         formatting: FormattingOptions | None = None,
         filters: FilterConfig | None = None,
         last_message_id: str | None = None,
+        added_at: datetime | None = None,
     ) -> "ChannelConfig":
         return ChannelConfig(
             discord_id=self.discord_id,
@@ -71,6 +74,7 @@ class ChannelConfig:
             ),
             active=self.active,
             storage_id=self.storage_id,
+            added_at=added_at if added_at is not None else self.added_at,
         )
 
 

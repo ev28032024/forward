@@ -7,6 +7,7 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import aiohttp
@@ -18,6 +19,18 @@ from .formatting import format_discord_message
 from .models import ChannelConfig, NetworkOptions, RuntimeOptions
 from .telegram import TelegramAPI, TelegramController, send_formatted
 from .utils import RateLimiter, parse_delay_setting
+
+
+def _parse_discord_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +170,9 @@ class ForwardMonitorApp:
         if not channel.active:
             return
 
+        baseline = channel.added_at
+        bootstrap = channel.last_message_id is None
+
         try:
             messages = await discord_client.fetch_messages(
                 channel.discord_id,
@@ -181,12 +197,22 @@ class ForwardMonitorApp:
         engine = FilterEngine(channel.filters)
         last_seen = channel.last_message_id
         for msg in ordered:
-            decision = engine.evaluate(msg)
             last_seen = msg.id
+            if self._refresh_event.is_set():
+                break
+            if bootstrap:
+                if baseline is not None:
+                    msg_time = _parse_discord_timestamp(msg.timestamp)
+                    if msg_time is not None and msg_time < baseline:
+                        continue
+                bootstrap = False
+            decision = engine.evaluate(msg)
             if not decision.allowed:
                 continue
             formatted = format_discord_message(msg, channel)
             await telegram_rate.wait()
+            if self._refresh_event.is_set():
+                break
             try:
                 await send_formatted(
                     telegram_api,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
@@ -34,6 +35,7 @@ class ChannelRecord:
     label: str
     active: bool
     last_message_id: str | None
+    added_at: datetime | None
 
 
 class ConfigStore:
@@ -78,7 +80,8 @@ class ConfigStore:
                     telegram_thread_id TEXT,
                     label TEXT DEFAULT '',
                     active INTEGER DEFAULT 1,
-                    last_message_id TEXT
+                    last_message_id TEXT,
+                    added_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS channel_options (
@@ -146,6 +149,9 @@ class ConfigStore:
             cur.execute(
                 "ALTER TABLE channels ADD COLUMN telegram_thread_id TEXT"
             )
+            columns.add("telegram_thread_id")
+        if "added_at" not in columns:
+            cur.execute("ALTER TABLE channels ADD COLUMN added_at TEXT")
 
     # ------------------------------------------------------------------
     # Basic settings
@@ -332,19 +338,25 @@ class ConfigStore:
         label: str = "",
         *,
         telegram_thread_id: int | None = None,
+        last_message_id: str | None = None,
+        added_at: datetime | None = None,
     ) -> ChannelRecord:
+        timestamp = added_at or datetime.now(timezone.utc)
         with closing(self._conn.cursor()) as cur:
             cur.execute(
                 (
                     "INSERT INTO channels("
-                    "discord_id, telegram_chat_id, label, telegram_thread_id"
-                    ") VALUES(?, ?, ?, ?)"
+                    "discord_id, telegram_chat_id, label, telegram_thread_id, "
+                    "last_message_id, added_at"
+                    ") VALUES(?, ?, ?, ?, ?, ?)"
                 ),
                 (
                     discord_id,
                     telegram_chat_id,
                     label,
                     str(int(telegram_thread_id)) if telegram_thread_id is not None else None,
+                    last_message_id,
+                    timestamp.isoformat(),
                 ),
             )
             channel_id_raw = cur.lastrowid
@@ -359,7 +371,8 @@ class ConfigStore:
             telegram_thread_id=telegram_thread_id,
             label=label,
             active=True,
-            last_message_id=None,
+            last_message_id=last_message_id,
+            added_at=timestamp,
         )
 
     def remove_channel(self, discord_id: str) -> bool:
@@ -374,7 +387,7 @@ class ConfigStore:
             cur.execute(
                 (
                     "SELECT id, discord_id, telegram_chat_id, telegram_thread_id, "
-                    "label, active, last_message_id FROM channels ORDER BY discord_id"
+                    "label, active, last_message_id, added_at FROM channels ORDER BY discord_id"
                 )
             )
             rows = cur.fetchall()
@@ -387,6 +400,7 @@ class ConfigStore:
                 label=str(row["label"] or ""),
                 active=bool(row["active"]),
                 last_message_id=str(row["last_message_id"]) if row["last_message_id"] else None,
+                added_at=_parse_timestamp(row["added_at"]),
             )
             for row in rows
         ]
@@ -396,7 +410,7 @@ class ConfigStore:
             cur.execute(
                 (
                     "SELECT id, discord_id, telegram_chat_id, telegram_thread_id, "
-                    "label, active, last_message_id FROM channels WHERE discord_id=?"
+                    "label, active, last_message_id, added_at FROM channels WHERE discord_id=?"
                 ),
                 (discord_id,),
             )
@@ -411,6 +425,7 @@ class ConfigStore:
             label=str(row["label"] or ""),
             active=bool(row["active"]),
             last_message_id=str(row["last_message_id"]) if row["last_message_id"] else None,
+            added_at=_parse_timestamp(row["added_at"]),
         )
 
     def set_channel_option(self, channel_id: int, option_key: str, option_value: str) -> None:
@@ -567,6 +582,7 @@ class ConfigStore:
                     last_message_id=record.last_message_id,
                     active=record.active,
                     storage_id=record.id,
+                    added_at=record.added_at,
                 )
             )
         return configs
@@ -619,6 +635,24 @@ def _parse_thread_id(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        text = str(value)
+    except (TypeError, ValueError):
+        return None
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
 
 def normalize_filter_value(filter_type: str, value: str) -> tuple[str, str] | None:
