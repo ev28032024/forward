@@ -1087,11 +1087,34 @@ class TelegramController:
         if self._store.get_channel(discord_id):
             await self._api.send_message(ctx.chat_id, "Канал уже существует")
             return
+        last_message_id: str | None = None
+        token = self._store.get_setting("discord.token")
+        if token:
+            network = self._store.load_network_options()
+            self._discord.set_token(token)
+            self._discord.set_network_options(network)
+            try:
+                messages = await self._discord.fetch_messages(discord_id, limit=1)
+            except Exception:
+                logger.exception(
+                    "Не удалось получить последнее сообщение канала %s при создании связки",
+                    discord_id,
+                )
+            else:
+                if messages:
+                    latest = max(
+                        messages,
+                        key=lambda msg: (
+                            (int(msg.id), msg.id) if msg.id.isdigit() else (0, msg.id)
+                        ),
+                    )
+                    last_message_id = latest.id
         self._store.add_channel(
             discord_id,
             telegram_chat,
             label,
             telegram_thread_id=thread_id,
+            last_message_id=last_message_id,
         )
         self._on_change()
         response = f"Связка {discord_id} → {telegram_chat} создана"

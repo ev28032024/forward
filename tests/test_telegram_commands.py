@@ -6,7 +6,7 @@ from typing import Iterable, cast
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
-from forward_monitor.models import NetworkOptions
+from forward_monitor.models import DiscordMessage, NetworkOptions
 from forward_monitor.telegram import CommandContext, TelegramController
 
 
@@ -48,6 +48,14 @@ class DummyDiscordClient:
     def __init__(self) -> None:
         self.tokens: list[str] = []
         self.proxies: list[str | None] = []
+        self.fetch_calls: list[tuple[str, int, str | None]] = []
+        self.messages: list[DiscordMessage] = []
+
+    def set_token(self, token: str | None) -> None:
+        self.tokens.append(token or "")
+
+    def set_network_options(self, options: NetworkOptions) -> None:
+        self.proxies.append(options.discord_proxy_url)
 
     async def verify_token(
         self, token: str, *, network: NetworkOptions | None = None
@@ -59,16 +67,41 @@ class DummyDiscordClient:
         self.proxies.append(getattr(network, "discord_proxy_url", None))
         return ProxyCheckResult(ok=True)
 
+    async def fetch_messages(
+        self,
+        channel_id: str,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+    ) -> list[DiscordMessage]:
+        self.fetch_calls.append((channel_id, limit, after))
+        return list(self.messages)
+
 
 def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
         api = DummyAPI()
+
+        dummy_client = DummyDiscordClient()
+        dummy_client.messages = [
+            DiscordMessage(
+                id="100",
+                channel_id="123",
+                author_id="1",
+                author_name="tester",
+                content="",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+            )
+        ]
 
         controller = TelegramController(
             api,
             store,
-            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            discord_client=cast(DiscordClient, dummy_client),
             on_change=lambda: None,
         )
         admin = CommandContext(
@@ -86,6 +119,7 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
         record = store.get_channel("123")
         assert record is not None
         assert record.telegram_thread_id == 789
+        assert record.last_message_id == "100"
 
         admin.args = "123 clear"
         await controller._dispatch("set_thread", admin)
