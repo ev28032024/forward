@@ -174,10 +174,19 @@ class ForwardMonitorApp:
         if not messages:
             return
 
+        warm_start = channel.last_message_id is None
+
         def sort_key(message_id: str) -> tuple[int, str]:
             return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
 
         ordered = sorted(messages, key=lambda msg: sort_key(msg.id))
+        if warm_start:
+            latest_id = ordered[-1].id
+            if channel.storage_id is not None:
+                self._store.set_last_message(channel.storage_id, latest_id)
+            channel.last_message_id = latest_id
+            return
+
         engine = FilterEngine(channel.filters)
         last_seen = channel.last_message_id
         for msg in ordered:

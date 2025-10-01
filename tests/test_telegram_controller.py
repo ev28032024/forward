@@ -6,7 +6,7 @@ from typing import Iterable, cast
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
-from forward_monitor.models import NetworkOptions
+from forward_monitor.models import DiscordMessage, NetworkOptions
 from forward_monitor.telegram import BOT_COMMANDS, CommandContext, TelegramController
 
 
@@ -48,6 +48,26 @@ class DummyDiscordClient:
     def __init__(self) -> None:
         self.tokens: list[str] = []
         self.proxies: list[str | None] = []
+        self.set_tokens: list[str | None] = []
+        self.network_options: list[NetworkOptions] = []
+        self.fetch_requests: list[tuple[str, int, str | None]] = []
+        self.responses: dict[str, list[DiscordMessage]] = {}
+
+    def set_token(self, token: str | None) -> None:
+        self.set_tokens.append(token)
+
+    def set_network_options(self, options: NetworkOptions) -> None:
+        self.network_options.append(options)
+
+    async def fetch_messages(
+        self,
+        channel_id: str,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+    ) -> tuple[DiscordMessage, ...]:
+        self.fetch_requests.append((channel_id, limit, after))
+        return tuple(self.responses.get(channel_id, []))
 
     async def verify_token(
         self, token: str, *, network: NetworkOptions | None = None
@@ -234,5 +254,60 @@ def test_controller_registers_bot_commands(tmp_path: Path) -> None:
         await controller.run()
         expected = [(info.name, info.summary) for info in BOT_COMMANDS]
         assert api.commands == expected
+
+    asyncio.run(runner())
+
+
+def test_my_chat_member_updates_control_channel_state(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "chat.sqlite")
+        api = DummyAPI()
+        discord = DummyDiscordClient()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, discord),
+            on_change=lambda: None,
+        )
+
+        store.set_setting("discord.token", "TOKEN")
+        record = store.add_channel("42", "777", "Test")
+        store.set_channel_active(record.id, False)
+
+        discord.responses["42"] = [
+            DiscordMessage(
+                id="500",
+                channel_id="42",
+                author_id="1",
+                author_name="tester",
+                content="hello",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+            )
+        ]
+
+        update = {
+            "my_chat_member": {
+                "chat": {"id": 777},
+                "old_chat_member": {"status": "left"},
+                "new_chat_member": {"status": "member"},
+            }
+        }
+        await controller._handle_update(update)
+
+        refreshed = store.get_channel("42")
+        assert refreshed is not None
+        assert refreshed.active is True
+        assert refreshed.last_message_id == "500"
+        assert discord.fetch_requests == [("42", 1, None)]
+
+        update["my_chat_member"]["old_chat_member"] = {"status": "member"}
+        update["my_chat_member"]["new_chat_member"] = {"status": "kicked"}
+        await controller._handle_update(update)
+
+        refreshed = store.get_channel("42")
+        assert refreshed is not None
+        assert refreshed.active is False
 
     asyncio.run(runner())

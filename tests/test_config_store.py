@@ -65,3 +65,24 @@ def test_filter_management(tmp_path: Path) -> None:
             "blocked_types",
         )
     )
+
+
+def test_channel_activation_and_lookup(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "activation.sqlite")
+
+    first = store.add_channel("1", "100", "First")
+    second = store.add_channel("2", "100", "Second")
+    third = store.add_channel("3", "200", "Third")
+
+    store.set_channel_active(first.id, False)
+    store.set_channel_active(second.id, True)
+    store.set_channel_active(third.id, False)
+
+    chat_channels = store.list_channels_by_chat("100")
+    assert {record.discord_id for record in chat_channels} == {"1", "2"}
+    assert {record.active for record in chat_channels} == {False, True}
+
+    store.set_channel_active(first.id, True)
+    updated = store.get_channel("1")
+    assert updated is not None
+    assert updated.active is True

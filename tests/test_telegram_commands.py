@@ -6,7 +6,7 @@ from typing import Iterable, cast
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
-from forward_monitor.models import NetworkOptions
+from forward_monitor.models import DiscordMessage, NetworkOptions
 from forward_monitor.telegram import CommandContext, TelegramController
 
 
@@ -48,6 +48,26 @@ class DummyDiscordClient:
     def __init__(self) -> None:
         self.tokens: list[str] = []
         self.proxies: list[str | None] = []
+        self.set_tokens: list[str | None] = []
+        self.network_options: list[NetworkOptions] = []
+        self.fetch_requests: list[tuple[str, int, str | None]] = []
+        self.responses: dict[str, list[DiscordMessage]] = {}
+
+    def set_token(self, token: str | None) -> None:
+        self.set_tokens.append(token)
+
+    def set_network_options(self, options: NetworkOptions) -> None:
+        self.network_options.append(options)
+
+    async def fetch_messages(
+        self,
+        channel_id: str,
+        *,
+        limit: int = 50,
+        after: str | None = None,
+    ) -> tuple[DiscordMessage, ...]:
+        self.fetch_requests.append((channel_id, limit, after))
+        return tuple(self.responses.get(channel_id, []))
 
     async def verify_token(
         self, token: str, *, network: NetworkOptions | None = None

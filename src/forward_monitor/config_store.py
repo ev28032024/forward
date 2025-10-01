@@ -369,6 +369,14 @@ class ConfigStore:
             self._conn.commit()
         return deleted
 
+    def set_channel_active(self, channel_id: int, active: bool) -> None:
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                "UPDATE channels SET active=? WHERE id=?",
+                (1 if active else 0, channel_id),
+            )
+            self._conn.commit()
+
     def list_channels(self) -> list[ChannelRecord]:
         with closing(self._conn.cursor()) as cur:
             cur.execute(
@@ -376,6 +384,29 @@ class ConfigStore:
                     "SELECT id, discord_id, telegram_chat_id, telegram_thread_id, "
                     "label, active, last_message_id FROM channels ORDER BY discord_id"
                 )
+            )
+            rows = cur.fetchall()
+        return [
+            ChannelRecord(
+                id=int(row["id"]),
+                discord_id=str(row["discord_id"]),
+                telegram_chat_id=str(row["telegram_chat_id"]),
+                telegram_thread_id=_parse_thread_id(row["telegram_thread_id"]),
+                label=str(row["label"] or ""),
+                active=bool(row["active"]),
+                last_message_id=str(row["last_message_id"]) if row["last_message_id"] else None,
+            )
+            for row in rows
+        ]
+
+    def list_channels_by_chat(self, telegram_chat_id: str) -> list[ChannelRecord]:
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                (
+                    "SELECT id, discord_id, telegram_chat_id, telegram_thread_id, "
+                    "label, active, last_message_id FROM channels WHERE telegram_chat_id=?"
+                ),
+                (telegram_chat_id,),
             )
             rows = cur.fetchall()
         return [

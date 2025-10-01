@@ -342,6 +342,10 @@ class TelegramController:
         self._running = False
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
+        my_chat_member = update.get("my_chat_member")
+        if isinstance(my_chat_member, dict):
+            await self._handle_my_chat_member(my_chat_member)
+
         message = update.get("message") or update.get("edited_message")
         if not message:
             return
@@ -1087,12 +1091,13 @@ class TelegramController:
         if self._store.get_channel(discord_id):
             await self._api.send_message(ctx.chat_id, "Канал уже существует")
             return
-        self._store.add_channel(
+        record = self._store.add_channel(
             discord_id,
             telegram_chat,
             label,
             telegram_thread_id=thread_id,
         )
+        await self._synchronize_chat_offsets(record.telegram_chat_id)
         self._on_change()
         response = f"Связка {discord_id} → {telegram_chat} создана"
         if thread_id is not None:
@@ -1294,6 +1299,70 @@ class TelegramController:
         self._on_change()
         await self._api.send_message(ctx.chat_id, "Обновлено")
 
+    async def _handle_my_chat_member(self, payload: dict[str, Any]) -> None:
+        chat = payload.get("chat")
+        if not isinstance(chat, dict):
+            return
+        chat_id_raw = chat.get("id")
+        if chat_id_raw is None:
+            return
+        chat_id = str(chat_id_raw)
+        new_status = str((payload.get("new_chat_member") or {}).get("status") or "").lower()
+        old_status = str((payload.get("old_chat_member") or {}).get("status") or "").lower()
+        if new_status == old_status:
+            return
+        if new_status in _ACTIVE_STATUSES:
+            activated = self._update_chat_active(chat_id, True)
+            synchronized = await self._synchronize_chat_offsets(chat_id)
+            if activated or synchronized:
+                self._on_change()
+        elif new_status in _INACTIVE_STATUSES:
+            if self._update_chat_active(chat_id, False):
+                self._on_change()
+
+    def _update_chat_active(self, chat_id: str, active: bool) -> bool:
+        changed = False
+        for record in self._store.list_channels_by_chat(chat_id):
+            if record.active == active:
+                continue
+            self._store.set_channel_active(record.id, active)
+            changed = True
+        return changed
+
+    async def _synchronize_chat_offsets(self, chat_id: str) -> bool:
+        records = self._store.list_channels_by_chat(chat_id)
+        if not records:
+            return False
+        token = self._store.get_setting("discord.token")
+        if not token:
+            return False
+        self._discord.set_token(token)
+        self._discord.set_network_options(self._store.load_network_options())
+        updated = False
+        for record in records:
+            if record.last_message_id is not None:
+                continue
+            try:
+                messages = await self._discord.fetch_messages(
+                    record.discord_id,
+                    limit=1,
+                )
+            except Exception:
+                logger.exception(
+                    "Не удалось синхронизировать канал %s при подключении чата %s",
+                    record.discord_id,
+                    chat_id,
+                )
+                continue
+            if not messages:
+                continue
+            last_seen = messages[0].id
+            if not last_seen:
+                continue
+            self._store.set_last_message(record.id, last_seen)
+            updated = True
+        return updated
+
     def _resolve_channel_ids(self, key: str) -> list[int]:
         key_lower = key.lower()
         if key_lower in {"all", "*"}:
@@ -1335,3 +1404,7 @@ async def send_formatted(
 
 
 logger = logging.getLogger(__name__)
+
+
+_ACTIVE_STATUSES = {"member", "administrator"}
+_INACTIVE_STATUSES = {"left", "kicked"}
