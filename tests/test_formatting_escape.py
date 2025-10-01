@@ -8,6 +8,7 @@ def test_markdown_escape_preserves_special_chars() -> None:
     channel = ChannelConfig(
         discord_id="1",
         telegram_chat_id="2",
+        telegram_thread_id=None,
         label="Test",
         formatting=FormattingOptions(),
         filters=FilterConfig(),

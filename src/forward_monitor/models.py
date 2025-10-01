@@ -44,6 +44,7 @@ class ChannelConfig:
 
     discord_id: str
     telegram_chat_id: str
+    telegram_thread_id: int | None
     label: str
     formatting: FormattingOptions
     filters: FilterConfig
@@ -61,6 +62,7 @@ class ChannelConfig:
         return ChannelConfig(
             discord_id=self.discord_id,
             telegram_chat_id=self.telegram_chat_id,
+            telegram_thread_id=self.telegram_thread_id,
             label=self.label,
             formatting=formatting or self.formatting,
             filters=filters or self.filters,

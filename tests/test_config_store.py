@@ -10,9 +10,13 @@ def test_channel_lifecycle(tmp_path: Path) -> None:
     store.set_setting("formatting.disable_preview", "false")
     store.add_filter(0, "whitelist", "hello")
 
-    record = store.add_channel("123", "456", "Label")
+    record = store.add_channel("123", "456", "Label", telegram_thread_id=777)
     store.set_channel_option(record.id, "formatting.attachments_style", "links")
     store.set_last_message(record.id, "900")
+
+    stored_record = store.get_channel("123")
+    assert stored_record is not None
+    assert stored_record.telegram_thread_id == 777
 
     configs = store.load_channel_configurations()
     assert len(configs) == 1
@@ -22,6 +26,7 @@ def test_channel_lifecycle(tmp_path: Path) -> None:
     assert channel.formatting.attachments_style == "links"
     assert channel.filters.whitelist == {"hello"}
     assert channel.last_message_id == "900"
+    assert channel.telegram_thread_id == 777
 
 
 def test_filter_management(tmp_path: Path) -> None:

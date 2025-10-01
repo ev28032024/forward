@@ -69,6 +69,7 @@ class TelegramAPIProtocol(Protocol):
         *,
         parse_mode: str | None = None,
         disable_preview: bool = True,
+        message_thread_id: int | None = None,
     ) -> None: ...
 
     async def answer_callback_query(self, callback_id: str, text: str) -> None: ...
@@ -130,6 +131,7 @@ class TelegramAPI:
         *,
         parse_mode: str | None = None,
         disable_preview: bool = True,
+        message_thread_id: int | None = None,
     ) -> None:
         url = f"{_API_BASE}/bot{self._token}/sendMessage"
         data: dict[str, Any] = {
@@ -139,6 +141,8 @@ class TelegramAPI:
         }
         if parse_mode:
             data["parse_mode"] = parse_mode
+        if message_thread_id is not None:
+            data["message_thread_id"] = message_thread_id
         try:
             timeout_cfg = aiohttp.ClientTimeout(total=15)
             async with self._session.post(
@@ -233,7 +237,12 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="add_channel",
         summary="Добавить связку каналов.",
-        help_text="/add_channel <discord_id> <telegram_chat> <название>",
+        help_text="/add_channel <discord_id> <telegram_chat[:thread]> <название>",
+    ),
+    _CommandInfo(
+        name="set_thread",
+        summary="Настроить тему Telegram.",
+        help_text="/set_thread <discord_id> <thread_id|clear>",
     ),
     _CommandInfo(
         name="remove_channel",
@@ -479,8 +488,12 @@ class TelegramController:
                 "📡 Каналы",
                 [
                     (
-                        "/add_channel <discord_id> <telegram_chat> <название>",
-                        "Создать новую связку и задать видимое имя.",
+                        "/add_channel <discord_id> <telegram_chat[:thread]> <название>",
+                        "Создать новую связку, выбрать тему и задать имя.",
+                    ),
+                    (
+                        "/set_thread <discord_id> <thread_id|clear>",
+                        "Обновить тему в существующей связке.",
                     ),
                     ("/remove_channel <discord_id>", "Удалить связку."),
                     ("/list_channels", "Краткий перечень настроенных связок."),
@@ -655,6 +668,11 @@ class TelegramController:
                 channel_lines.append(
                     f"{_INDENT}• Telegram: <code>{html.escape(channel.telegram_chat_id)}</code>"
                 )
+                if channel.telegram_thread_id is not None:
+                    thread_value = html.escape(str(channel.telegram_thread_id))
+                    channel_lines.append(
+                        f"{_INDENT}• Тема: <code>{thread_value}</code>"
+                    )
                 channel_lines.append(
                     f"{_INDENT}• Предпросмотр ссылок: "
                     + (
@@ -1042,20 +1060,77 @@ class TelegramController:
         if len(parts) < 3:
             await self._api.send_message(
                 ctx.chat_id,
-                "Использование: /add_channel <discord_id> <telegram_chat> <название>",
+                "Использование: /add_channel <discord_id> <telegram_chat[:thread]> <название>",
             )
             return
-        discord_id, telegram_chat, *label_parts = parts
+        discord_id, telegram_chat_raw, *label_parts = parts
         label = " ".join(label_parts).strip()
         if not label:
             await self._api.send_message(ctx.chat_id, "Укажите название канала")
             return
+        thread_id: int | None = None
+        telegram_chat = telegram_chat_raw
+        if ":" in telegram_chat_raw:
+            chat_part, thread_part = telegram_chat_raw.split(":", 1)
+            if not chat_part or not thread_part:
+                await self._api.send_message(ctx.chat_id, "Неверный формат chat:thread")
+                return
+            telegram_chat = chat_part
+            try:
+                thread_id = int(thread_part)
+            except ValueError:
+                await self._api.send_message(ctx.chat_id, "Thread ID должен быть числом")
+                return
+            if thread_id <= 0:
+                await self._api.send_message(ctx.chat_id, "Thread ID должен быть положительным")
+                return
         if self._store.get_channel(discord_id):
             await self._api.send_message(ctx.chat_id, "Канал уже существует")
             return
-        self._store.add_channel(discord_id, telegram_chat, label)
+        self._store.add_channel(
+            discord_id,
+            telegram_chat,
+            label,
+            telegram_thread_id=thread_id,
+        )
         self._on_change()
-        await self._api.send_message(ctx.chat_id, f"Связка {discord_id} → {telegram_chat} создана")
+        response = f"Связка {discord_id} → {telegram_chat} создана"
+        if thread_id is not None:
+            response += f" (тема {thread_id})"
+        await self._api.send_message(ctx.chat_id, response)
+
+    async def cmd_set_thread(self, ctx: CommandContext) -> None:
+        parts = ctx.args.split()
+        if len(parts) < 2:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /set_thread <discord_id> <thread_id|clear>",
+            )
+            return
+        discord_id, value = parts[:2]
+        record = self._store.get_channel(discord_id)
+        if not record:
+            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            return
+        thread_id: int | None
+        value_lower = value.lower()
+        if value_lower in {"clear", "none", "off", "0"}:
+            thread_id = None
+        else:
+            try:
+                thread_id = int(value)
+            except ValueError:
+                await self._api.send_message(ctx.chat_id, "Thread ID должен быть числом")
+                return
+            if thread_id <= 0:
+                await self._api.send_message(ctx.chat_id, "Thread ID должен быть положительным")
+                return
+        self._store.set_channel_thread(record.id, thread_id)
+        self._on_change()
+        if thread_id is None:
+            await self._api.send_message(ctx.chat_id, "Тема очищена")
+        else:
+            await self._api.send_message(ctx.chat_id, f"Установлена тема {thread_id}")
 
     async def cmd_remove_channel(self, ctx: CommandContext) -> None:
         if not ctx.args:
@@ -1079,9 +1154,14 @@ class TelegramController:
             discord_id = html.escape(record.discord_id)
             chat_id = html.escape(record.telegram_chat_id)
             status_icon = "🟢" if record.active else "⚪️"
+            thread_info = ""
+            if record.telegram_thread_id is not None:
+                thread_info = (
+                    f" (тема <code>{html.escape(str(record.telegram_thread_id))}</code>)"
+                )
             lines.append(
                 f"{status_icon} <b>{label}</b> — Discord <code>{discord_id}</code> → "
-                f"Telegram <code>{chat_id}</code>"
+                f"Telegram <code>{chat_id}</code>{thread_info}"
             )
         await self._api.send_message(
             ctx.chat_id,
@@ -1234,12 +1314,15 @@ async def send_formatted(
     api: TelegramAPIProtocol,
     chat_id: str,
     message: FormattedTelegramMessage,
+    *,
+    thread_id: int | None = None,
 ) -> None:
     await api.send_message(
         chat_id,
         message.text,
         parse_mode=message.parse_mode,
         disable_preview=message.disable_preview,
+        message_thread_id=thread_id,
     )
     for extra in message.extra_messages:
         await api.send_message(
@@ -1247,6 +1330,7 @@ async def send_formatted(
             extra,
             parse_mode=message.parse_mode,
             disable_preview=message.disable_preview,
+            message_thread_id=thread_id,
         )
 
 

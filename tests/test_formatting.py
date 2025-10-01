@@ -9,6 +9,7 @@ def sample_channel(**overrides: object) -> ChannelConfig:
     channel = ChannelConfig(
         discord_id="123",
         telegram_chat_id="456",
+        telegram_thread_id=None,
         label="Label",
         formatting=formatting,
         filters=FilterConfig(),

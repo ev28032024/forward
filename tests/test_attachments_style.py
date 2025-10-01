@@ -8,6 +8,7 @@ def test_links_style_shows_urls() -> None:
     channel = ChannelConfig(
         discord_id="1",
         telegram_chat_id="2",
+        telegram_thread_id=None,
         label="Test",
         formatting=FormattingOptions(attachments_style="links"),
         filters=FilterConfig(),

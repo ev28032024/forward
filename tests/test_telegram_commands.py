@@ -36,6 +36,7 @@ class DummyAPI:
         *,
         parse_mode: str | None = None,
         disable_preview: bool = True,
+        message_thread_id: int | None = None,
     ) -> None:
         self.messages.append(text)
 
@@ -80,9 +81,17 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
         )
 
         await controller._dispatch("claim", admin)
-        admin.args = "123 456 Label"
+        admin.args = "123 456:789 Label"
         await controller._dispatch("add_channel", admin)
-        assert store.get_channel("123") is not None
+        record = store.get_channel("123")
+        assert record is not None
+        assert record.telegram_thread_id == 789
+
+        admin.args = "123 clear"
+        await controller._dispatch("set_thread", admin)
+        record = store.get_channel("123")
+        assert record is not None
+        assert record.telegram_thread_id is None
 
         admin.args = "123 on"
         await controller._dispatch("set_disable_preview", admin)
