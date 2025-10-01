@@ -106,6 +106,49 @@ class DiscordClient:
             _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
         )
 
+    async def fetch_pinned_messages(self, channel_id: str) -> Sequence[DiscordMessage]:
+        if not self._token:
+            return []
+
+        headers = {
+            "Authorization": self._token,
+            "User-Agent": self._choose_user_agent(),
+            "Accept": "application/json",
+        }
+
+        url = f"{_API_BASE}/channels/{channel_id}/pins"
+        proxy = self._network.discord_proxy_url
+        proxy_auth = self._build_proxy_auth()
+
+        async with self._lock:
+            try:
+                timeout_cfg = aiohttp.ClientTimeout(total=15)
+                async with self._session.get(
+                    url,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=timeout_cfg,
+                    proxy_auth=proxy_auth,
+                ) as resp:
+                    if resp.status >= 400:
+                        logger.warning(
+                            "Discord ответил статусом %s при получении закреплённых сообщений %s",
+                            resp.status,
+                            channel_id,
+                        )
+                        return []
+                    data = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Не удалось получить закреплённые сообщения Discord канала %s: %s",
+                    channel_id,
+                    exc,
+                )
+                return []
+        return tuple(
+            _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
+        )
+
     def _choose_user_agent(self) -> str:
         return self._network.discord_user_agent or _DEFAULT_USER_AGENT
 
@@ -242,6 +285,9 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
         or payload.get("stickers")
         or []
     )
+    member = payload.get("member") or {}
+    roles_raw = member.get("roles") or []
+    role_ids = {str(role_id) for role_id in roles_raw if str(role_id)}
     attachments = tuple(item for item in attachments_raw if isinstance(item, Mapping))
     embeds = tuple(item for item in embeds_raw if isinstance(item, Mapping))
     stickers = tuple(item for item in stickers_raw if isinstance(item, Mapping))
@@ -255,6 +301,7 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
         attachments=attachments,
         embeds=embeds,
         stickers=stickers,
+        role_ids=role_ids,
         timestamp=payload.get("timestamp"),
         edited_timestamp=payload.get("edited_timestamp"),
     )

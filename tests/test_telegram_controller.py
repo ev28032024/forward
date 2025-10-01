@@ -59,6 +59,9 @@ class DummyDiscordClient:
         self.proxies.append(getattr(network, "discord_proxy_url", None))
         return ProxyCheckResult(ok=True)
 
+    async def fetch_pinned_messages(self, channel_id: str) -> list[dict[str, object]]:
+        return []
+
 
 def test_controller_respects_admin_permissions(tmp_path: Path) -> None:
     async def runner() -> None:

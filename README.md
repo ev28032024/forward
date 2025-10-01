@@ -52,7 +52,8 @@ pip install -e .[dev]
 - `/set_disable_preview <discord_id|all> <on|off>` — управлять предпросмотром ссылок (админ).
 - `/set_max_length <discord_id|all> <число>` — ограничить длину сообщения и разбивать текст (админ).
 - `/set_attachments <discord_id|all> <summary|links>` — выбрать стиль блока вложений (админ).
-- `/add_filter <discord_id|all> <тип> <значение>` — добавить фильтр (`whitelist`, `blacklist`, `allowed_senders`, `blocked_senders`, `allowed_types`, `blocked_types`) (админ).
+- `/set_monitoring <discord_id|all> <messages|pinned>` — выбрать режим мониторинга (новые или закреплённые сообщения) (админ).
+- `/add_filter <discord_id|all> <тип> <значение>` — добавить фильтр (`whitelist`, `blacklist`, `allowed_senders`, `blocked_senders`, `allowed_types`, `blocked_types`, `allowed_roles`, `blocked_roles`) (админ).
 - `/clear_filter <discord_id|all> <тип> [значение]` — очистить фильтр целиком или по значению (админ).
 
 Команды `all` или `*` на месте идентификатора канала меняют глобальные значения для всех связок, а идентификатор `0` служит для глобальных фильтров.

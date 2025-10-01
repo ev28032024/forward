@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from forward_monitor.config_store import ConfigStore
 
 
@@ -30,6 +32,15 @@ def test_channel_lifecycle(tmp_path: Path) -> None:
     assert channel.last_message_id == "900"
     assert channel.telegram_thread_id == 777
     assert channel.added_at is not None
+    assert channel.pinned_only is False
+    assert channel.known_pinned_ids == set()
+
+    store.set_channel_option(record.id, "monitoring.mode", "pinned")
+    store.set_known_pinned_messages(record.id, ["10", "20"])
+    configs = store.load_channel_configurations()
+    channel = configs[0]
+    assert channel.pinned_only is True
+    assert channel.known_pinned_ids == {"10", "20"}
 
 
 def test_filter_management(tmp_path: Path) -> None:
@@ -52,6 +63,14 @@ def test_filter_management(tmp_path: Path) -> None:
     assert store.remove_filter(0, "allowed_senders", "@coded") == 1
     assert store.remove_filter(0, "allowed_senders", "coded") == 0
 
+    assert store.add_filter(0, "allowed_roles", "<@&123>") is True
+    assert store.add_filter(0, "allowed_roles", "123") is False
+    roles = store.get_filter_config(0).allowed_roles
+    assert roles == {"123"}
+
+    with pytest.raises(ValueError):
+        store.add_filter(0, "unknown", "value")
+
     store.add_filter(0, "blacklist", "Spam")
     assert store.get_filter_config(0).blacklist == {"Spam"}
     cleared = store.clear_filters(0)
@@ -66,5 +85,7 @@ def test_filter_management(tmp_path: Path) -> None:
             "blocked_senders",
             "allowed_types",
             "blocked_types",
+            "allowed_roles",
+            "blocked_roles",
         )
     )

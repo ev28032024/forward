@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 from .models import ChannelConfig, FilterConfig, FormattingOptions, NetworkOptions
@@ -478,11 +479,20 @@ class ConfigStore:
             )
             self._conn.commit()
 
+    def set_known_pinned_messages(self, channel_id: int, message_ids: Iterable[str]) -> None:
+        payload = json.dumps(sorted({str(mid) for mid in message_ids if str(mid)}))
+        self.set_channel_option(channel_id, "state.pinned_ids", payload)
+
+    def clear_known_pinned_messages(self, channel_id: int) -> None:
+        self.delete_channel_option(channel_id, "state.pinned_ids")
+
     # ------------------------------------------------------------------
     # Filters
     # ------------------------------------------------------------------
     def add_filter(self, channel_id: int, filter_type: str, value: str) -> bool:
         filter_type_key = filter_type.strip().lower()
+        if filter_type_key not in _SUPPORTED_FILTER_TYPES:
+            raise ValueError("unknown filter type")
         prepared = normalize_filter_value(filter_type_key, value)
         if prepared is None:
             raise ValueError("invalid filter value")
@@ -506,6 +516,8 @@ class ConfigStore:
 
     def remove_filter(self, channel_id: int, filter_type: str, value: str | None = None) -> int:
         filter_type_key = filter_type.strip().lower()
+        if filter_type_key not in _SUPPORTED_FILTER_TYPES and filter_type_key not in {"all", "*"}:
+            return 0
         with closing(self._conn.cursor()) as cur:
             if value is None:
                 cur.execute(
@@ -571,6 +583,9 @@ class ConfigStore:
             channel_options = dict(self.iter_channel_options(record.id))
             channel_formatting = _formatting_from_options(formatting, channel_options)
             filters = default_filters.merge(self._load_filter_config(record.id))
+            pinned_only, known_pinned_ids = _monitoring_from_options(
+                defaults.get("monitoring", {}), channel_options
+            )
             configs.append(
                 ChannelConfig(
                     discord_id=record.discord_id,
@@ -583,14 +598,19 @@ class ConfigStore:
                     active=record.active,
                     storage_id=record.id,
                     added_at=record.added_at,
+                    pinned_only=pinned_only,
+                    known_pinned_ids=known_pinned_ids,
                 )
             )
         return configs
 
     def _load_default_options(self) -> dict[str, dict[str, str]]:
-        settings: dict[str, dict[str, str]] = {"formatting": {}}
+        settings: dict[str, dict[str, str]] = {"formatting": {}, "monitoring": {}}
         for key, value in self.iter_settings("formatting."):
             settings.setdefault("formatting", {})[key.removeprefix("formatting.")] = value
+        monitoring_mode = self.get_setting("monitoring.mode")
+        if monitoring_mode:
+            settings.setdefault("monitoring", {})["mode"] = monitoring_mode
         return settings
 
     def _load_filter_config(self, channel_id: int) -> FilterConfig:
@@ -625,6 +645,13 @@ class ConfigStore:
 _TEXT_FILTER_TYPES = {"whitelist", "blacklist"}
 _SENDER_FILTER_TYPES = {"allowed_senders", "blocked_senders"}
 _TYPE_FILTER_TYPES = {"allowed_types", "blocked_types"}
+_ROLE_FILTER_TYPES = {"allowed_roles", "blocked_roles"}
+_SUPPORTED_FILTER_TYPES = (
+    _TEXT_FILTER_TYPES
+    | _SENDER_FILTER_TYPES
+    | _TYPE_FILTER_TYPES
+    | _ROLE_FILTER_TYPES
+)
 
 
 def _parse_thread_id(value: object) -> int | None:
@@ -660,6 +687,8 @@ def normalize_filter_value(filter_type: str, value: str) -> tuple[str, str] | No
     trimmed = value.strip()
     if not trimmed:
         return None
+    if filter_key not in _SUPPORTED_FILTER_TYPES:
+        return None
     if filter_key in _SENDER_FILTER_TYPES:
         if trimmed.lstrip("-").isdigit():
             numeric = str(int(trimmed))
@@ -671,6 +700,11 @@ def normalize_filter_value(filter_type: str, value: str) -> tuple[str, str] | No
     if filter_key in _TYPE_FILTER_TYPES:
         normalized_value = trimmed.lower()
         return normalized_value, normalized_value
+    if filter_key in _ROLE_FILTER_TYPES:
+        normalized_role = _normalize_role_value(trimmed)
+        if normalized_role is None:
+            return None
+        return normalized_role, f"role:{normalized_role}"
     if filter_key in _TEXT_FILTER_TYPES:
         return trimmed, trimmed.casefold()
     return trimmed, trimmed
@@ -682,6 +716,8 @@ def format_filter_value(filter_type: str, value: str) -> str:
     if not cleaned:
         return cleaned
     if filter_key in _SENDER_FILTER_TYPES and cleaned.lstrip("-").isdigit():
+        return str(int(cleaned))
+    if filter_key in _ROLE_FILTER_TYPES and cleaned.lstrip("-").isdigit():
         return str(int(cleaned))
     return cleaned
 
@@ -695,8 +731,48 @@ def _filter_target(filters: FilterConfig, filter_type: str) -> set[str] | None:
         "blocked_senders": filters.blocked_senders,
         "allowed_types": filters.allowed_types,
         "blocked_types": filters.blocked_types,
+        "allowed_roles": filters.allowed_roles,
+        "blocked_roles": filters.blocked_roles,
     }
     return mapping.get(normalized_type)
+
+
+def _monitoring_from_options(
+    defaults: dict[str, str], options: dict[str, str]
+) -> tuple[bool, set[str]]:
+    default_mode = defaults.get("mode", "messages").strip().lower()
+    mode_raw = options.get("monitoring.mode", default_mode)
+    mode = str(mode_raw).strip().lower()
+    pinned_only = mode == "pinned"
+    known_pinned = _parse_known_pinned(options.get("state.pinned_ids"))
+    return pinned_only, known_pinned
+
+
+def _parse_known_pinned(payload: str | None) -> set[str]:
+    if not payload:
+        return set()
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return set()
+    result: set[str] = set()
+    for entry in data:
+        text = str(entry)
+        if text:
+            result.add(text)
+    return result
+
+
+def _normalize_role_value(value: str) -> str | None:
+    cleaned = value.strip()
+    if cleaned.startswith("<@&") and cleaned.endswith(">"):
+        cleaned = cleaned[3:-1]
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if cleaned.lstrip("-").isdigit():
+        return str(int(cleaned))
+    return None
 
 
 def _formatting_from_options(

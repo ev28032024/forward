@@ -77,6 +77,10 @@ class DummyDiscordClient:
         self.fetch_calls.append((channel_id, limit, after))
         return list(self.messages)
 
+    async def fetch_pinned_messages(self, channel_id: str) -> list[DiscordMessage]:
+        self.fetch_calls.append((channel_id, 0, None))
+        return list(self.messages)
+
 
 def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
     async def runner() -> None:
@@ -95,6 +99,7 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
                 attachments=(),
                 embeds=(),
                 stickers=(),
+                role_ids=set(),
             )
         ]
 
@@ -137,6 +142,16 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
         admin.args = "all links"
         await controller._dispatch("set_attachments", admin)
         assert store.get_setting("formatting.attachments_style") == "links"
+
+        admin.args = "123 pinned"
+        await controller._dispatch("set_monitoring", admin)
+        configs = store.load_channel_configurations()
+        assert configs[0].pinned_only is True
+
+        admin.args = "123 messages"
+        await controller._dispatch("set_monitoring", admin)
+        configs = store.load_channel_configurations()
+        assert configs[0].pinned_only is False
 
     import asyncio
 

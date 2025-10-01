@@ -170,6 +170,16 @@ class ForwardMonitorApp:
         if not channel.active:
             return
 
+        if channel.pinned_only:
+            await self._process_pinned_channel(
+                channel,
+                discord_client,
+                telegram_api,
+                telegram_rate,
+                runtime,
+            )
+            return
+
         baseline = channel.added_at
         bootstrap = channel.last_message_id is None
 
@@ -196,22 +206,27 @@ class ForwardMonitorApp:
         ordered = sorted(messages, key=lambda msg: sort_key(msg.id))
         engine = FilterEngine(channel.filters)
         last_seen = channel.last_message_id
+        interrupted = False
         for msg in ordered:
-            last_seen = msg.id
             if self._refresh_event.is_set():
+                interrupted = True
                 break
+            candidate_id = msg.id
             if bootstrap:
                 if baseline is not None:
                     msg_time = _parse_discord_timestamp(msg.timestamp)
                     if msg_time is not None and msg_time < baseline:
+                        last_seen = candidate_id
                         continue
                 bootstrap = False
             decision = engine.evaluate(msg)
             if not decision.allowed:
+                last_seen = candidate_id
                 continue
             formatted = format_discord_message(msg, channel)
             await telegram_rate.wait()
             if self._refresh_event.is_set():
+                interrupted = True
                 break
             try:
                 await send_formatted(
@@ -228,12 +243,103 @@ class ForwardMonitorApp:
                     msg.id,
                     channel.telegram_chat_id,
                 )
+                last_seen = candidate_id
                 continue
+            last_seen = candidate_id
             await self._sleep_within(runtime)
 
-        if last_seen and channel.storage_id is not None:
+        if not interrupted and last_seen and channel.storage_id is not None:
             self._store.set_last_message(channel.storage_id, last_seen)
             channel.last_message_id = last_seen
+
+    async def _process_pinned_channel(
+        self,
+        channel: ChannelConfig,
+        discord_client: DiscordClient,
+        telegram_api: TelegramAPI,
+        telegram_rate: RateLimiter,
+        runtime: RuntimeOptions,
+    ) -> None:
+        try:
+            messages = await discord_client.fetch_pinned_messages(channel.discord_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Ошибка при запросе закреплённых сообщений Discord для канала %s",
+                channel.discord_id,
+            )
+            await asyncio.sleep(1.0)
+            return
+
+        current_ids = {msg.id for msg in messages}
+        previous_known = set(channel.known_pinned_ids)
+        new_ids = current_ids - previous_known
+
+        if not messages:
+            if channel.storage_id is not None and channel.known_pinned_ids:
+                self._store.set_known_pinned_messages(channel.storage_id, [])
+                channel.known_pinned_ids = set()
+            return
+
+        if not new_ids and previous_known == current_ids:
+            return
+
+        def sort_key(message_id: str) -> tuple[int, str]:
+            return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
+
+        engine = FilterEngine(channel.filters)
+        ordered = sorted(
+            (msg for msg in messages if msg.id in new_ids),
+            key=lambda msg: sort_key(msg.id),
+        )
+        processed_ids: set[str] = set()
+        interrupted = False
+
+        for msg in ordered:
+            if self._refresh_event.is_set():
+                interrupted = True
+                break
+            decision = engine.evaluate(msg)
+            if not decision.allowed:
+                processed_ids.add(msg.id)
+                continue
+            formatted = format_discord_message(msg, channel)
+            await telegram_rate.wait()
+            if self._refresh_event.is_set():
+                interrupted = True
+                break
+            try:
+                await send_formatted(
+                    telegram_api,
+                    channel.telegram_chat_id,
+                    formatted,
+                    thread_id=channel.telegram_thread_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Не удалось отправить закреплённое сообщение %s в Telegram чат %s",
+                    msg.id,
+                    channel.telegram_chat_id,
+                )
+                continue
+            processed_ids.add(msg.id)
+            await self._sleep_within(runtime)
+
+        if channel.storage_id is None:
+            return
+
+        base_known = previous_known & current_ids
+        if interrupted:
+            updated_known = base_known | processed_ids
+        else:
+            updated_known = current_ids
+
+        if updated_known != channel.known_pinned_ids:
+            self._store.set_known_pinned_messages(channel.storage_id, updated_known)
+            channel.known_pinned_ids = updated_known
 
     async def _sleep_within(self, runtime: RuntimeOptions) -> None:
         delay_seconds = 0.0

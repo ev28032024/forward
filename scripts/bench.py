@@ -61,6 +61,7 @@ def _sample_message() -> "DiscordMessageType":
         attachments=tuple(attachments),
         embeds=tuple(embeds),
         stickers=(),
+        role_ids=set(),
     )
 
 
