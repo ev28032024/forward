@@ -37,6 +37,7 @@ def test_formatting_includes_label_and_author() -> None:
         ),
         embeds=(),
         stickers=(),
+        role_ids=set(),
     )
     formatted = format_discord_message(message, sample_channel())
     assert formatted.text.startswith("Label • Author")
@@ -56,6 +57,7 @@ def test_formatting_chunks_long_text() -> None:
         attachments=(),
         embeds=(),
         stickers=(),
+        role_ids=set(),
     )
     formatted = format_discord_message(message, channel)
     assert len(formatted.extra_messages) >= 1
@@ -72,6 +74,7 @@ def test_channel_mentions_converted_in_content() -> None:
         attachments=(),
         embeds=(),
         stickers=(),
+        role_ids=set(),
     )
 
     formatted = format_discord_message(message, channel)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, Set
 
 
 @dataclass(slots=True)
@@ -27,6 +27,8 @@ class FilterConfig:
     blocked_senders: set[str] = field(default_factory=set)
     allowed_types: set[str] = field(default_factory=set)
     blocked_types: set[str] = field(default_factory=set)
+    allowed_roles: set[str] = field(default_factory=set)
+    blocked_roles: set[str] = field(default_factory=set)
 
     def merge(self, other: "FilterConfig") -> "FilterConfig":
         return FilterConfig(
@@ -36,6 +38,8 @@ class FilterConfig:
             blocked_senders=self.blocked_senders | other.blocked_senders,
             allowed_types=self.allowed_types | other.allowed_types,
             blocked_types=self.blocked_types | other.blocked_types,
+            allowed_roles=self.allowed_roles | other.allowed_roles,
+            blocked_roles=self.blocked_roles | other.blocked_roles,
         )
 
 
@@ -53,6 +57,8 @@ class ChannelConfig:
     active: bool = True
     storage_id: int | None = None
     added_at: datetime | None = None
+    pinned_only: bool = False
+    known_pinned_ids: Set[str] = field(default_factory=set)
 
     def with_updates(
         self,
@@ -75,6 +81,8 @@ class ChannelConfig:
             active=self.active,
             storage_id=self.storage_id,
             added_at=added_at if added_at is not None else self.added_at,
+            pinned_only=self.pinned_only,
+            known_pinned_ids=set(self.known_pinned_ids),
         )
 
 
@@ -110,6 +118,7 @@ class DiscordMessage:
     attachments: Sequence[Mapping[str, Any]]
     embeds: Sequence[Mapping[str, Any]]
     stickers: Sequence[Mapping[str, Any]]
+    role_ids: Set[str]
     timestamp: str | None = None
     edited_timestamp: str | None = None
 

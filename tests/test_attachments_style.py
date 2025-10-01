@@ -24,6 +24,7 @@ def test_links_style_shows_urls() -> None:
         attachments=({"url": "https://example.com/a.png", "filename": "a.png"},),
         embeds=(),
         stickers=(),
+        role_ids=set(),
     )
     formatted = format_discord_message(message, channel)
     body = formatted.text.replace("\\", "")

@@ -18,6 +18,7 @@ def make_message(**kwargs: Any) -> DiscordMessage:
         attachments=tuple(attachments),
         embeds=tuple(embeds),
         stickers=tuple(kwargs.get("stickers", ())),
+        role_ids=set(kwargs.get("role_ids", set())),
     )
 
 
@@ -71,3 +72,20 @@ def test_filter_engine_allowed_and_blocked_senders_by_name() -> None:
 
     assert blocked.allowed is False
     assert blocked.reason == "sender_blocked"
+
+
+def test_filter_engine_roles() -> None:
+    config = FilterConfig(allowed_roles={"123"})
+    engine = FilterEngine(config)
+
+    allowed = engine.evaluate(make_message(role_ids={"123"}))
+    rejected = engine.evaluate(make_message(role_ids=set()))
+
+    assert allowed.allowed is True
+    assert rejected.allowed is False
+    assert rejected.reason == "role_not_allowed"
+
+    blocked_engine = FilterEngine(FilterConfig(blocked_roles={"555"}))
+    blocked = blocked_engine.evaluate(make_message(role_ids={"555", "777"}))
+    assert blocked.allowed is False
+    assert blocked.reason == "role_blocked"

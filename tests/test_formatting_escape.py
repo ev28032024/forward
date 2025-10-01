@@ -24,6 +24,7 @@ def test_markdown_escape_preserves_special_chars() -> None:
         attachments=(),
         embeds=(),
         stickers=(),
+        role_ids=set(),
     )
     formatted = format_discord_message(message, channel)
     assert "*bold* _italic_ [link](url)" in formatted.text

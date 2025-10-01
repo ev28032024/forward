@@ -31,6 +31,8 @@ _FILTER_LABELS = {
     "blocked_senders": "запрещённые авторы",
     "allowed_types": "разрешённые типы",
     "blocked_types": "запрещённые типы",
+    "allowed_roles": "разрешённые роли",
+    "blocked_roles": "запрещённые роли",
 }
 
 _FILTER_TYPES: tuple[str, ...] = tuple(_FILTER_LABELS.keys())
@@ -268,6 +270,11 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="set_attachments",
         summary="Выбрать стиль вложений.",
         help_text="/set_attachments <discord_id|all> <summary|links>",
+    ),
+    _CommandInfo(
+        name="set_monitoring",
+        summary="Выбрать режим мониторинга сообщений.",
+        help_text="/set_monitoring <discord_id|all> <messages|pinned>",
     ),
     _CommandInfo(
         name="add_filter",
@@ -531,6 +538,10 @@ class TelegramController:
                         "Выбрать формат блока вложений.",
                     ),
                     (
+                        "/set_monitoring <discord_id|all> <messages|pinned>",
+                        "Выбрать режим (новые или закреплённые сообщения).",
+                    ),
+                    (
                         "/add_filter <discord_id|all> <тип> <значение>",
                         "Добавить фильтр (whitelist, blacklist и т.д.).",
                     ),
@@ -610,6 +621,14 @@ class TelegramController:
             "краткий список" if attachments_default.lower() == "summary" else "список ссылок"
         )
         preview_desc = "без предпросмотра" if disable_preview_default else "с предпросмотром"
+        monitoring_mode_default = (
+            self._store.get_setting("monitoring.mode") or "messages"
+        ).strip().lower()
+        monitoring_default_desc = (
+            "закреплённые сообщения"
+            if monitoring_mode_default == "pinned"
+            else "новые сообщения"
+        )
 
         default_filter_config = self._store.get_filter_config(0)
 
@@ -692,6 +711,14 @@ class TelegramController:
                 channel_lines.append(
                     f"{_INDENT}• Вложения: " + attachment_mode
                 )
+                channel_lines.append(
+                    f"{_INDENT}• Режим: "
+                    + (
+                        "закреплённые сообщения"
+                        if channel.pinned_only
+                        else "новые сообщения"
+                    )
+                )
 
                 channel_filter_sets = _collect_filter_sets(channel.filters)
                 extra_filters = {
@@ -749,6 +776,7 @@ class TelegramController:
             f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
             f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
             f"• Вложения: {html.escape(attachments_desc)}",
+            f"• Режим мониторинга: {html.escape(monitoring_default_desc)}",
         ]
 
         if has_default_filters:
@@ -1205,6 +1233,77 @@ class TelegramController:
     async def cmd_set_attachments(self, ctx: CommandContext) -> None:
         await self._set_format_option(ctx, "attachments_style", allowed={"summary", "links"})
 
+    async def cmd_set_monitoring(self, ctx: CommandContext) -> None:
+        parts = ctx.args.split(maxsplit=1)
+        if len(parts) < 2:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Использование: /set_monitoring <discord_id|all> <messages|pinned>",
+            )
+            return
+        target_key, mode_raw = parts
+        mode_key = mode_raw.strip().lower()
+        mode_map = {
+            "messages": "messages",
+            "message": "messages",
+            "default": "messages",
+            "pinned": "pinned",
+            "pins": "pinned",
+            "pin": "pinned",
+        }
+        normalized_mode = mode_map.get(mode_key)
+        if normalized_mode is None:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Допустимые режимы: messages, pinned",
+            )
+            return
+
+        if target_key.lower() in {"all", "*"}:
+            self._store.set_setting("monitoring.mode", normalized_mode)
+            self._on_change()
+            description = (
+                "По умолчанию отслеживаются закреплённые сообщения"
+                if normalized_mode == "pinned"
+                else "По умолчанию отслеживаются новые сообщения"
+            )
+            await self._api.send_message(ctx.chat_id, description)
+            return
+
+        record = self._store.get_channel(target_key)
+        if not record:
+            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            return
+
+        if normalized_mode == "messages":
+            self._store.delete_channel_option(record.id, "monitoring.mode")
+            self._store.clear_known_pinned_messages(record.id)
+            self._on_change()
+            await self._api.send_message(ctx.chat_id, "Канал переключён на обычные сообщения")
+            return
+
+        self._store.set_channel_option(record.id, "monitoring.mode", normalized_mode)
+        try:
+            pinned_messages = list(
+                await self._discord.fetch_pinned_messages(record.discord_id)
+            )
+        except Exception:  # pragma: no cover - network failure is logged but ignored
+            logger.exception(
+                "Не удалось получить список закреплённых сообщений для канала %s",
+                record.discord_id,
+            )
+            pinned_messages = None
+        if pinned_messages is not None:
+            self._store.set_known_pinned_messages(
+                record.id,
+                (msg.id for msg in pinned_messages),
+            )
+        self._on_change()
+        await self._api.send_message(
+            ctx.chat_id,
+            "Канал переключён на закреплённые сообщения",
+        )
+
     async def cmd_add_filter(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=2)
         if len(parts) < 3:
@@ -1215,6 +1314,12 @@ class TelegramController:
             return
         target_key, filter_type_raw, value = parts
         filter_type = filter_type_raw.strip().lower()
+        if filter_type not in _FILTER_TYPES:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Неизвестный тип фильтра. Допустимо: " + ", ".join(_FILTER_TYPES),
+            )
+            return
         channel_ids = self._resolve_channel_ids(target_key)
         if not channel_ids:
             await self._api.send_message(ctx.chat_id, "Канал не найден")
@@ -1255,6 +1360,13 @@ class TelegramController:
                 await self._api.send_message(ctx.chat_id, "Все фильтры очищены")
             else:
                 await self._api.send_message(ctx.chat_id, "Фильтры уже очищены")
+            return
+
+        if filter_type not in _FILTER_TYPES:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Неизвестный тип фильтра. Допустимо: " + ", ".join(_FILTER_TYPES),
+            )
             return
 
         removed = 0

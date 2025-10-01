@@ -31,6 +31,8 @@ class FilterEngine:
             self._blocked_sender_ids,
             self._blocked_sender_names,
         ) = _split_sender_values(config.blocked_senders)
+        self._allowed_roles = {role.strip() for role in config.allowed_roles if role.strip()}
+        self._blocked_roles = {role.strip() for role in config.blocked_roles if role.strip()}
 
     def evaluate(self, message: DiscordMessage) -> FilterDecision:
         content = message.content or ""
@@ -50,6 +52,11 @@ class FilterEngine:
             return FilterDecision(False, "sender_blocked")
         if author_name and author_name in self._blocked_sender_names:
             return FilterDecision(False, "sender_blocked")
+
+        if self._allowed_roles and not (message.role_ids & self._allowed_roles):
+            return FilterDecision(False, "role_not_allowed")
+        if message.role_ids & self._blocked_roles:
+            return FilterDecision(False, "role_blocked")
 
         if self._config.whitelist:
             if not any(token in lowered for token in _normalise_tokens(self._config.whitelist)):
