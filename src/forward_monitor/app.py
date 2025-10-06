@@ -6,7 +6,7 @@ import asyncio
 import html
 import logging
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -304,6 +304,8 @@ class ForwardMonitorApp:
     async def _emit_health_notifications(
         self, updates: list[HealthUpdate], telegram_api: TelegramAPI
     ) -> None:
+        errors: list[HealthUpdate] = []
+        recoveries: list[HealthUpdate] = []
         for update in updates:
             previous = self._health_status.get(update.key)
             if previous == update.status:
@@ -315,11 +317,18 @@ class ForwardMonitorApp:
                     update.key,
                     update.message,
                 )
-                message = self._format_health_alert(update, recovered=False)
-                await self._notify_admins(telegram_api, message)
+                errors.append(update)
             elif previous == "error" and update.status == "ok":
-                message = self._format_health_alert(update, recovered=True)
-                await self._notify_admins(telegram_api, message)
+                recoveries.append(update)
+
+        if errors:
+            message = self._format_health_summary(errors, recovered=False)
+            await self._notify_admins(telegram_api, message)
+        if recoveries:
+            message = self._format_health_summary(recoveries, recovered=True)
+            await self._notify_admins(telegram_api, message)
+        if errors or recoveries:
+            self._refresh_event.set()
 
     async def _notify_admins(self, telegram_api: TelegramAPI, message: str) -> None:
         for admin in self._store.list_admins():
@@ -336,12 +345,24 @@ class ForwardMonitorApp:
                     "Не удалось отправить уведомление администратору %s", admin.user_id
                 )
 
-    def _format_health_alert(self, update: HealthUpdate, *, recovered: bool) -> str:
-        title = html.escape(update.label)
+    def _format_health_summary(
+        self, updates: Sequence[HealthUpdate], *, recovered: bool
+    ) -> str:
+        if not updates:
+            return ""
         if recovered:
-            return f"✅ <b>{title}</b> снова работает стабильно."
-        message = html.escape(update.message or "Причина не указана.")
-        return f"🔴 <b>{title}</b> недоступен.\n{message}"
+            header = "✅ <b>Компоненты восстановлены</b>"
+            lines = [header, ""]
+            for update in updates:
+                lines.append(f"• {html.escape(update.label)}")
+            return "\n".join(lines)
+
+        header = "🔴 <b>Обнаружены проблемы</b>"
+        lines = [header, ""]
+        for update in updates:
+            description = html.escape(update.message or "Причина не указана.")
+            lines.append(f"• <b>{html.escape(update.label)}</b> — {description}")
+        return "\n".join(lines)
 
     async def _process_channel(
         self,
@@ -351,7 +372,7 @@ class ForwardMonitorApp:
         telegram_rate: RateLimiter,
         runtime: RuntimeOptions,
     ) -> None:
-        if not channel.active:
+        if not channel.active or channel.blocked_by_health:
             return
 
         if channel.pinned_only:
@@ -420,7 +441,7 @@ class ForwardMonitorApp:
             if not decision.allowed:
                 last_seen = candidate_id
                 continue
-            formatted = format_discord_message(msg, channel)
+            formatted = format_discord_message(msg, channel, message_kind="message")
             await telegram_rate.wait()
             if self._refresh_event.is_set():
                 interrupted = True
@@ -457,6 +478,8 @@ class ForwardMonitorApp:
         telegram_rate: RateLimiter,
         runtime: RuntimeOptions,
     ) -> None:
+        if not channel.active or channel.blocked_by_health:
+            return
         try:
             messages = await discord_client.fetch_pinned_messages(channel.discord_id)
         except asyncio.CancelledError:
@@ -512,7 +535,7 @@ class ForwardMonitorApp:
             if not decision.allowed:
                 processed_ids.add(msg.id)
                 continue
-            formatted = format_discord_message(msg, channel)
+            formatted = format_discord_message(msg, channel, message_kind="pinned")
             await telegram_rate.wait()
             if self._refresh_event.is_set():
                 interrupted = True

@@ -39,12 +39,16 @@ def test_formatting_includes_label_and_author() -> None:
         embeds=(),
         stickers=(),
         role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
     )
     formatted = format_discord_message(message, sample_channel())
     assert formatted.parse_mode == "HTML"
-    assert formatted.text.startswith("<b>Label</b> • <b>Author</b>")
+    assert formatted.text.startswith("📣 <b>Label</b>")
+    assert "💬 <b>Новое сообщение</b>" in formatted.text
+    assert "👤 <b>Author</b>" in formatted.text
     assert "original content" in formatted.text
     assert "file.txt" in formatted.text
+    assert "📅 <b>02.01.2024 03:04 UTC</b>" in formatted.text
 
 
 def test_formatting_chunks_long_text() -> None:
@@ -79,12 +83,14 @@ def test_channel_mentions_converted_in_content() -> None:
         embeds=(),
         stickers=(),
         role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
     )
+    message.mention_channels = {"1234567890": "general"}
 
     formatted = format_discord_message(message, channel)
 
     assert formatted.parse_mode == "HTML"
-    assert "#1234567890" in formatted.text
+    assert "#general" in formatted.text
     assert "See" in formatted.text
 
 
@@ -102,11 +108,13 @@ def test_discord_link_appended_when_enabled() -> None:
         embeds=(),
         stickers=(),
         role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
     )
 
     formatted = format_discord_message(message, channel)
 
     assert "https://discord.com/channels/999/123/2" in formatted.text
+    assert "Открыть в Discord" in formatted.text
 
 
 def test_basic_markdown_translated_to_html() -> None:
@@ -122,6 +130,7 @@ def test_basic_markdown_translated_to_html() -> None:
         embeds=(),
         stickers=(),
         role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
     )
 
     formatted = format_discord_message(message, channel)
@@ -130,3 +139,50 @@ def test_basic_markdown_translated_to_html() -> None:
     assert "<u>Underline</u>" in formatted.text
     assert "<s>Strike</s>" in formatted.text
     assert "<tg-spoiler>Spoiler</tg-spoiler>" in formatted.text
+
+
+def test_pinned_header_icon() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="5",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="Pinned text",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
+    )
+
+    formatted = format_discord_message(message, channel, message_kind="pinned")
+
+    assert "📌 <b>Закреплённое сообщение</b>" in formatted.text
+
+
+def test_mentions_display_names() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="4",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="Hi <@555> and role <@&777> in <#888>",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
+    )
+    message.mention_users = {"555": "UserName"}
+    message.mention_roles = {"777": "Moderators"}
+    message.mention_channels = {"888": "general"}
+
+    formatted = format_discord_message(message, channel)
+
+    assert "@UserName" in formatted.text
+    assert "@Moderators" in formatted.text
+    assert "#general" in formatted.text

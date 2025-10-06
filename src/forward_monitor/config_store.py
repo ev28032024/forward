@@ -640,6 +640,10 @@ class ConfigStore:
             pinned_only, known_pinned_ids, pinned_synced = _monitoring_from_options(
                 defaults.get("monitoring", {}), channel_options
             )
+            health_status, health_message = self.get_health_status(
+                f"channel.{record.discord_id}"
+            )
+            blocked_by_health = health_status == "error" and record.active
             configs.append(
                 ChannelConfig(
                     discord_id=record.discord_id,
@@ -655,6 +659,9 @@ class ConfigStore:
                     pinned_only=pinned_only,
                     known_pinned_ids=known_pinned_ids,
                     pinned_synced=pinned_synced,
+                    health_status=health_status,
+                    health_message=health_message,
+                    blocked_by_health=blocked_by_health,
                 )
             )
         return configs

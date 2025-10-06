@@ -21,12 +21,14 @@ def test_markdown_escape_preserves_special_chars() -> None:
         guild_id="g",
         author_id="1",
         author_name="User",
-        content="*bold* _italic_ [link](url)",
+        content="*bold* _italic_ [link](https://example.com)",
         attachments=(),
         embeds=(),
         stickers=(),
         role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
     )
     formatted = format_discord_message(message, channel)
     assert formatted.parse_mode == "HTML"
-    assert "*bold* _italic_ [link](url)" in formatted.text
+    assert "*bold* _italic_" in formatted.text
+    assert '<a href="https://example.com">link</a>' in formatted.text

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
@@ -13,15 +14,25 @@ EmbedPayload = Mapping[str, Any]
 AttachmentPayload = Mapping[str, Any]
 
 
+_MESSAGE_KIND_ICONS = {"message": "💬", "pinned": "📌"}
+_MESSAGE_KIND_LABELS = {
+    "message": "Новое сообщение",
+    "pinned": "Закреплённое сообщение",
+}
+_CHANNEL_ICON = "📣"
+
+
 def format_discord_message(
     message: DiscordMessage,
     channel: ChannelConfig,
+    *,
+    message_kind: str = "message",
 ) -> FormattedTelegramMessage:
     """Convert a Discord message into Telegram text respecting the channel profile."""
 
     formatting = channel.formatting
-    content = _sanitize_content(message.content or "")
-    embed_blocks = list(_clean_embed_text(message.embeds))
+    content = _sanitize_content(message.content or "", message)
+    embed_blocks = list(_clean_embed_text(message.embeds, message))
     image_urls, file_attachments = _split_attachments(message.attachments)
     attachments_block = _render_attachments_block(
         file_attachments, formatting.attachments_style
@@ -29,9 +40,9 @@ def format_discord_message(
     link_block = _build_link_block(message, formatting.show_discord_link)
 
     blocks: list[str] = []
-    chip = _build_chip(channel.label, message.author_name)
-    if chip:
-        blocks.append(chip)
+    header = _build_header(channel.label, message.author_name, message_kind)
+    if header:
+        blocks.append(header)
 
     if content:
         blocks.append(_format_text_block(content))
@@ -41,6 +52,10 @@ def format_discord_message(
         blocks.append(attachments_block)
     if link_block:
         blocks.append(link_block)
+
+    date_line = _format_timestamp_line(message)
+    if date_line:
+        blocks.append(date_line)
 
     combined = "\n\n".join(block for block in blocks if block)
     chunks = _chunk_html_text(combined, formatting.max_length, formatting.ellipsis)
@@ -54,7 +69,37 @@ def format_discord_message(
     )
 
 
-def _clean_embed_text(embeds: Sequence[EmbedPayload]) -> Iterable[str]:
+def _normalize_message_kind(kind: str) -> str:
+    if not kind:
+        return "message"
+    lowered = kind.lower()
+    return lowered if lowered in _MESSAGE_KIND_ICONS else "message"
+
+
+def _build_header(label: str, author: str, kind: str) -> str:
+    kind_key = _normalize_message_kind(kind)
+    parts: list[str] = []
+    if label:
+        parts.append(f"{_CHANNEL_ICON} <b>{_escape(label)}</b>")
+    icon = _MESSAGE_KIND_ICONS.get(kind_key, "💬")
+    kind_label = _MESSAGE_KIND_LABELS.get(kind_key, "Новое сообщение")
+    parts.append(f"{icon} <b>{_escape(kind_label)}</b>")
+    if author:
+        parts.append(f"👤 <b>{_escape(author)}</b>")
+    return "\n".join(parts)
+
+
+def _format_timestamp_line(message: DiscordMessage) -> str:
+    moment = _parse_timestamp(message.edited_timestamp or message.timestamp)
+    if moment is None:
+        moment = datetime.now(timezone.utc)
+    formatted = moment.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    return f"📅 <b>{_escape(formatted)}</b>"
+
+
+def _clean_embed_text(
+    embeds: Sequence[EmbedPayload], message: DiscordMessage | None = None
+) -> Iterable[str]:
     for embed in embeds:
         title = str(embed.get("title") or "").strip()
         description = str(embed.get("description") or "").strip()
@@ -74,7 +119,7 @@ def _clean_embed_text(embeds: Sequence[EmbedPayload]) -> Iterable[str]:
             cleaned_segments = [
                 part
                 for part in (
-                    _sanitize_content(segment) for segment in segments if segment
+                    _sanitize_content(segment, message) for segment in segments if segment
                 )
                 if part
             ]
@@ -170,15 +215,6 @@ def _human_size(value: float | int | None) -> str:
     return f"{size:.1f}{units[index]}"
 
 
-def _build_chip(label: str, author: str) -> str:
-    parts: list[str] = []
-    if label:
-        parts.append(f"<b>{_escape(label)}</b>")
-    if author:
-        parts.append(f"<b>{_escape(author)}</b>")
-    return " • ".join(parts)
-
-
 def _build_link_block(message: DiscordMessage, enabled: bool) -> str:
     if not enabled:
         return ""
@@ -188,7 +224,7 @@ def _build_link_block(message: DiscordMessage, enabled: bool) -> str:
         return ""
     guild_id = message.guild_id.strip() if message.guild_id else "@me"
     link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-    return f"🔗 <a href=\"{_escape(link)}\">link</a>"
+    return f"🔗 <a href=\"{_escape(link)}\">Открыть в Discord</a>"
 
 
 def _chunk_html_text(text: str, limit: int, ellipsis: str) -> list[str]:
@@ -233,27 +269,64 @@ def _format_text_block(text: str) -> str:
     return _apply_basic_markdown(text)
 
 
+_USER_MENTION_RE = re.compile(r"<@!?([0-9]+)>")
+_ROLE_MENTION_RE = re.compile(r"<@&([0-9]+)>")
 _CHANNEL_MENTION_RE = re.compile(r"<#([0-9]+)>")
 _CUSTOM_EMOJI_RE = re.compile(r"<a?:[a-zA-Z0-9_~]+:[0-9]+>")
 _EXTRA_SPACE_RE = re.compile(r"[ \t]{2,}")
 _TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_ALLOWED_LINK_SCHEMES = {"http", "https"}
 
 
-def _sanitize_content(text: str) -> str:
+def _sanitize_content(text: str, message: DiscordMessage | None = None) -> str:
     if not text:
         return ""
-    cleaned = _CHANNEL_MENTION_RE.sub(lambda match: f"#{match.group(1)}", text)
+    cleaned = text
+    if message is not None:
+        cleaned = _USER_MENTION_RE.sub(
+            lambda match: _format_user_mention(match.group(1), message), cleaned
+        )
+        cleaned = _ROLE_MENTION_RE.sub(
+            lambda match: _format_role_mention(match.group(1), message), cleaned
+        )
+        cleaned = _CHANNEL_MENTION_RE.sub(
+            lambda match: _format_channel_mention(match.group(1), message), cleaned
+        )
+    else:
+        cleaned = _CHANNEL_MENTION_RE.sub(lambda match: f"#{match.group(1)}", cleaned)
     cleaned = _CUSTOM_EMOJI_RE.sub("", cleaned)
     cleaned = _EXTRA_SPACE_RE.sub(" ", cleaned)
     cleaned = _TRIPLE_NEWLINES_RE.sub("\n\n", cleaned)
     return cleaned.strip()
 
 
+def _format_user_mention(user_id: str, message: DiscordMessage) -> str:
+    display = (message.mention_users.get(user_id) or "").strip()
+    if display:
+        return f"@{display}"
+    return f"@{user_id}"
+
+
+def _format_role_mention(role_id: str, message: DiscordMessage) -> str:
+    display = (message.mention_roles.get(role_id) or "").strip()
+    if display:
+        return f"@{display}"
+    return f"@{role_id}"
+
+
+def _format_channel_mention(channel_id: str, message: DiscordMessage) -> str:
+    display = (message.mention_channels.get(channel_id) or "").strip()
+    if display:
+        return f"#{display}"
+    return f"#{channel_id}"
+
+
 def _apply_basic_markdown(text: str) -> str:
     placeholders: dict[str, str] = {}
 
     def _store(value: str) -> str:
-        token = f"__MARKUP_PLACEHOLDER_{len(placeholders)}__"
+        token = f"§§FMPLACEHOLDER_{len(placeholders)}§§"
         placeholders[token] = value
         return token
 
@@ -270,7 +343,18 @@ def _apply_basic_markdown(text: str) -> str:
     text_without_code = _CODE_BLOCK_RE.sub(_format_code_block, text)
     text_without_code = _CODE_SPAN_RE.sub(_format_inline_code, text_without_code)
 
-    escaped = html.escape(text_without_code, quote=False)
+    def _format_link(match: re.Match[str]) -> str:
+        label = match.group(1)
+        url = match.group(2).strip()
+        if not _is_allowed_link(url):
+            return match.group(0)
+        safe_url = html.escape(url, quote=True)
+        safe_label = html.escape(label, quote=False)
+        return _store(f"<a href=\"{safe_url}\">{safe_label}</a>")
+
+    text_with_links = _LINK_RE.sub(_format_link, text_without_code)
+
+    escaped = html.escape(text_with_links, quote=False)
 
     escaped = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
     escaped = _UNDERLINE_RE.sub(lambda m: f"<u>{m.group(1)}</u>", escaped)
@@ -300,3 +384,28 @@ _IMAGE_EXTENSIONS = (
     ".tiff",
     ".svg",
 )
+
+
+def _is_allowed_link(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if not parsed.scheme or parsed.scheme.lower() not in _ALLOWED_LINK_SCHEMES:
+        return False
+    return bool(parsed.netloc)
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
