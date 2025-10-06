@@ -106,6 +106,48 @@ class DiscordClient:
             _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
         )
 
+    async def check_channel_exists(self, channel_id: str) -> bool:
+        if not self._token:
+            return False
+
+        headers = {
+            "Authorization": self._token,
+            "User-Agent": self._choose_user_agent(),
+            "Accept": "application/json",
+        }
+
+        url = f"{_API_BASE}/channels/{channel_id}"
+        proxy = self._network.discord_proxy_url
+        proxy_auth = self._build_proxy_auth()
+
+        async with self._lock:
+            try:
+                timeout_cfg = aiohttp.ClientTimeout(total=15)
+                async with self._session.get(
+                    url,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=timeout_cfg,
+                    proxy_auth=proxy_auth,
+                ) as resp:
+                    status = resp.status
+                    if status == 200:
+                        await resp.read()
+                        return True
+                    if status in {401, 403, 404}:
+                        logger.warning(
+                            "Discord ответил статусом %s при проверке канала %s", status, channel_id
+                        )
+                        return False
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Не удалось проверить канал Discord %s: %s",
+                    channel_id,
+                    exc,
+                )
+                return False
+        return False
+
     async def fetch_pinned_messages(self, channel_id: str) -> Sequence[DiscordMessage]:
         if not self._token:
             return []
@@ -292,9 +334,16 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
     embeds = tuple(item for item in embeds_raw if isinstance(item, Mapping))
     stickers = tuple(item for item in stickers_raw if isinstance(item, Mapping))
 
+    message_type_raw = payload.get("type")
+    try:
+        message_type = int(str(message_type_raw))
+    except (TypeError, ValueError):
+        message_type = 0
+
     return DiscordMessage(
         id=message_id,
         channel_id=str(payload.get("channel_id") or channel_id),
+        guild_id=str(payload.get("guild_id")) if payload.get("guild_id") else None,
         author_id=author_id,
         author_name=author_name,
         content=content,
@@ -304,4 +353,5 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
         role_ids=role_ids,
         timestamp=payload.get("timestamp"),
         edited_timestamp=payload.get("edited_timestamp"),
+        message_type=message_type,
     )

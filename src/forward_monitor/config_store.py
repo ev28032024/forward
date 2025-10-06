@@ -813,4 +813,5 @@ def _formatting_from_options(
         max_length=int(options.get("max_length", "3500")),
         ellipsis=options.get("ellipsis", "…"),
         attachments_style=options.get("attachments_style", "summary"),
+        show_discord_link=options.get("show_discord_link", "false").lower() == "true",
     )

@@ -55,6 +55,7 @@ def _sample_message() -> "DiscordMessageType":
     return DiscordMessage(
         id="1",
         channel_id="1",
+        guild_id="1",
         author_id="1",
         author_name="Bench",
         content="foo" * 20,
@@ -156,6 +157,17 @@ async def benchmark_forwarding(iterations: int) -> None:
             return None
 
         async def answer_callback_query(self, callback_id: str, text: str) -> None:
+            return None
+
+        async def send_photo(
+            self,
+            chat_id: int | str,
+            photo: str,
+            *,
+            caption: str | None = None,
+            parse_mode: str | None = None,
+            message_thread_id: int | None = None,
+        ) -> None:
             return None
 
     api: TelegramAPIProtocol = _NoopAPI()

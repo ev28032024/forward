@@ -22,9 +22,11 @@ def format_discord_message(
     formatting = channel.formatting
     content = _sanitize_content(message.content or "")
     embed_blocks = list(_clean_embed_text(message.embeds))
+    image_urls, file_attachments = _split_attachments(message.attachments)
     attachments_block = _render_attachments_block(
-        message.attachments, formatting.attachments_style
+        file_attachments, formatting.attachments_style
     )
+    link_block = _build_link_block(message, formatting.show_discord_link)
 
     blocks: list[str] = []
     chip = _build_chip(channel.label, message.author_name)
@@ -32,11 +34,13 @@ def format_discord_message(
         blocks.append(chip)
 
     if content:
-        blocks.append(_escape_multiline(content))
+        blocks.append(_format_text_block(content))
     for embed in embed_blocks:
-        blocks.append(_escape_multiline(embed))
+        blocks.append(_format_text_block(embed))
     if attachments_block:
         blocks.append(attachments_block)
+    if link_block:
+        blocks.append(link_block)
 
     combined = "\n\n".join(block for block in blocks if block)
     chunks = _chunk_html_text(combined, formatting.max_length, formatting.ellipsis)
@@ -46,6 +50,7 @@ def format_discord_message(
         extra_messages=tuple(chunks[1:]),
         parse_mode="HTML",
         disable_preview=formatting.disable_preview,
+        image_urls=image_urls,
     )
 
 
@@ -126,6 +131,33 @@ def _render_attachments_block(
     return header
 
 
+def _split_attachments(
+    attachments: Sequence[AttachmentPayload],
+) -> tuple[tuple[str, ...], tuple[AttachmentPayload, ...]]:
+    images: list[str] = []
+    others: list[AttachmentPayload] = []
+    for attachment in attachments:
+        url = str(attachment.get("url") or attachment.get("proxy_url") or "").strip()
+        if not url:
+            continue
+        if _is_image_attachment(attachment):
+            images.append(url)
+        else:
+            others.append(attachment)
+    return tuple(images), tuple(others)
+
+
+def _is_image_attachment(attachment: AttachmentPayload) -> bool:
+    filename = str(attachment.get("filename") or "").lower()
+    content_type = str(attachment.get("content_type") or "").lower()
+    if any(filename.endswith(ext) for ext in _IMAGE_EXTENSIONS):
+        return True
+    if content_type.startswith("image/"):
+        subtype = content_type.split("/", 1)[1] if "/" in content_type else ""
+        return not subtype.startswith("gifv")
+    return False
+
+
 def _human_size(value: float | int | None) -> str:
     if value is None:
         return ""
@@ -145,6 +177,18 @@ def _build_chip(label: str, author: str) -> str:
     if author:
         parts.append(f"<b>{_escape(author)}</b>")
     return " • ".join(parts)
+
+
+def _build_link_block(message: DiscordMessage, enabled: bool) -> str:
+    if not enabled:
+        return ""
+    message_id = message.id.strip()
+    channel_id = message.channel_id.strip()
+    if not message_id or not channel_id:
+        return ""
+    guild_id = message.guild_id.strip() if message.guild_id else "@me"
+    link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+    return f"🔗 <a href=\"{_escape(link)}\">link</a>"
 
 
 def _chunk_html_text(text: str, limit: int, ellipsis: str) -> list[str]:
@@ -185,11 +229,12 @@ def _escape(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def _escape_multiline(text: str) -> str:
-    return "\n".join(_escape(line) for line in text.splitlines())
+def _format_text_block(text: str) -> str:
+    return _apply_basic_markdown(text)
 
 
 _CHANNEL_MENTION_RE = re.compile(r"<#([0-9]+)>")
+_CUSTOM_EMOJI_RE = re.compile(r"<a?:[a-zA-Z0-9_~]+:[0-9]+>")
 _EXTRA_SPACE_RE = re.compile(r"[ \t]{2,}")
 _TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
 
@@ -198,6 +243,60 @@ def _sanitize_content(text: str) -> str:
     if not text:
         return ""
     cleaned = _CHANNEL_MENTION_RE.sub(lambda match: f"#{match.group(1)}", text)
+    cleaned = _CUSTOM_EMOJI_RE.sub("", cleaned)
     cleaned = _EXTRA_SPACE_RE.sub(" ", cleaned)
     cleaned = _TRIPLE_NEWLINES_RE.sub("\n\n", cleaned)
     return cleaned.strip()
+
+
+def _apply_basic_markdown(text: str) -> str:
+    placeholders: dict[str, str] = {}
+
+    def _store(value: str) -> str:
+        token = f"__MARKUP_PLACEHOLDER_{len(placeholders)}__"
+        placeholders[token] = value
+        return token
+
+    def _format_code_block(match: re.Match[str]) -> str:
+        content = match.group(1).strip("\n")
+        escaped = html.escape(content, quote=False)
+        return _store(f"<pre><code>{escaped}</code></pre>")
+
+    def _format_inline_code(match: re.Match[str]) -> str:
+        content = match.group(1)
+        escaped = html.escape(content, quote=False)
+        return _store(f"<code>{escaped}</code>")
+
+    text_without_code = _CODE_BLOCK_RE.sub(_format_code_block, text)
+    text_without_code = _CODE_SPAN_RE.sub(_format_inline_code, text_without_code)
+
+    escaped = html.escape(text_without_code, quote=False)
+
+    escaped = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", escaped)
+    escaped = _UNDERLINE_RE.sub(lambda m: f"<u>{m.group(1)}</u>", escaped)
+    escaped = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", escaped)
+    escaped = _SPOILER_RE.sub(lambda m: f"<tg-spoiler>{m.group(1)}</tg-spoiler>", escaped)
+
+    result = escaped
+    for token, value in placeholders.items():
+        result = result.replace(token, value)
+    return result
+
+
+_CODE_BLOCK_RE = re.compile(r"```(.*?)```", re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"`([^`]+?)`")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_UNDERLINE_RE = re.compile(r"__(.+?)__", re.DOTALL)
+_STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
+_SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
+
+_IMAGE_EXTENSIONS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".tiff",
+    ".svg",
+)

@@ -18,6 +18,7 @@ def test_links_style_shows_urls() -> None:
     message = DiscordMessage(
         id="1",
         channel_id="1",
+        guild_id="g",
         author_id="1",
         author_name="User",
         content="",
@@ -27,7 +28,6 @@ def test_links_style_shows_urls() -> None:
         role_ids=set(),
     )
     formatted = format_discord_message(message, channel)
-    body = formatted.text.replace("\\", "")
     assert formatted.parse_mode == "HTML"
-    assert "https://example.com/a.png" in body
-    assert "Ссылки на вложения" in body
+    assert formatted.image_urls == ("https://example.com/a.png",)
+    assert "Ссылки на вложения" not in formatted.text

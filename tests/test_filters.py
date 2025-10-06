@@ -12,6 +12,7 @@ def make_message(**kwargs: Any) -> DiscordMessage:
     return DiscordMessage(
         id=str(kwargs.get("id", "1")),
         channel_id=str(kwargs.get("channel_id", "10")),
+        guild_id=str(kwargs.get("guild_id", "20")),
         author_id=str(kwargs.get("author_id", "42")),
         author_name=str(kwargs.get("author_name", "User")),
         content=str(kwargs.get("content", "")),

@@ -7,7 +7,7 @@ import html
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Iterable, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Protocol, Sequence
 from urllib.parse import urlparse
 
 import aiohttp
@@ -19,8 +19,13 @@ from .config_store import (
     normalize_filter_value,
 )
 from .discord import DiscordClient
+from .filters import FilterEngine
+from .formatting import format_discord_message
 from .models import FilterConfig, FormattedTelegramMessage
-from .utils import normalize_username, parse_delay_setting
+from .utils import RateLimiter, normalize_username, parse_delay_setting
+
+if TYPE_CHECKING:
+    from .models import ChannelConfig
 
 _API_BASE = "https://api.telegram.org"
 
@@ -40,6 +45,8 @@ _FILTER_TYPES: tuple[str, ...] = tuple(_FILTER_LABELS.keys())
 _NBSP = "\u00A0"
 _INDENT = _NBSP * 2
 _DOUBLE_INDENT = _NBSP * 4
+
+_FORWARDABLE_MESSAGE_TYPES: set[int] = {0, 19, 20, 21, 23}
 
 
 def _format_seconds(value: float) -> str:
@@ -71,6 +78,16 @@ class TelegramAPIProtocol(Protocol):
         *,
         parse_mode: str | None = None,
         disable_preview: bool = True,
+        message_thread_id: int | None = None,
+    ) -> None: ...
+
+    async def send_photo(
+        self,
+        chat_id: int | str,
+        photo: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
         message_thread_id: int | None = None,
     ) -> None: ...
 
@@ -161,6 +178,34 @@ class TelegramAPI:
         data = {"callback_query_id": callback_id, "text": text[:200]}
         try:
             timeout_cfg = aiohttp.ClientTimeout(total=10)
+            async with self._session.post(
+                url,
+                json=data,
+                timeout=timeout_cfg,
+            ) as resp:
+                await resp.read()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return
+
+    async def send_photo(
+        self,
+        chat_id: int | str,
+        photo: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> None:
+        url = f"{_API_BASE}/bot{self._token}/sendPhoto"
+        data: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
+        if caption:
+            data["caption"] = caption
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        if message_thread_id is not None:
+            data["message_thread_id"] = message_thread_id
+        try:
+            timeout_cfg = aiohttp.ClientTimeout(total=15)
             async with self._session.post(
                 url,
                 json=data,
@@ -272,6 +317,11 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         help_text="/set_attachments <discord_id|all> <summary|links>",
     ),
     _CommandInfo(
+        name="set_discord_link",
+        summary="Управлять ссылкой на сообщение Discord.",
+        help_text="/set_discord_link <discord_id|all> <on|off>",
+    ),
+    _CommandInfo(
         name="set_monitoring",
         summary="Выбрать режим мониторинга сообщений.",
         help_text="/set_monitoring <discord_id|all> <messages|pinned>",
@@ -285,6 +335,11 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         name="clear_filter",
         summary="Удалить фильтры сообщений.",
         help_text="/clear_filter <discord_id|all> <тип> [значение]",
+    ),
+    _CommandInfo(
+        name="send_recent",
+        summary="Ручная пересылка последних сообщений.",
+        help_text="/send_recent <кол-во> [discord_id|all]",
     ),
     _CommandInfo(
         name="set_proxy",
@@ -1144,28 +1199,54 @@ class TelegramController:
         if self._store.get_channel(discord_id):
             await self._api.send_message(ctx.chat_id, "Канал уже существует")
             return
-        last_message_id: str | None = None
         token = self._store.get_setting("discord.token")
-        if token:
-            network = self._store.load_network_options()
-            self._discord.set_token(token)
-            self._discord.set_network_options(network)
-            try:
-                messages = await self._discord.fetch_messages(discord_id, limit=1)
-            except Exception:
-                logger.exception(
-                    "Не удалось получить последнее сообщение канала %s при создании связки",
-                    discord_id,
+        if not token:
+            await self._api.send_message(
+                ctx.chat_id, "Сначала задайте токен Discord командой /set_discord_token"
+            )
+            return
+
+        network = self._store.load_network_options()
+        self._discord.set_token(token)
+        self._discord.set_network_options(network)
+
+        try:
+            exists = await self._discord.check_channel_exists(discord_id)
+        except Exception:
+            logger.exception(
+                "Не удалось проверить наличие Discord канала %s при создании связки",
+                discord_id,
+            )
+            await self._api.send_message(
+                ctx.chat_id,
+                "Не удалось проверить канал. Убедитесь в корректности идентификатора.",
+            )
+            return
+
+        if not exists:
+            await self._api.send_message(
+                ctx.chat_id,
+                "Канал не найден или нет доступа. Проверьте идентификатор и права бота.",
+            )
+            return
+
+        last_message_id: str | None = None
+        try:
+            messages = await self._discord.fetch_messages(discord_id, limit=1)
+        except Exception:
+            logger.exception(
+                "Не удалось получить последнее сообщение канала %s при создании связки",
+                discord_id,
+            )
+        else:
+            if messages:
+                latest = max(
+                    messages,
+                    key=lambda msg: (
+                        (int(msg.id), msg.id) if msg.id.isdigit() else (0, msg.id)
+                    ),
                 )
-            else:
-                if messages:
-                    latest = max(
-                        messages,
-                        key=lambda msg: (
-                            (int(msg.id), msg.id) if msg.id.isdigit() else (0, msg.id)
-                        ),
-                    )
-                    last_message_id = latest.id
+                last_message_id = latest.id
         record = self._store.add_channel(
             discord_id,
             telegram_chat,
@@ -1296,6 +1377,173 @@ class TelegramController:
             parse_mode="HTML",
         )
 
+    async def cmd_send_recent(self, ctx: CommandContext) -> None:
+        parts = ctx.args.split()
+        if not parts:
+            await self._api.send_message(
+                ctx.chat_id, "Использование: /send_recent <кол-во> [discord_id|all]"
+            )
+            return
+
+        try:
+            requested = int(parts[0])
+        except ValueError:
+            await self._api.send_message(ctx.chat_id, "Количество должно быть числом")
+            return
+
+        if requested <= 0:
+            await self._api.send_message(
+                ctx.chat_id, "Количество должно быть положительным"
+            )
+            return
+
+        target = parts[1] if len(parts) > 1 else "all"
+        limit = min(requested, 100)
+        token = self._store.get_setting("discord.token")
+        if not token:
+            await self._api.send_message(
+                ctx.chat_id, "Сначала задайте токен Discord командой /set_discord_token"
+            )
+            return
+
+        network = self._store.load_network_options()
+        self._discord.set_token(token)
+        self._discord.set_network_options(network)
+
+        configs = self._store.load_channel_configurations()
+        channels_by_id: dict[str, ChannelConfig] = {
+            config.discord_id: config for config in configs
+        }
+
+        if target.lower() in {"all", "*"}:
+            selected = list(configs)
+        else:
+            channel = channels_by_id.get(target)
+            if not channel:
+                await self._api.send_message(ctx.chat_id, "Канал не найден")
+                return
+            selected = [channel]
+
+        if not selected:
+            await self._api.send_message(ctx.chat_id, "Каналы не настроены")
+            return
+
+        rate_setting = self._store.get_setting("runtime.rate")
+        try:
+            rate_value = float(rate_setting) if rate_setting is not None else 8.0
+        except ValueError:
+            rate_value = 8.0
+        rate_value = max(rate_value, 0.1)
+        limiter = RateLimiter(rate_value)
+
+        summary_lines: list[str] = ["<b>📨 Ручная пересылка</b>", ""]
+        total_forwarded = 0
+        state_changed = False
+
+        if requested > 100:
+            summary_lines.append(
+                "Запрошено больше 100 сообщений, будет переслано не более 100 из каждого канала."
+            )
+
+        for channel in selected:
+            label = html.escape(channel.label)
+            if not channel.active:
+                summary_lines.append(f"{label}: канал отключён, пропущено")
+                continue
+            if channel.pinned_only:
+                summary_lines.append(
+                    f"{label}: канал отслеживает только закреплённые сообщения, пропущено"
+                )
+                continue
+
+            try:
+                messages = await self._discord.fetch_messages(
+                    channel.discord_id,
+                    limit=limit,
+                )
+            except Exception:
+                logger.exception(
+                    "Не удалось получить сообщения канала %s при ручной пересылке",
+                    channel.discord_id,
+                )
+                summary_lines.append(f"{label}: ошибка при запросе сообщений")
+                continue
+
+            if not messages:
+                summary_lines.append(f"{label}: новых сообщений нет")
+                continue
+
+            def sort_key(message_id: str) -> tuple[int, str]:
+                return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
+
+            ordered = sorted(messages, key=lambda msg: sort_key(msg.id))
+            subset = ordered[-limit:]
+            engine = FilterEngine(channel.filters)
+            forwarded = 0
+            last_seen = channel.last_message_id
+
+            for msg in subset:
+                candidate_id = msg.id
+                if (
+                    msg.message_type not in _FORWARDABLE_MESSAGE_TYPES
+                    and not (msg.attachments or msg.embeds)
+                ):
+                    last_seen = candidate_id
+                    continue
+                decision = engine.evaluate(msg)
+                if not decision.allowed:
+                    last_seen = candidate_id
+                    continue
+                formatted = format_discord_message(msg, channel)
+                try:
+                    await limiter.wait()
+                    await send_formatted(
+                        self._api,
+                        channel.telegram_chat_id,
+                        formatted,
+                        thread_id=channel.telegram_thread_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Не удалось отправить сообщение %s в Telegram чат %s при ручной пересылке",
+                        msg.id,
+                        channel.telegram_chat_id,
+                    )
+                    last_seen = candidate_id
+                    continue
+                last_seen = candidate_id
+                forwarded += 1
+                total_forwarded += 1
+
+            if forwarded:
+                summary_lines.append(
+                    f"{label}: переслано {forwarded} из {len(subset)} сообщений"
+                )
+            else:
+                summary_lines.append(
+                    f"{label}: подходящих сообщений не найдено"
+                )
+
+            if (
+                last_seen
+                and channel.storage_id is not None
+                and last_seen != channel.last_message_id
+            ):
+                self._store.set_last_message(channel.storage_id, last_seen)
+                state_changed = True
+
+        if state_changed:
+            self._on_change()
+
+        summary_lines.append("")
+        summary_lines.append(f"Всего переслано: {total_forwarded}")
+
+        await self._api.send_message(
+            ctx.chat_id,
+            "\n".join(summary_lines),
+            parse_mode="HTML",
+        )
+
     async def cmd_set_disable_preview(self, ctx: CommandContext) -> None:
         await self._set_format_option(
             ctx,
@@ -1308,6 +1556,9 @@ class TelegramController:
 
     async def cmd_set_attachments(self, ctx: CommandContext) -> None:
         await self._set_format_option(ctx, "attachments_style", allowed={"summary", "links"})
+
+    async def cmd_set_discord_link(self, ctx: CommandContext) -> None:
+        await self._set_format_option(ctx, "show_discord_link", allowed={"on", "off"})
 
     async def cmd_set_monitoring(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=1)
@@ -1489,7 +1740,7 @@ class TelegramController:
             await self._api.send_message(ctx.chat_id, f"Допустимо: {', '.join(allowed)}")
             return
 
-        if option == "disable_preview":
+        if option in {"disable_preview", "show_discord_link"}:
             value = "true" if value.lower() in {"true", "on", "1", "yes"} else "false"
         elif option == "max_length":
             try:
@@ -1532,19 +1783,27 @@ async def send_formatted(
     *,
     thread_id: int | None = None,
 ) -> None:
-    await api.send_message(
-        chat_id,
-        message.text,
-        parse_mode=message.parse_mode,
-        disable_preview=message.disable_preview,
-        message_thread_id=thread_id,
-    )
+    if message.text:
+        await api.send_message(
+            chat_id,
+            message.text,
+            parse_mode=message.parse_mode,
+            disable_preview=message.disable_preview,
+            message_thread_id=thread_id,
+        )
     for extra in message.extra_messages:
         await api.send_message(
             chat_id,
             extra,
             parse_mode=message.parse_mode,
             disable_preview=message.disable_preview,
+            message_thread_id=thread_id,
+        )
+    for photo in message.image_urls:
+        await api.send_photo(
+            chat_id,
+            photo,
+            parse_mode=None,
             message_thread_id=thread_id,
         )
 
