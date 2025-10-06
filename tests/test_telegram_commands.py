@@ -193,6 +193,200 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_send_recent_handles_pinned_messages(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        dummy_client.messages = [
+            DiscordMessage(
+                id="100",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="tester",
+                content="bootstrap",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            )
+        ]
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="200",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="tester",
+                content="Pinned base",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            )
+        ]
+        admin.args = "123 pinned"
+        await controller._dispatch("set_monitoring", admin)
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="205",
+                channel_id="123",
+                guild_id="guild",
+                author_id="2",
+                author_name="Alice",
+                content="New pinned 1",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="210",
+                channel_id="123",
+                guild_id="guild",
+                author_id="3",
+                author_name="Bob",
+                content="New pinned 2",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="200",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="tester",
+                content="Pinned base",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+        ]
+
+        api.messages.clear()
+        admin.args = "2 123"
+        await controller._dispatch("send_recent", admin)
+
+        assert any("закреплён" in message for message in api.messages)
+
+        activity = store.load_manual_forward_activity()
+        assert activity is not None
+        entry = next((item for item in activity.entries if item.discord_id == "123"), None)
+        assert entry is not None
+        assert entry.mode == "pinned"
+        assert entry.forwarded == 2
+
+        configs = store.load_channel_configurations()
+        channel_cfg = next(cfg for cfg in configs if cfg.discord_id == "123")
+        assert {"205", "210"}.issubset(channel_cfg.known_pinned_ids)
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_status_reports_discord_link_and_manual_activity(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        dummy_client.messages = [
+            DiscordMessage(
+                id="100",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="tester",
+                content="bootstrap",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            )
+        ]
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        admin.args = "all on"
+        await controller._dispatch("set_discord_link", admin)
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="101",
+                channel_id="123",
+                guild_id="guild",
+                author_id="2",
+                author_name="Alice",
+                content="Recent message",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            )
+        ]
+        api.messages.clear()
+        admin.args = "1 123"
+        await controller._dispatch("send_recent", admin)
+
+        api.messages.clear()
+        admin.args = ""
+        await controller._dispatch("status", admin)
+
+        status_text = "\n".join(api.messages)
+        assert "Ссылка на Discord: включена" in status_text
+        assert "Ссылка на Discord: показывается" in status_text
+        assert "📨 Ручные пересылки" in status_text
+        assert "Запрошено: 1 (лимит 1), переслано: 1" in status_text
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
 def test_send_recent_forwards_messages(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
@@ -274,6 +468,16 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
         assert any("<b>Bold text</b>" in message for message in api.messages)
         assert any("Всего переслано: 2" in message for message in api.messages)
         assert ("123", 2, None) in dummy_client.fetch_calls
+
+        activity = store.load_manual_forward_activity()
+        assert activity is not None
+        assert activity.total_forwarded == 2
+        assert activity.requested == 2
+        assert activity.limit == 2
+        assert activity.entries
+        assert activity.entries[0].forwarded == 2
+        assert activity.entries[0].mode == "messages"
+
 
     import asyncio
 
