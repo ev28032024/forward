@@ -1102,12 +1102,6 @@ class TelegramController:
         if not token:
             await self._api.send_message(ctx.chat_id, "Нужно передать токен")
             return
-        if token.lower().startswith("bot "):
-            await self._api.send_message(
-                ctx.chat_id,
-                "Укажите пользовательский токен без префикса Bot.",
-            )
-            return
 
         network = self._store.load_network_options()
         result = await self._discord.verify_token(token, network=network)
@@ -1118,7 +1112,8 @@ class TelegramController:
             )
             return
 
-        self._store.set_setting("discord.token", token)
+        stored_value = result.normalized_token or token
+        self._store.set_setting("discord.token", stored_value)
         self._on_change()
         display = result.display_name or "пользователь"
         await self._api.send_message(

@@ -118,6 +118,50 @@ def test_controller_respects_admin_permissions(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_set_discord_token_uses_normalized_value(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+
+        class NormalizingDiscord(DummyDiscordClient):
+            async def verify_token(
+                self,
+                token: str,
+                *,
+                network: NetworkOptions | None = None,
+            ) -> TokenCheckResult:
+                self.tokens.append(token)
+                return TokenCheckResult(
+                    ok=True,
+                    display_name="bot",
+                    normalized_token="Bot normalized-token",
+                )
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, NormalizingDiscord()),
+            on_change=lambda: None,
+        )
+
+        ctx = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="user",
+            handle="user",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", ctx)
+        ctx.args = "raw-token"
+        await controller._dispatch("set_discord_token", ctx)
+
+        assert store.get_setting("discord.token") == "Bot normalized-token"
+
+    asyncio.run(runner())
+
+
 def test_grant_admin_by_username(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
