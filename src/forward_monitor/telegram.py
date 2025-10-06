@@ -1776,9 +1776,13 @@ class TelegramController:
                 continue
 
             ordered = sorted(messages, key=lambda msg: sort_key(msg.id), reverse=True)
-            subset = ordered[:limit]
+            candidates = [msg for msg in ordered if is_newer(msg.id, marker)]
+            subset = candidates[:limit]
             if not subset:
-                _record("сообщения не найдены")
+                if marker is None:
+                    _record("сообщения не найдены")
+                else:
+                    _record("новых сообщений не найдено")
                 continue
             engine = FilterEngine(channel.filters)
             last_seen = marker
@@ -1829,7 +1833,7 @@ class TelegramController:
                 self._store.set_last_message(channel.storage_id, last_seen)
                 state_changed = True
 
-            total_candidates = len(ordered)
+            total_candidates = len(candidates)
             processed_candidates = len(subset)
             if forwarded:
                 note_parts = [
