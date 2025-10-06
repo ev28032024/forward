@@ -78,7 +78,7 @@ class ForwardMonitorApp:
         self._telegram_token = telegram_token
         self._refresh_event = asyncio.Event()
         self._health_wakeup = asyncio.Event()
-        self._health_status: dict[str, str] = {}
+        self._health_status: dict[str, str] = self._load_initial_health_statuses()
         self._health_ready = asyncio.Event()
         self._config_version = 0
         self._health_version = -1
@@ -661,6 +661,19 @@ class ForwardMonitorApp:
 
     def _load_network_options(self) -> NetworkOptions:
         return self._store.load_network_options()
+
+    def _load_initial_health_statuses(self) -> dict[str, str]:
+        statuses: dict[str, str] = {}
+        prefix = "health."
+        suffix = ".status"
+        for key, value in self._store.iter_settings(prefix):
+            if not key.endswith(suffix):
+                continue
+            subject = key[len(prefix) : -len(suffix)]
+            if not subject:
+                continue
+            statuses[subject] = value
+        return statuses
 
     async def _wait_for_health(self, target_version: int) -> None:
         while self._health_version < target_version:

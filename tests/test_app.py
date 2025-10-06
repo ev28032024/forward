@@ -5,7 +5,7 @@ import contextlib
 from pathlib import Path
 from typing import cast
 
-from forward_monitor.app import ForwardMonitorApp
+from forward_monitor.app import ForwardMonitorApp, HealthUpdate
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
 from forward_monitor.models import NetworkOptions
@@ -126,6 +126,34 @@ def test_monitor_waits_for_health_before_processing(tmp_path: Path) -> None:
 
         assert discord.fetch_calls == []
         assert discord.verify_calls != []
+        app._store.close()
+
+    asyncio.run(runner())
+
+
+def test_app_restores_existing_health_status(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        store.add_channel("123", "456", label="Test")
+        store.set_health_status(
+            "channel.123", "error", "Discord канал недоступен или нет прав."
+        )
+        store.close()
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        assert app._health_status.get("channel.123") == "error"
+
+        telegram = DummyTelegramAPI()
+        update = HealthUpdate(
+            key="channel.123",
+            status="error",
+            message="Discord канал недоступен или нет прав.",
+            label="Test",
+        )
+        await app._emit_health_notifications([update], cast(TelegramAPI, telegram))
+
+        assert telegram.messages == []
         app._store.close()
 
     asyncio.run(runner())
