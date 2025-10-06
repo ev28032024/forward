@@ -282,6 +282,14 @@ class ForwardMonitorApp:
         token_result = await discord_client.verify_token(token, network=state.network)
         token_status = "ok" if token_result.ok else "error"
         token_message = token_result.error
+        if token_result.ok and token_result.normalized_token:
+            normalized = token_result.normalized_token
+            if normalized != token:
+                self._store.set_setting("discord.token", normalized)
+                token = normalized
+                state.discord_token = normalized
+                discord_client.set_token(normalized)
+                self._signal_refresh()
         updates.append(
             HealthUpdate(
                 key="discord_token",

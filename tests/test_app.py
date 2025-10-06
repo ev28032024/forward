@@ -182,3 +182,48 @@ def test_app_restores_existing_health_status(tmp_path: Path) -> None:
         app._store.close()
 
     asyncio.run(runner())
+
+
+def test_health_check_normalizes_stored_token(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        store.set_setting("discord.token", "raw-token")
+        store.add_channel("123", "456", label="Test")
+
+        class NormalizingDiscord(DummyDiscordClient):
+            async def verify_token(
+                self,
+                token: str,
+                *,
+                network: NetworkOptions | None = None,
+            ) -> TokenCheckResult:
+                self.verify_calls.append(token)
+                return TokenCheckResult(
+                    ok=True,
+                    display_name="bot",
+                    normalized_token="Bot raw-token",
+                )
+
+            async def check_channel_exists(self, channel_id: str) -> bool:
+                self.channel_checks.append(channel_id)
+                return True
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        discord = NormalizingDiscord()
+        telegram = DummyTelegramAPI()
+
+        state = app._reload_state()
+        await app._run_health_checks(
+            state,
+            cast(DiscordClient, discord),
+            cast(TelegramAPI, telegram),
+        )
+
+        assert store.get_setting("discord.token") == "Bot raw-token"
+        assert discord.token == "Bot raw-token"
+
+        store.close()
+        app._store.close()
+
+    asyncio.run(runner())

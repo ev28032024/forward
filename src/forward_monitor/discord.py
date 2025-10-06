@@ -28,6 +28,7 @@ class TokenCheckResult:
     display_name: str | None = None
     error: str | None = None
     status: int | None = None
+    normalized_token: str | None = None
 
 
 @dataclass(slots=True)
@@ -325,57 +326,100 @@ class DiscordClient:
         *,
         network: NetworkOptions | None = None,
     ) -> TokenCheckResult:
-        if not token:
+        candidate_token = (token or "").strip()
+        if not candidate_token:
             return TokenCheckResult(ok=False, error="Токен не задан")
 
         options = network or self._network
-        headers = {
-            "Authorization": token,
-            "User-Agent": options.discord_user_agent or self._choose_user_agent(),
-            "Accept": "application/json",
-        }
+        user_agent = options.discord_user_agent or self._choose_user_agent()
         url = f"{_API_BASE}/users/@me"
         proxy = options.discord_proxy_url
         proxy_auth = self._build_proxy_auth(options)
 
+        lowered = candidate_token.lower()
+        if lowered.startswith("bot ") or lowered.startswith("bearer "):
+            candidates = [candidate_token]
+        else:
+            candidates = [candidate_token, f"Bot {candidate_token}"]
+
+        last_status: int | None = None
+        last_error: str | None = None
+
         async with self._lock:
-            try:
-                timeout_cfg = aiohttp.ClientTimeout(total=15)
-                async with self._session.get(
-                    url,
-                    headers=headers,
-                    proxy=proxy,
-                    timeout=timeout_cfg,
-                    proxy_auth=proxy_auth,
-                ) as resp:
-                    status = resp.status
-                    if status == 200:
-                        payload = await resp.json()
-                        username = str(payload.get("global_name") or payload.get("username") or "")
-                        display = username or ""
-                        if not display:
-                            display = str(payload.get("id") or "user")
-                        return TokenCheckResult(ok=True, display_name=display, status=status)
-                    if status == 401:
+            for attempt, auth_token in enumerate(candidates, start=1):
+                headers = {
+                    "Authorization": auth_token,
+                    "User-Agent": user_agent,
+                    "Accept": "application/json",
+                }
+                try:
+                    timeout_cfg = aiohttp.ClientTimeout(total=15)
+                    async with self._session.get(
+                        url,
+                        headers=headers,
+                        proxy=proxy,
+                        timeout=timeout_cfg,
+                        proxy_auth=proxy_auth,
+                    ) as resp:
+                        status = resp.status
+                        last_status = status
+                        if status == 200:
+                            payload = await resp.json()
+                            username = str(
+                                payload.get("global_name")
+                                or payload.get("username")
+                                or ""
+                            )
+                            display = username or str(payload.get("id") or "user")
+                            normalized = auth_token
+                            is_bot = bool(payload.get("bot"))
+                            auth_lower = auth_token.lower()
+                            if is_bot and not auth_lower.startswith("bot "):
+                                normalized = f"Bot {candidate_token}"
+                            elif not is_bot and auth_lower.startswith("bot "):
+                                normalized = candidate_token
+                            return TokenCheckResult(
+                                ok=True,
+                                display_name=display,
+                                status=status,
+                                normalized_token=normalized,
+                            )
+                        if status == 401:
+                            await resp.read()
+                            last_error = (
+                                "Discord отклонил токен (401). Проверьте правильность значения."
+                            )
+                            if attempt < len(candidates):
+                                continue
+                            return TokenCheckResult(
+                                ok=False,
+                                error=last_error,
+                                status=status,
+                            )
+                        await resp.read()
+                        last_error = f"Discord ответил статусом {status}. Попробуйте позже."
+                        if attempt < len(candidates):
+                            continue
                         return TokenCheckResult(
                             ok=False,
-                            error="Discord отклонил токен (401). Проверьте правильность значения.",
+                            error=last_error,
                             status=status,
                         )
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "Не удалось проверить Discord токен: %s",
+                        exc,
+                    )
                     return TokenCheckResult(
                         ok=False,
-                        error=f"Discord ответил статусом {status}. Попробуйте позже.",
-                        status=status,
+                        error="Не удалось обратиться к Discord. Проверьте сеть или прокси.",
                     )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                logger.warning(
-                    "Не удалось проверить Discord токен: %s",
-                    exc,
-                )
-                return TokenCheckResult(
-                    ok=False,
-                    error="Не удалось обратиться к Discord. Проверьте сеть или прокси.",
-                )
+
+        return TokenCheckResult(
+            ok=False,
+            error=last_error or "Discord отклонил токен. Попробуйте позже.",
+            status=last_status,
+        )
 
     async def check_proxy(
         self,
