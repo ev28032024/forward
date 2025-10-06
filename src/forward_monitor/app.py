@@ -310,7 +310,11 @@ class ForwardMonitorApp:
                 continue
             self._health_status[update.key] = update.status
             if update.status == "error":
-                logger.warning("Проблема со здоровьем компонента %s: %s", update.key, update.message)
+                logger.warning(
+                    "Проблема со здоровьем компонента %s: %s",
+                    update.key,
+                    update.message,
+                )
                 message = self._format_health_alert(update, recovered=False)
                 await self._notify_admins(telegram_api, message)
             elif previous == "error" and update.status == "ok":
