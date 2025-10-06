@@ -189,10 +189,52 @@ def test_non_admin_cannot_invoke_commands_after_admin_exists(tmp_path: Path) -> 
 
         before = len(api.messages)
         await controller._dispatch("status", outsider_ctx)
-        assert len(api.messages) == before
+        assert len(api.messages) == before + 1
+        assert any(
+            "Нет доступа" in text for _, text in api.messages[before:]
+        )
 
+        before = len(api.messages)
         await controller._dispatch("help", outsider_ctx)
-        assert len(api.messages) == before
+        assert len(api.messages) > before
+        assert any(
+            "/help" in text or "🚀" in text for _, text in api.messages[before:]
+        )
+
+    asyncio.run(runner())
+
+
+def test_claim_rejected_for_non_admin_when_admin_exists(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
+
+        store.add_admin(1, "root")
+
+        outsider_ctx = CommandContext(
+            chat_id=1,
+            user_id=200,
+            username="Visitor",
+            handle="visitor",
+            args="",
+            message={},
+        )
+
+        before = len(api.messages)
+        await controller._dispatch("claim", outsider_ctx)
+        assert len(api.messages) == before + 1
+        assert any(
+            "Нет доступа" in text for _, text in api.messages[before:]
+        )
+        admins = store.list_admins()
+        assert len(admins) == 1
+        assert admins[0].username == "root"
 
     asyncio.run(runner())
 
