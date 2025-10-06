@@ -201,6 +201,63 @@ def test_grant_admin_by_username(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_controller_persists_update_offset(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_telegram_offset(50)
+
+        class UpdateAPI(DummyAPI):
+            def __init__(self) -> None:
+                super().__init__()
+                self.offsets: list[int] = []
+                self._served = False
+
+            async def get_updates(
+                self,
+                offset: int | None = None,
+                timeout: int = 30,
+            ) -> list[dict[str, object]]:
+                self.offsets.append(offset or 0)
+                if not self._served:
+                    self._served = True
+                    return [
+                        {
+                            "update_id": 55,
+                            "message": {
+                                "message_id": 1,
+                                "chat": {"id": 1},
+                                "from": {
+                                    "id": 1,
+                                    "first_name": "Tester",
+                                    "username": "tester",
+                                },
+                                "text": "/start",
+                            },
+                        }
+                    ]
+                await asyncio.sleep(0)
+                return []
+
+        api = UpdateAPI()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
+
+        task = asyncio.create_task(controller.run())
+        await asyncio.sleep(0.1)
+        controller.stop()
+        await task
+
+        assert api.offsets and api.offsets[0] == 50
+        assert store.get_telegram_offset() == 56
+        assert any("Forward Monitor" in text for _, text in api.messages)
+
+    asyncio.run(runner())
+
+
 def test_non_admin_cannot_invoke_commands_after_admin_exists(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")

@@ -211,6 +211,23 @@ class ConfigStore:
             cur.execute("DELETE FROM settings WHERE key=?", (key,))
             self._conn.commit()
 
+    def set_telegram_offset(self, offset: int) -> None:
+        safe_value = max(0, int(offset))
+        self.set_setting("state.telegram.offset", str(safe_value))
+
+    def get_telegram_offset(self) -> int | None:
+        value = self.get_setting("state.telegram.offset")
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0, parsed)
+
+    def clear_telegram_offset(self) -> None:
+        self.delete_setting("state.telegram.offset")
+
     def iter_settings(self, prefix: str | None = None) -> Iterator[tuple[str, str]]:
         query = "SELECT key, value FROM settings"
         params: tuple[str, ...] = ()
