@@ -206,9 +206,10 @@ class ForwardMonitorApp:
         discord_client: DiscordClient,
         telegram_api: TelegramAPI,
         *,
-        interval: float = 180.0,
+        interval_override: float | None = None,
     ) -> None:
         first_iteration = True
+        interval = interval_override if interval_override is not None else 180.0
         while True:
             if first_iteration:
                 first_iteration = False
@@ -227,6 +228,9 @@ class ForwardMonitorApp:
             await self._run_health_checks(state, discord_client, telegram_api)
             self._health_version = target_version
             self._health_ready.set()
+
+            if interval_override is None:
+                interval = max(10.0, state.runtime.healthcheck_interval)
 
     async def _supervise(
         self,
@@ -655,11 +659,14 @@ class ForwardMonitorApp:
         if max_delay < min_delay:
             max_delay = min_delay
 
+        health_interval = _float("runtime.health_interval", 180.0)
+
         return RuntimeOptions(
             poll_interval=_float("runtime.poll", 2.0),
             min_delay_seconds=min_delay,
             max_delay_seconds=max_delay,
             rate_per_second=rate_value,
+            healthcheck_interval=health_interval,
         )
 
     def _load_network_options(self) -> NetworkOptions:

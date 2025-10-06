@@ -137,6 +137,11 @@ class DiscordClient:
                         await resp.read()
                         return True
                     if status in {401, 403, 404}:
+                        logger.info(
+                            "Discord ответил статусом %s при проверке канала %s", status, channel_id
+                        )
+                        return False
+                    if status >= 400:
                         logger.warning(
                             "Discord ответил статусом %s при проверке канала %s", status, channel_id
                         )

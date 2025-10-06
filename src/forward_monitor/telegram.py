@@ -7,7 +7,6 @@ import html
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Protocol, Sequence
 from urllib.parse import urlparse
 
@@ -24,7 +23,7 @@ from .discord import DiscordClient
 from .filters import FilterEngine
 from .formatting import format_discord_message
 from .models import FilterConfig, FormattedTelegramMessage
-from .utils import RateLimiter, normalize_username, parse_delay_setting
+from .utils import RateLimiter, as_moscow_time, normalize_username, parse_delay_setting
 
 if TYPE_CHECKING:
     from .models import ChannelConfig
@@ -371,6 +370,11 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         help_text="/set_poll <секунды>",
     ),
     _CommandInfo(
+        name="set_healthcheck",
+        summary="Настроить интервал health-check.",
+        help_text="/set_healthcheck <секунды>",
+    ),
+    _CommandInfo(
         name="set_delay",
         summary="Настроить случайную задержку отправки.",
         help_text="/set_delay <min_s> <max_s>",
@@ -607,6 +611,10 @@ class TelegramController:
                 "⏱ Режим работы",
                 [
                     ("/set_poll <секунды>", "Частота опроса Discord."),
+                    (
+                        "/set_healthcheck <секунды>",
+                        "Частота проверки состояния каналов.",
+                    ),
                     ("/set_delay <min_s> <max_s>", "Случайная пауза между сообщениями."),
                     ("/set_rate <в_секунду>", "Общий лимит запросов в секунду."),
                 ],
@@ -697,6 +705,11 @@ class TelegramController:
             except ValueError:
                 return fallback
 
+        health_interval_raw = self._store.get_setting("runtime.health_interval")
+        health_interval_value = _safe_float(health_interval_raw, 180.0)
+        if health_interval_value < 10.0:
+            health_interval_value = 10.0
+
         rate_value: float | None
         rate_raw = self._store.get_setting("runtime.rate")
         if rate_raw is not None:
@@ -715,6 +728,7 @@ class TelegramController:
             rate_value = max(legacy_discord, legacy_telegram)
 
         rate_display = _format_rate(rate_value)
+        health_display = _format_seconds(health_interval_value)
 
         formatting_settings = {
             key.removeprefix("formatting."): value
@@ -816,6 +830,7 @@ class TelegramController:
                 "",
                 "<b>⏱️ Режим работы</b>",
                 f"• Опрос Discord: {html.escape(str(poll))} с",
+                f"• Проверка состояния: {html.escape(health_display)} с",
                 "• Пауза между сообщениями: "
                 f"{html.escape(_format_seconds(delay_min_value))}–"
                 f"{html.escape(_format_seconds(delay_max_value))} с",
@@ -844,7 +859,7 @@ class TelegramController:
             lines.append(f"{_INDENT}• Нет активных фильтров")
 
         if manual_activity:
-            timestamp_display = manual_activity.timestamp.astimezone(timezone.utc)
+            timestamp_display = as_moscow_time(manual_activity.timestamp)
             formatted_ts = timestamp_display.strftime("%Y-%m-%d %H:%M:%S %Z")
             lines.extend(
                 [
@@ -1218,6 +1233,27 @@ class TelegramController:
         self._on_change()
         await self._api.send_message(ctx.chat_id, "Интервал опроса обновлён")
 
+    async def cmd_set_healthcheck(self, ctx: CommandContext) -> None:
+        value_str = ctx.args.strip()
+        if not value_str:
+            await self._api.send_message(
+                ctx.chat_id, "Использование: /set_healthcheck <секунды>"
+            )
+            return
+        try:
+            value = float(value_str)
+        except ValueError:
+            await self._api.send_message(ctx.chat_id, "Укажите число секунд")
+            return
+        if value < 10.0:
+            await self._api.send_message(
+                ctx.chat_id, "Минимальный интервал — 10 секунд"
+            )
+            return
+        self._store.set_setting("runtime.health_interval", f"{value:.2f}")
+        self._on_change()
+        await self._api.send_message(ctx.chat_id, "Интервал health-check обновлён")
+
     async def cmd_set_delay(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if len(parts) != 2:
@@ -1580,6 +1616,11 @@ class TelegramController:
         def sort_key(message_id: str) -> tuple[int, str]:
             return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
 
+        def is_newer(message_id: str, marker: str | None) -> bool:
+            if marker is None:
+                return True
+            return sort_key(message_id) > sort_key(marker)
+
         for channel in selected:
             raw_label = channel.label or channel.discord_id
             label = html.escape(raw_label)
@@ -1714,10 +1755,13 @@ class TelegramController:
                 _record(note, forwarded)
                 continue
 
+            marker = channel.last_message_id
+            fetch_limit = limit if marker is None else 100
             try:
                 messages = await self._discord.fetch_messages(
                     channel.discord_id,
-                    limit=limit,
+                    limit=fetch_limit,
+                    after=marker if marker else None,
                 )
             except Exception:
                 logger.exception(
@@ -1727,14 +1771,15 @@ class TelegramController:
                 _record("ошибка при запросе сообщений")
                 continue
 
-            if not messages:
+            filtered_messages = [msg for msg in messages if is_newer(msg.id, marker)]
+            if not filtered_messages:
                 _record("новых сообщений нет")
                 continue
 
-            ordered = sorted(messages, key=lambda msg: sort_key(msg.id))
-            subset = ordered[-limit:]
+            ordered = sorted(filtered_messages, key=lambda msg: sort_key(msg.id))
+            subset = ordered[:limit] if marker else ordered[-limit:]
             engine = FilterEngine(channel.filters)
-            last_seen = channel.last_message_id
+            last_seen = marker
 
             for msg in subset:
                 candidate_id = msg.id
@@ -1779,11 +1824,18 @@ class TelegramController:
                 self._store.set_last_message(channel.storage_id, last_seen)
                 state_changed = True
 
-            note = (
-                f"переслано {forwarded} из {len(subset)} сообщений"
-                if forwarded
-                else "подходящих сообщений не найдено"
-            )
+            total_candidates = len(ordered)
+            processed_candidates = len(subset)
+            if forwarded:
+                note_parts = [
+                    f"переслано {forwarded} из {processed_candidates} сообщений"
+                ]
+            else:
+                note_parts = ["подходящих сообщений не найдено"]
+            if marker and total_candidates > processed_candidates:
+                remaining = total_candidates - processed_candidates
+                note_parts.append(f"осталось ещё {remaining} сообщений")
+            note = ", ".join(note_parts)
             _record(note, forwarded)
 
         if activity_entries:
@@ -1800,11 +1852,12 @@ class TelegramController:
         summary_lines.append("")
         summary_lines.append(f"Всего переслано: {total_forwarded}")
 
-        await self._api.send_message(
-            ctx.chat_id,
-            "\n".join(summary_lines),
-            parse_mode="HTML",
-        )
+        for chunk in _split_html_lines(summary_lines):
+            await self._api.send_message(
+                ctx.chat_id,
+                chunk,
+                parse_mode="HTML",
+            )
 
     async def cmd_set_disable_preview(self, ctx: CommandContext) -> None:
         await self._set_format_option(

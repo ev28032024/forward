@@ -48,7 +48,7 @@ def test_formatting_includes_label_and_author() -> None:
     assert "👤 <b>Author</b>" in formatted.text
     assert "original content" in formatted.text
     assert "file.txt" in formatted.text
-    assert "📅 <b>02.01.2024 03:04 UTC</b>" in formatted.text
+    assert "📅 <b>02.01.2024 06:04 MSK</b>" in formatted.text
 
 
 def test_formatting_chunks_long_text() -> None:
