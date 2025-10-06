@@ -186,3 +186,25 @@ def test_mentions_display_names() -> None:
     assert "@UserName" in formatted.text
     assert "@Moderators" in formatted.text
     assert "#general" in formatted.text
+
+
+def test_angle_bracket_links_are_unwrapped() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="5",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="Visit <https://example.com> for details",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+        timestamp="2024-01-02T03:04:05+00:00",
+    )
+
+    formatted = format_discord_message(message, channel)
+
+    assert "<https://example.com>" not in formatted.text
+    assert "https://example.com" in formatted.text

@@ -263,7 +263,8 @@ class ForwardMonitorApp:
         discord_client.set_network_options(state.network)
 
         proxy_result = await discord_client.check_proxy(state.network)
-        if state.network.discord_proxy_url:
+        proxy_configured = bool(state.network.discord_proxy_url)
+        if proxy_configured:
             proxy_status = "ok" if proxy_result.ok else "error"
             proxy_message = proxy_result.error
         else:
@@ -278,18 +279,33 @@ class ForwardMonitorApp:
             )
         )
 
-        token = state.discord_token or ""
-        token_result = await discord_client.verify_token(token, network=state.network)
-        token_status = "ok" if token_result.ok else "error"
-        token_message = token_result.error
-        if token_result.ok and token_result.normalized_token:
-            normalized = token_result.normalized_token
-            if normalized != token:
-                self._store.set_setting("discord.token", normalized)
-                token = normalized
-                state.discord_token = normalized
-                discord_client.set_token(normalized)
-                self._signal_refresh()
+        proxy_blocked = proxy_configured and not proxy_result.ok
+        token_value = (state.discord_token or "").strip()
+        token_status = "unknown"
+        token_message: str | None = None
+        token_ok = False
+
+        if proxy_blocked:
+            token_status = "unknown"
+            token_message = "Проверка недоступна: прокси не отвечает."
+        elif not token_value:
+            token_status = "error"
+            token_message = "Токен Discord не задан."
+        else:
+            token_result = await discord_client.verify_token(
+                token_value, network=state.network
+            )
+            token_ok = token_result.ok
+            token_status = "ok" if token_result.ok else "error"
+            token_message = token_result.error
+            if token_result.ok and token_result.normalized_token:
+                normalized = token_result.normalized_token
+                if normalized != token_value:
+                    self._store.set_setting("discord.token", normalized)
+                    token_value = normalized
+                    state.discord_token = normalized
+                    discord_client.set_token(normalized)
+                    self._signal_refresh()
         updates.append(
             HealthUpdate(
                 key="discord_token",
@@ -309,7 +325,17 @@ class ForwardMonitorApp:
                     HealthUpdate(key=key, status="disabled", message=None, label=label)
                 )
                 continue
-            if token_status != "ok":
+            if proxy_blocked:
+                updates.append(
+                    HealthUpdate(
+                        key=key,
+                        status="unknown",
+                        message="Проверка недоступна: прокси не отвечает.",
+                        label=label,
+                    )
+                )
+                continue
+            if not token_ok:
                 updates.append(
                     HealthUpdate(
                         key=key,

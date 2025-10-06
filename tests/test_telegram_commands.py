@@ -59,7 +59,7 @@ class DummyDiscordClient:
     def __init__(self) -> None:
         self.tokens: list[str] = []
         self.proxies: list[str | None] = []
-        self.fetch_calls: list[tuple[str, int, str | None]] = []
+        self.fetch_calls: list[tuple[str, int, str | None, str | None]] = []
         self.messages: list[DiscordMessage] = []
         self.checked_channels: list[str] = []
         self.existing_channels: set[str] | None = None
@@ -86,8 +86,9 @@ class DummyDiscordClient:
         *,
         limit: int = 50,
         after: str | None = None,
+        before: str | None = None,
     ) -> list[DiscordMessage]:
-        self.fetch_calls.append((channel_id, limit, after))
+        self.fetch_calls.append((channel_id, limit, after, before))
         def _key(value: str) -> tuple[int, str]:
             return (int(value), value) if value.isdigit() else (0, value)
 
@@ -95,11 +96,14 @@ class DummyDiscordClient:
         for message in self.messages:
             if after is not None and not (_key(message.id) > _key(after)):
                 continue
+            if before is not None and not (_key(message.id) < _key(before)):
+                continue
             filtered.append(message)
+        filtered.sort(key=lambda msg: _key(msg.id), reverse=True)
         return list(filtered[:limit])
 
     async def fetch_pinned_messages(self, channel_id: str) -> list[DiscordMessage]:
-        self.fetch_calls.append((channel_id, 0, None))
+        self.fetch_calls.append((channel_id, 0, None, None))
         return list(self.messages)
 
     async def check_channel_exists(self, channel_id: str) -> bool:
@@ -477,7 +481,7 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
         assert any(message.startswith("PHOTO:") for message in api.messages)
         assert any("<b>Bold text</b>" in message for message in api.messages)
         assert any("Всего переслано: 2" in message for message in api.messages)
-        assert ("123", 100, "100") in dummy_client.fetch_calls
+        assert ("123", 7, None, None) in dummy_client.fetch_calls
 
         activity = store.load_manual_forward_activity()
         assert activity is not None
@@ -580,11 +584,109 @@ def test_send_recent_only_new_messages(tmp_path: Path) -> None:
 
         record = store.get_channel("123")
         assert record is not None
-        assert record.last_message_id == "107"
-        assert ("123", 100, "105") in dummy_client.fetch_calls
-        assert any("new-one" in message for message in api.messages)
+        assert record.last_message_id == "108"
+        assert ("123", 7, None, None) in dummy_client.fetch_calls
+        assert any("new-three" in message for message in api.messages)
         assert any("new-two" in message for message in api.messages)
-        assert all("new-three" not in message for message in api.messages)
+        assert all("new-one" not in message for message in api.messages)
+        assert any("осталось ещё 2 сообщений" in message for message in api.messages)
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_send_recent_includes_history_when_needed(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+        record = store.get_channel("123")
+        assert record is not None
+        store.set_last_message(record.id, "205")
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="210",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="Alice",
+                content="fresh-top",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="208",
+                channel_id="123",
+                guild_id="guild",
+                author_id="2",
+                author_name="Bob",
+                content="fresh-second",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="190",
+                channel_id="123",
+                guild_id="guild",
+                author_id="3",
+                author_name="Carol",
+                content="history-first",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="180",
+                channel_id="123",
+                guild_id="guild",
+                author_id="4",
+                author_name="Dave",
+                content="history-second",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+        ]
+
+        api.messages.clear()
+        admin.args = "3 123"
+        await controller._dispatch("send_recent", admin)
+
+        record = store.get_channel("123")
+        assert record is not None
+        assert record.last_message_id == "210"
+        joined = "\n".join(api.messages)
+        assert "fresh-top" in joined
+        assert "fresh-second" in joined
+        assert "history-first" in joined
         assert any("осталось ещё 1 сообщений" in message for message in api.messages)
 
     import asyncio

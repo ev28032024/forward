@@ -32,6 +32,7 @@ class DummyDiscordClient:
         *,
         limit: int = 50,
         after: str | None = None,
+        before: str | None = None,
     ) -> list[dict[str, object]]:
         self.fetch_calls.append(channel_id)
         return []
@@ -126,6 +127,54 @@ def test_monitor_waits_for_health_before_processing(tmp_path: Path) -> None:
 
         assert discord.fetch_calls == []
         assert discord.verify_calls != []
+        app._store.close()
+
+    asyncio.run(runner())
+
+
+def test_health_check_skips_when_proxy_fails(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        store.set_setting("discord.token", "token")
+        store.add_channel("123", "456", label="Test")
+        store.set_setting("proxy.discord.url", "http://proxy.local")
+
+        class ProxyFailDiscord(DummyDiscordClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.verify_attempts = 0
+
+            async def check_proxy(self, network: NetworkOptions) -> ProxyCheckResult:
+                return ProxyCheckResult(ok=False, error="proxy down")
+
+            async def verify_token(
+                self, token: str, *, network: NetworkOptions | None = None
+            ) -> TokenCheckResult:
+                self.verify_attempts += 1
+                return TokenCheckResult(ok=True)
+
+            async def check_channel_exists(self, channel_id: str) -> bool:
+                raise AssertionError("channel check should not be called when proxy fails")
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        discord = ProxyFailDiscord()
+        telegram = DummyTelegramAPI()
+
+        state = app._reload_state()
+        await app._run_health_checks(
+            state,
+            cast(DiscordClient, discord),
+            cast(TelegramAPI, telegram),
+        )
+
+        assert discord.verify_attempts == 0
+        status, message = store.get_health_status("discord_token")
+        assert status == "unknown"
+        assert message == "Проверка недоступна: прокси не отвечает."
+        channel_status, channel_message = store.get_health_status("channel.123")
+        assert channel_status == "unknown"
+        assert channel_message == "Проверка недоступна: прокси не отвечает."
         app._store.close()
 
     asyncio.run(runner())

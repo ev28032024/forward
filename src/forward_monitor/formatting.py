@@ -277,6 +277,7 @@ _CUSTOM_EMOJI_RE = re.compile(r"<a?:[a-zA-Z0-9_~]+:[0-9]+>")
 _EXTRA_SPACE_RE = re.compile(r"[ \t]{2,}")
 _TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_ANGLE_LINK_RE = re.compile(r"<(https?://[^\s<>]+)>")
 _ALLOWED_LINK_SCHEMES = {"http", "https"}
 
 
@@ -296,6 +297,7 @@ def _sanitize_content(text: str, message: DiscordMessage | None = None) -> str:
         )
     else:
         cleaned = _CHANNEL_MENTION_RE.sub(lambda match: f"#{match.group(1)}", cleaned)
+    cleaned = _ANGLE_LINK_RE.sub(r"\1", cleaned)
     cleaned = _CUSTOM_EMOJI_RE.sub("", cleaned)
     cleaned = _EXTRA_SPACE_RE.sub(" ", cleaned)
     cleaned = _TRIPLE_NEWLINES_RE.sub("\n\n", cleaned)

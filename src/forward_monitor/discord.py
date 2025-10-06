@@ -62,6 +62,7 @@ class DiscordClient:
         *,
         limit: int = 50,
         after: str | None = None,
+        before: str | None = None,
     ) -> Sequence[DiscordMessage]:
         if not self._token:
             return []
@@ -69,6 +70,8 @@ class DiscordClient:
         params = {"limit": str(max(1, min(limit, 100)))}
         if after:
             params["after"] = after
+        if before:
+            params["before"] = before
 
         headers = {
             "Authorization": self._token,
