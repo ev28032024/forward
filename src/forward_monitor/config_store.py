@@ -190,6 +190,50 @@ class ConfigStore:
             yield str(row["key"]), str(row["value"])
 
     # ------------------------------------------------------------------
+    # Health status helpers
+    # ------------------------------------------------------------------
+    def set_health_status(self, subject: str, status: str, message: str | None) -> None:
+        status_key = f"health.{subject}.status"
+        message_key = f"health.{subject}.message"
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                "INSERT INTO settings(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (status_key, status),
+            )
+            if message is None:
+                cur.execute("DELETE FROM settings WHERE key=?", (message_key,))
+            else:
+                cur.execute(
+                    "INSERT INTO settings(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (message_key, message),
+                )
+            self._conn.commit()
+
+    def get_health_status(self, subject: str) -> tuple[str, str | None]:
+        status = self.get_setting(f"health.{subject}.status") or "unknown"
+        message = self.get_setting(f"health.{subject}.message")
+        return status, message
+
+    def clean_channel_health_statuses(self, channel_ids: Iterable[str]) -> None:
+        base_keys = {f"health.channel.{channel_id}" for channel_id in channel_ids}
+        to_remove: list[str] = []
+        for key, _value in list(self.iter_settings("health.channel.")):
+            prefix, sep, _ = key.partition(".status")
+            if not sep:
+                prefix, sep, _ = key.partition(".message")
+            if not sep:
+                prefix = key
+            if prefix not in base_keys:
+                to_remove.append(key)
+        if not to_remove:
+            return
+        with closing(self._conn.cursor()) as cur:
+            cur.executemany("DELETE FROM settings WHERE key=?", ((key,) for key in to_remove))
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
     # Network options helpers
     # ------------------------------------------------------------------
     def load_network_options(self) -> NetworkOptions:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -58,6 +59,16 @@ class MonitorState:
     discord_token: str | None
 
 
+@dataclass(slots=True)
+class HealthUpdate:
+    """Single subject health result produced by the checker."""
+
+    key: str
+    status: str
+    message: str | None
+    label: str
+
+
 class ForwardMonitorApp:
     """High level coordinator tying together Discord, Telegram and configuration."""
 
@@ -66,6 +77,8 @@ class ForwardMonitorApp:
         self._telegram_token = telegram_token
         self._refresh_event = asyncio.Event()
         self._refresh_event.set()
+        self._health_wakeup = asyncio.Event()
+        self._health_status: dict[str, str] = {}
 
     async def run(self) -> None:
         async with aiohttp.ClientSession() as session:
@@ -92,11 +105,19 @@ class ForwardMonitorApp:
                 self._supervise("telegram-controller", run_controller),
                 name="telegram-controller-supervisor",
             )
+            health_task = asyncio.create_task(
+                self._supervise(
+                    "health-monitor",
+                    lambda: self._healthcheck_loop(discord_client, telegram_api),
+                ),
+                name="health-monitor-supervisor",
+            )
 
-            await asyncio.gather(monitor_task, bot_task)
+            await asyncio.gather(monitor_task, bot_task, health_task)
 
     def _signal_refresh(self) -> None:
         self._refresh_event.set()
+        self._health_wakeup.set()
 
     async def _monitor_loop(
         self,
@@ -155,6 +176,30 @@ class ForwardMonitorApp:
             except asyncio.TimeoutError:
                 pass
 
+    async def _healthcheck_loop(
+        self,
+        discord_client: DiscordClient,
+        telegram_api: TelegramAPI,
+        *,
+        interval: float = 180.0,
+    ) -> None:
+        first_iteration = True
+        while True:
+            if first_iteration:
+                first_iteration = False
+                if self._health_wakeup.is_set():
+                    self._health_wakeup.clear()
+            else:
+                try:
+                    await asyncio.wait_for(self._health_wakeup.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    self._health_wakeup.clear()
+
+            state = self._reload_state()
+            await self._run_health_checks(state, discord_client, telegram_api)
+
     async def _supervise(
         self,
         name: str,
@@ -173,6 +218,126 @@ class ForwardMonitorApp:
             else:
                 logger.warning("Задача %s завершилась неожиданно, будет перезапущена", name)
             await asyncio.sleep(retry_delay)
+
+    async def _run_health_checks(
+        self,
+        state: MonitorState,
+        discord_client: DiscordClient,
+        telegram_api: TelegramAPI,
+    ) -> None:
+        updates: list[HealthUpdate] = []
+
+        proxy_result = await discord_client.check_proxy(state.network)
+        if state.network.discord_proxy_url:
+            proxy_status = "ok" if proxy_result.ok else "error"
+            proxy_message = proxy_result.error
+        else:
+            proxy_status = "disabled"
+            proxy_message = None
+        updates.append(
+            HealthUpdate(
+                key="proxy",
+                status=proxy_status,
+                message=proxy_message,
+                label="Прокси Discord",
+            )
+        )
+
+        token = state.discord_token or ""
+        token_result = await discord_client.verify_token(token, network=state.network)
+        token_status = "ok" if token_result.ok else "error"
+        token_message = token_result.error
+        updates.append(
+            HealthUpdate(
+                key="discord_token",
+                status=token_status,
+                message=token_message,
+                label="Discord токен",
+            )
+        )
+
+        channel_ids: set[str] = {channel.discord_id for channel in state.channels}
+        check_rate = RateLimiter(max(1.0, state.runtime.rate_per_second))
+        for channel in state.channels:
+            key = f"channel.{channel.discord_id}"
+            label = f"Канал {channel.label or channel.discord_id}"
+            if not channel.active:
+                updates.append(
+                    HealthUpdate(key=key, status="disabled", message=None, label=label)
+                )
+                continue
+            if token_status != "ok":
+                updates.append(
+                    HealthUpdate(
+                        key=key,
+                        status="unknown",
+                        message="Проверка недоступна: нет валидного токена Discord.",
+                        label=label,
+                    )
+                )
+                continue
+            await check_rate.wait()
+            exists = await discord_client.check_channel_exists(channel.discord_id)
+            if exists:
+                updates.append(HealthUpdate(key=key, status="ok", message=None, label=label))
+            else:
+                updates.append(
+                    HealthUpdate(
+                        key=key,
+                        status="error",
+                        message="Discord канал недоступен или нет прав.",
+                        label=label,
+                    )
+                )
+
+        self._store.clean_channel_health_statuses(channel_ids)
+        for update in updates:
+            self._store.set_health_status(update.key, update.status, update.message)
+
+        current_keys = {update.key for update in updates}
+        for key in list(self._health_status.keys()):
+            if key.startswith("channel.") and key not in current_keys:
+                self._health_status.pop(key, None)
+
+        await self._emit_health_notifications(updates, telegram_api)
+
+    async def _emit_health_notifications(
+        self, updates: list[HealthUpdate], telegram_api: TelegramAPI
+    ) -> None:
+        for update in updates:
+            previous = self._health_status.get(update.key)
+            if previous == update.status:
+                continue
+            self._health_status[update.key] = update.status
+            if update.status == "error":
+                logger.warning("Проблема со здоровьем компонента %s: %s", update.key, update.message)
+                message = self._format_health_alert(update, recovered=False)
+                await self._notify_admins(telegram_api, message)
+            elif previous == "error" and update.status == "ok":
+                message = self._format_health_alert(update, recovered=True)
+                await self._notify_admins(telegram_api, message)
+
+    async def _notify_admins(self, telegram_api: TelegramAPI, message: str) -> None:
+        for admin in self._store.list_admins():
+            if admin.user_id is None:
+                continue
+            try:
+                await telegram_api.send_message(
+                    admin.user_id,
+                    message,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception(
+                    "Не удалось отправить уведомление администратору %s", admin.user_id
+                )
+
+    def _format_health_alert(self, update: HealthUpdate, *, recovered: bool) -> str:
+        title = html.escape(update.label)
+        if recovered:
+            return f"✅ <b>{title}</b> снова работает стабильно."
+        message = html.escape(update.message or "Причина не указана.")
+        return f"🔴 <b>{title}</b> недоступен.\n{message}"
 
     async def _process_channel(
         self,

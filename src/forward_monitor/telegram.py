@@ -49,6 +49,18 @@ _DOUBLE_INDENT = _NBSP * 4
 _FORWARDABLE_MESSAGE_TYPES: set[int] = {0, 19, 20, 21, 23}
 
 
+_HEALTH_ICONS = {
+    "ok": "🟢",
+    "error": "🔴",
+    "unknown": "🟡",
+    "disabled": "⚪️",
+}
+
+
+def _health_icon(status: str) -> str:
+    return _HEALTH_ICONS.get(status, "🟢")
+
+
 def _format_seconds(value: float) -> str:
     return (f"{value:.2f}").rstrip("0").rstrip(".") or "0"
 
@@ -624,10 +636,15 @@ class TelegramController:
         )
 
     async def cmd_status(self, ctx: CommandContext) -> None:
-        token_status = "есть" if self._store.get_setting("discord.token") else "не задан"
+        token_value = self._store.get_setting("discord.token")
+        token_status = "есть" if token_value else "не задан"
+        token_health, token_message = self._store.get_health_status("discord_token")
+
         proxy_url = self._store.get_setting("proxy.discord.url")
         proxy_login = self._store.get_setting("proxy.discord.login")
         proxy_password = self._store.get_setting("proxy.discord.password")
+        proxy_health, proxy_message = self._store.get_health_status("proxy")
+
         user_agent = self._store.get_setting("ua.discord") or "стандартный"
         poll = self._store.get_setting("runtime.poll") or "2.0"
         delay_min_raw = self._store.get_setting("runtime.delay_min")
@@ -636,6 +653,7 @@ class TelegramController:
         delay_max_value = parse_delay_setting(delay_max_raw, 0.0)
         if delay_max_value < delay_min_value:
             delay_max_value = delay_min_value
+
         def _safe_float(value: str | None, fallback: float) -> float:
             if value is None:
                 return fallback
@@ -718,16 +736,24 @@ class TelegramController:
             return rows
 
         proxy_lines: list[str] = []
+        proxy_lines.append(
+            f"{_INDENT}• {_health_icon(proxy_health)} Статус: "
+            + ("<b>включён</b>" if proxy_url else "<b>отключён</b>")
+        )
+        if proxy_message:
+            proxy_lines.append(f"{_DOUBLE_INDENT}• {html.escape(proxy_message)}")
         if proxy_url:
-            proxy_lines.append(f"• URL: <code>{html.escape(proxy_url)}</code>")
+            proxy_lines.append(f"{_DOUBLE_INDENT}• URL: <code>{html.escape(proxy_url)}</code>")
             if proxy_login:
-                proxy_lines.append(f"• Логин: <code>{html.escape(proxy_login)}</code>")
+                proxy_lines.append(
+                    f"{_DOUBLE_INDENT}• Логин: <code>{html.escape(proxy_login)}</code>"
+                )
             if proxy_password:
-                proxy_lines.append("• Пароль: ••••••")
+                proxy_lines.append(f"{_DOUBLE_INDENT}• Пароль: ••••••")
             if not proxy_login and not proxy_password:
-                proxy_lines.append("• Без авторизации")
+                proxy_lines.append(f"{_DOUBLE_INDENT}• Без авторизации")
         else:
-            proxy_lines.append("• Отключён")
+            proxy_lines.append(f"{_DOUBLE_INDENT}• Без прокси")
 
         channel_configs = self._store.load_channel_configurations()
         default_filter_sets = _collect_filter_sets(default_filter_config)
@@ -737,27 +763,33 @@ class TelegramController:
             "<b>⚙️ Forward Monitor — статус</b>",
             "",
             "<b>🔌 Подключения</b>",
-            f"• Discord токен: <b>{html.escape(token_status)}</b>",
+            f"• {_health_icon(token_health)} Discord токен: <b>{html.escape(token_status)}</b>",
             f"• User-Agent: <code>{html.escape(user_agent)}</code>",
-            "",
-            "<b>🌐 Прокси</b>",
-            *proxy_lines,
-            "",
-            "<b>⏱️ Режим работы</b>",
-            f"• Опрос Discord: {html.escape(str(poll))} с",
-            "• Пауза между сообщениями: "
-            f"{html.escape(_format_seconds(delay_min_value))}–"
-            f"{html.escape(_format_seconds(delay_max_value))} с",
-            f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
-            "",
-            "<b>🎨 Оформление по умолчанию</b>",
-            f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
-            f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
-            f"• Вложения: {html.escape(attachments_desc)}",
-            f"• Режим мониторинга: {html.escape(monitoring_default_desc)}",
-            "",
-            "<b>🚦 Глобальные фильтры</b>",
         ]
+        if token_message:
+            lines.append(f"{_INDENT}• {html.escape(token_message)}")
+        lines.extend(
+            [
+                "",
+                "<b>🌐 Прокси</b>",
+                *proxy_lines,
+                "",
+                "<b>⏱️ Режим работы</b>",
+                f"• Опрос Discord: {html.escape(str(poll))} с",
+                "• Пауза между сообщениями: "
+                f"{html.escape(_format_seconds(delay_min_value))}–"
+                f"{html.escape(_format_seconds(delay_max_value))} с",
+                f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
+                "",
+                "<b>🎨 Оформление по умолчанию</b>",
+                f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
+                f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
+                f"• Вложения: {html.escape(attachments_desc)}",
+                f"• Режим мониторинга: {html.escape(monitoring_default_desc)}",
+                "",
+                "<b>🚦 Глобальные фильтры</b>",
+            ]
+        )
 
         if has_default_filters:
             lines.extend(
@@ -774,7 +806,12 @@ class TelegramController:
         lines.append("<b>📡 Каналы</b>")
         if channel_configs:
             for channel in channel_configs:
-                status_icon = "🟢" if channel.active else "⚪️"
+                health_status, health_message = self._store.get_health_status(
+                    f"channel.{channel.discord_id}"
+                )
+                if not channel.active:
+                    health_status = "disabled"
+                status_icon = _health_icon(health_status)
                 lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
                 lines.append(
                     f"{_INDENT}• Discord: <code>{html.escape(channel.discord_id)}</code>"
@@ -787,6 +824,8 @@ class TelegramController:
                     lines.append(
                         f"{_INDENT}• Тема: <code>{thread_value}</code>"
                     )
+                if health_message:
+                    lines.append(f"{_INDENT}• Статус: {html.escape(health_message)}")
                 lines.append(
                     f"{_INDENT}• Предпросмотр ссылок: "
                     + (
@@ -1361,7 +1400,12 @@ class TelegramController:
             label = html.escape(record.label or record.discord_id)
             discord_id = html.escape(record.discord_id)
             chat_id = html.escape(record.telegram_chat_id)
-            status_icon = "🟢" if record.active else "⚪️"
+            health_status, _ = self._store.get_health_status(
+                f"channel.{record.discord_id}"
+            )
+            if not record.active:
+                health_status = "disabled"
+            status_icon = _health_icon(health_status)
             thread_info = ""
             if record.telegram_thread_id is not None:
                 thread_info = (
