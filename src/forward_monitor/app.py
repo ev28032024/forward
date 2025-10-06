@@ -57,6 +57,7 @@ class MonitorState:
     runtime: RuntimeOptions
     network: NetworkOptions
     discord_token: str | None
+    discord_token_ok: bool
 
 
 @dataclass(slots=True)
@@ -76,9 +77,13 @@ class ForwardMonitorApp:
         self._store = ConfigStore(db_path)
         self._telegram_token = telegram_token
         self._refresh_event = asyncio.Event()
-        self._refresh_event.set()
         self._health_wakeup = asyncio.Event()
         self._health_status: dict[str, str] = {}
+        self._health_ready = asyncio.Event()
+        self._config_version = 0
+        self._health_version = -1
+        self._mark_config_dirty()
+        self._refresh_event.set()
 
     async def run(self) -> None:
         async with aiohttp.ClientSession() as session:
@@ -116,8 +121,13 @@ class ForwardMonitorApp:
             await asyncio.gather(monitor_task, bot_task, health_task)
 
     def _signal_refresh(self) -> None:
+        self._mark_config_dirty()
         self._refresh_event.set()
         self._health_wakeup.set()
+
+    def _mark_config_dirty(self) -> None:
+        self._config_version += 1
+        self._health_ready.clear()
 
     async def _monitor_loop(
         self,
@@ -127,28 +137,43 @@ class ForwardMonitorApp:
         runtime = self._load_runtime()
         discord_rate = RateLimiter(runtime.rate_per_second)
         telegram_rate = RateLimiter(runtime.rate_per_second)
+        token_value = self._store.get_setting("discord.token")
+        token_status, _ = self._store.get_health_status("discord_token")
         state = MonitorState(
             channels=[],
             runtime=runtime,
             network=self._store.load_network_options(),
-            discord_token=self._store.get_setting("discord.token"),
+            discord_token=token_value,
+            discord_token_ok=token_status == "ok",
         )
+        state_version = 0
 
         while True:
             if self._refresh_event.is_set():
-                self._refresh_event.clear()
-                state = self._reload_state()
-                discord_client.set_token(state.discord_token)
-                discord_client.set_network_options(state.network)
-                discord_rate.update_rate(state.runtime.rate_per_second)
-                telegram_rate.update_rate(state.runtime.rate_per_second)
-                logger.info("Конфигурация обновлена: %d каналов", len(state.channels))
+                while True:
+                    self._refresh_event.clear()
+                    target_version = self._config_version
+                    await self._wait_for_health(target_version)
+                    if self._refresh_event.is_set():
+                        continue
+                    state = self._reload_state()
+                    state_version = target_version
+                    discord_client.set_token(state.discord_token)
+                    discord_client.set_network_options(state.network)
+                    discord_rate.update_rate(state.runtime.rate_per_second)
+                    telegram_rate.update_rate(state.runtime.rate_per_second)
+                    logger.info(
+                        "Конфигурация обновлена: %d каналов", len(state.channels)
+                    )
+                    break
 
-            if not state.discord_token:
+            if not state.discord_token or not state.discord_token_ok:
                 await asyncio.sleep(3.0)
                 continue
 
             for channel in list(state.channels):
+                if state_version < self._config_version:
+                    break
                 if self._refresh_event.is_set():
                     break
                 await discord_rate.wait()
@@ -197,8 +222,11 @@ class ForwardMonitorApp:
                 else:
                     self._health_wakeup.clear()
 
+            target_version = self._config_version
             state = self._reload_state()
             await self._run_health_checks(state, discord_client, telegram_api)
+            self._health_version = target_version
+            self._health_ready.set()
 
     async def _supervise(
         self,
@@ -588,11 +616,13 @@ class ForwardMonitorApp:
         network = self._store.load_network_options()
         channels = self._store.load_channel_configurations()
         discord_token = self._store.get_setting("discord.token")
+        token_status, _ = self._store.get_health_status("discord_token")
         return MonitorState(
             channels=channels,
             runtime=runtime,
             network=network,
             discord_token=discord_token,
+            discord_token_ok=token_status == "ok",
         )
 
     def _load_runtime(self) -> RuntimeOptions:
@@ -631,3 +661,9 @@ class ForwardMonitorApp:
 
     def _load_network_options(self) -> NetworkOptions:
         return self._store.load_network_options()
+
+    async def _wait_for_health(self, target_version: int) -> None:
+        while self._health_version < target_version:
+            await self._health_ready.wait()
+            if self._health_version < target_version:
+                self._health_ready.clear()

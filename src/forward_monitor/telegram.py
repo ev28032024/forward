@@ -474,8 +474,16 @@ class TelegramController:
             return
 
         if not is_admin:
-            if not has_admins and info is not None and not info.admin_only:
+            if not has_admins:
+                if info is not None and not info.admin_only:
+                    await self._execute_command(
+                        handler, ctx, notify_on_error=False
+                    )
+                return
+            if info is not None and not info.admin_only:
                 await self._execute_command(handler, ctx, notify_on_error=False)
+                return
+            await self._notify_access_denied(ctx)
             return
 
         await self._execute_command(handler, ctx, notify_on_error=True)
@@ -920,6 +928,7 @@ class TelegramController:
     async def cmd_claim(self, ctx: CommandContext) -> None:
         if self._store.has_admins():
             if not self._is_admin(ctx):
+                await self._notify_access_denied(ctx)
                 return
             self._store.add_admin(ctx.user_id, ctx.handle)
             self._on_change()
@@ -1850,6 +1859,17 @@ class TelegramController:
             return
         await self._api.set_my_commands((info.name, info.summary) for info in BOT_COMMANDS)
         self._commands_registered = True
+
+    async def _notify_access_denied(self, ctx: CommandContext) -> None:
+        await self._api.send_message(
+            ctx.chat_id,
+            (
+                "🚫 <b>Нет доступа</b>\n"
+                "Эта команда доступна только администраторам. "
+                "Попросите администратора выдать права через <code>/grant</code>."
+            ),
+            parse_mode="HTML",
+        )
 
 
 async def send_formatted(
