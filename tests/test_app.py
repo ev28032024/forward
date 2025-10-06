@@ -131,6 +131,31 @@ def test_monitor_waits_for_health_before_processing(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_run_health_checks_configures_client(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        store.set_setting("discord.token", "token-123")
+        store.add_channel("123", "456", label="Test")
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        discord = DummyDiscordClient()
+        telegram = DummyTelegramAPI()
+
+        state = app._reload_state()
+        await app._run_health_checks(
+            state,
+            cast(DiscordClient, discord),
+            cast(TelegramAPI, telegram),
+        )
+
+        assert discord.token == "token-123"
+        assert discord.network is not None
+        app._store.close()
+
+    asyncio.run(runner())
+
+
 def test_app_restores_existing_health_status(tmp_path: Path) -> None:
     async def runner() -> None:
         db_path = tmp_path / "db.sqlite"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,23 @@ def test_filter_management(tmp_path: Path) -> None:
             "blocked_roles",
         )
     )
+
+
+def test_added_at_backfilled_for_existing_channels(tmp_path: Path) -> None:
+    db_path = tmp_path / "db.sqlite"
+    store = ConfigStore(db_path)
+    store.add_channel("123", "456", "Label")
+    store.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE channels SET added_at=NULL")
+    conn.commit()
+    conn.close()
+
+    store = ConfigStore(db_path)
+    record = store.get_channel("123")
+    assert record is not None
+    assert record.added_at is not None
+    configs = store.load_channel_configurations()
+    assert configs and configs[0].added_at is not None
+

@@ -255,6 +255,9 @@ class ForwardMonitorApp:
     ) -> None:
         updates: list[HealthUpdate] = []
 
+        discord_client.set_token(state.discord_token)
+        discord_client.set_network_options(state.network)
+
         proxy_result = await discord_client.check_proxy(state.network)
         if state.network.discord_proxy_url:
             proxy_status = "ok" if proxy_result.ok else "error"

@@ -8,7 +8,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from .models import ChannelConfig, FilterConfig, FormattingOptions, NetworkOptions
@@ -37,6 +37,28 @@ class ChannelRecord:
     active: bool
     last_message_id: str | None
     added_at: datetime | None
+
+
+@dataclass(slots=True)
+class ManualForwardEntry:
+    """Single channel outcome recorded for manual forwarding."""
+
+    discord_id: str
+    label: str
+    forwarded: int
+    mode: str
+    note: str
+
+
+@dataclass(slots=True)
+class ManualForwardActivity:
+    """Stored metadata about the latest /send_recent invocation."""
+
+    timestamp: datetime
+    requested: int
+    limit: int
+    total_forwarded: int
+    entries: list[ManualForwardEntry]
 
 
 class ConfigStore:
@@ -153,6 +175,18 @@ class ConfigStore:
             columns.add("telegram_thread_id")
         if "added_at" not in columns:
             cur.execute("ALTER TABLE channels ADD COLUMN added_at TEXT")
+            columns.add("added_at")
+        if "added_at" in columns:
+            cur.execute(
+                "SELECT COUNT(*) FROM channels WHERE added_at IS NULL OR added_at=''"
+            )
+            row = cur.fetchone()
+            if row and int(row[0]) > 0:
+                timestamp = datetime.now(timezone.utc).isoformat()
+                cur.execute(
+                    "UPDATE channels SET added_at=? WHERE added_at IS NULL OR added_at=''",
+                    (timestamp,),
+                )
 
     # ------------------------------------------------------------------
     # Basic settings
@@ -464,15 +498,19 @@ class ConfigStore:
             row = cur.fetchone()
         if row is None:
             return None
+        record_id = int(row["id"])
+        ensured_added_at = self._ensure_channel_added_at(
+            record_id, _parse_timestamp(row["added_at"])
+        )
         return ChannelRecord(
-            id=int(row["id"]),
+            id=record_id,
             discord_id=str(row["discord_id"]),
             telegram_chat_id=str(row["telegram_chat_id"]),
             telegram_thread_id=_parse_thread_id(row["telegram_thread_id"]),
             label=str(row["label"] or ""),
             active=bool(row["active"]),
             last_message_id=str(row["last_message_id"]) if row["last_message_id"] else None,
-            added_at=_parse_timestamp(row["added_at"]),
+            added_at=ensured_added_at,
         )
 
     def set_channel_option(self, channel_id: int, option_key: str, option_value: str) -> None:
@@ -628,11 +666,26 @@ class ConfigStore:
     # ------------------------------------------------------------------
     # Composite loads
     # ------------------------------------------------------------------
+    def _ensure_channel_added_at(
+        self, channel_id: int, value: datetime | None
+    ) -> datetime:
+        if value is not None:
+            return value
+        timestamp = datetime.now(timezone.utc)
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                "UPDATE channels SET added_at=? WHERE id=?",
+                (timestamp.isoformat(), channel_id),
+            )
+            self._conn.commit()
+        return timestamp
+
     def load_channel_configurations(self) -> list[ChannelConfig]:
         defaults = self._load_default_options()
         default_filters = self._load_filter_config(0)
         configs: list[ChannelConfig] = []
         for record in self.list_channels():
+            ensured_added_at = self._ensure_channel_added_at(record.id, record.added_at)
             formatting = defaults["formatting"].copy()
             channel_options = dict(self.iter_channel_options(record.id))
             channel_formatting = _formatting_from_options(formatting, channel_options)
@@ -655,7 +708,7 @@ class ConfigStore:
                     last_message_id=record.last_message_id,
                     active=record.active,
                     storage_id=record.id,
-                    added_at=record.added_at,
+                    added_at=ensured_added_at,
                     pinned_only=pinned_only,
                     known_pinned_ids=known_pinned_ids,
                     pinned_synced=pinned_synced,
@@ -665,6 +718,86 @@ class ConfigStore:
                 )
             )
         return configs
+
+    def record_manual_forward_activity(
+        self,
+        *,
+        requested: int,
+        limit: int,
+        total_forwarded: int,
+        entries: Sequence[ManualForwardEntry],
+    ) -> None:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "requested": requested,
+            "limit": limit,
+            "total": total_forwarded,
+            "channels": [
+                {
+                    "discord_id": entry.discord_id,
+                    "label": entry.label,
+                    "forwarded": entry.forwarded,
+                    "mode": entry.mode,
+                    "note": entry.note,
+                }
+                for entry in entries
+            ],
+        }
+        self.set_setting("activity.send_recent", json.dumps(payload, ensure_ascii=False))
+
+    def load_manual_forward_activity(self) -> ManualForwardActivity | None:
+        raw = self.get_setting("activity.send_recent")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        timestamp = _parse_timestamp(data.get("timestamp"))
+        if timestamp is None:
+            return None
+        try:
+            requested = int(data.get("requested") or 0)
+        except (TypeError, ValueError):
+            requested = 0
+        try:
+            limit = int(data.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        try:
+            total_forwarded = int(data.get("total") or 0)
+        except (TypeError, ValueError):
+            total_forwarded = 0
+        entries_data = data.get("channels")
+        entries: list[ManualForwardEntry] = []
+        if isinstance(entries_data, Sequence):
+            for item in entries_data:
+                if not isinstance(item, dict):
+                    continue
+                discord_id = str(item.get("discord_id") or "")
+                label = str(item.get("label") or discord_id)
+                try:
+                    forwarded = int(item.get("forwarded") or 0)
+                except (TypeError, ValueError):
+                    forwarded = 0
+                mode = str(item.get("mode") or "messages")
+                note = str(item.get("note") or "")
+                entries.append(
+                    ManualForwardEntry(
+                        discord_id=discord_id,
+                        label=label,
+                        forwarded=forwarded,
+                        mode=mode,
+                        note=note,
+                    )
+                )
+        return ManualForwardActivity(
+            timestamp=timestamp,
+            requested=requested,
+            limit=limit,
+            total_forwarded=total_forwarded,
+            entries=entries,
+        )
 
     def _load_default_options(self) -> dict[str, dict[str, str]]:
         settings: dict[str, dict[str, str]] = {"formatting": {}, "monitoring": {}}

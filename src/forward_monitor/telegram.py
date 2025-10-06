@@ -7,6 +7,7 @@ import html
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Protocol, Sequence
 from urllib.parse import urlparse
 
@@ -15,6 +16,7 @@ import aiohttp
 from .config_store import (
     AdminRecord,
     ConfigStore,
+    ManualForwardEntry,
     format_filter_value,
     normalize_filter_value,
 )
@@ -727,6 +729,10 @@ class TelegramController:
             "краткий список" if attachments_default.lower() == "summary" else "список ссылок"
         )
         preview_desc = "без предпросмотра" if disable_preview_default else "с предпросмотром"
+        show_link_default = (
+            formatting_settings.get("show_discord_link", "false").lower() == "true"
+        )
+        link_desc = "включена" if show_link_default else "отключена"
         monitoring_mode_default = (
             self._store.get_setting("monitoring.mode") or "messages"
         ).strip().lower()
@@ -737,6 +743,7 @@ class TelegramController:
         )
 
         default_filter_config = self._store.get_filter_config(0)
+        manual_activity = self._store.load_manual_forward_activity()
 
         def _collect_filter_sets(filter_config: FilterConfig) -> dict[str, dict[str, str]]:
             collected: dict[str, dict[str, str]] = {name: {} for name in _FILTER_TYPES}
@@ -818,6 +825,7 @@ class TelegramController:
                 f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
                 f"• Максимальная длина: {html.escape(str(max_length_default))} символов",
                 f"• Вложения: {html.escape(attachments_desc)}",
+                f"• Ссылка на Discord: {html.escape(link_desc)}",
                 f"• Режим мониторинга: {html.escape(monitoring_default_desc)}",
                 "",
                 "<b>🚦 Глобальные фильтры</b>",
@@ -834,6 +842,43 @@ class TelegramController:
             )
         else:
             lines.append(f"{_INDENT}• Нет активных фильтров")
+
+        if manual_activity:
+            timestamp_display = manual_activity.timestamp.astimezone(timezone.utc)
+            formatted_ts = timestamp_display.strftime("%Y-%m-%d %H:%M:%S %Z")
+            lines.extend(
+                [
+                    "",
+                    "<b>📨 Ручные пересылки</b>",
+                    (
+                        "• Последняя команда: "
+                        f"{html.escape(formatted_ts)}"
+                    ),
+                    (
+                        "• Запрошено: "
+                        f"{manual_activity.requested} (лимит {manual_activity.limit}), "
+                        f"переслано: {manual_activity.total_forwarded}"
+                    ),
+                ]
+            )
+            if manual_activity.entries:
+                for entry in manual_activity.entries:
+                    entry_label = entry.label or entry.discord_id
+                    mode_desc = (
+                        "закреплённые сообщения"
+                        if entry.mode == "pinned"
+                        else "обычные сообщения"
+                    )
+                    note_text = entry.note or "без изменений"
+                    lines.append(
+                        f"{_INDENT}• <b>{html.escape(entry_label)}</b> — {html.escape(note_text)}"
+                    )
+                    lines.append(
+                        f"{_DOUBLE_INDENT}• Режим: {html.escape(mode_desc)}, "
+                        f"переслано: {entry.forwarded}"
+                    )
+            else:
+                lines.append(f"{_INDENT}• История недоступна")
 
         lines.append("")
         lines.append("<b>📡 Каналы</b>")
@@ -869,6 +914,14 @@ class TelegramController:
                 )
                 lines.append(
                     f"{_INDENT}• Максимальная длина: {channel.formatting.max_length} символов"
+                )
+                link_channel_desc = (
+                    "показывается"
+                    if channel.formatting.show_discord_link
+                    else "скрыта"
+                )
+                lines.append(
+                    f"{_INDENT}• Ссылка на Discord: {html.escape(link_channel_desc)}"
                 )
                 attachment_mode = (
                     "краткий список"
@@ -1517,26 +1570,148 @@ class TelegramController:
         summary_lines: list[str] = ["<b>📨 Ручная пересылка</b>", ""]
         total_forwarded = 0
         state_changed = False
+        activity_entries: list[ManualForwardEntry] = []
 
         if requested > 100:
             summary_lines.append(
                 "Запрошено больше 100 сообщений, будет переслано не более 100 из каждого канала."
             )
 
+        def sort_key(message_id: str) -> tuple[int, str]:
+            return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
+
         for channel in selected:
-            label = html.escape(channel.label)
+            raw_label = channel.label or channel.discord_id
+            label = html.escape(raw_label)
+            mode = "pinned" if channel.pinned_only else "messages"
+            forwarded = 0
+
+            def _record(note_text: str, forwarded_count: int = 0) -> None:
+                summary_lines.append(f"{label}: {note_text}")
+                activity_entries.append(
+                    ManualForwardEntry(
+                        discord_id=channel.discord_id,
+                        label=raw_label,
+                        forwarded=forwarded_count,
+                        mode=mode,
+                        note=note_text,
+                    )
+                )
+
             if not channel.active:
-                summary_lines.append(f"{label}: канал отключён, пропущено")
+                _record("канал отключён, пропущено")
                 continue
             if channel.blocked_by_health:
-                summary_lines.append(
-                    f"{label}: канал недоступен по результатам health-check, пропущено"
-                )
+                _record("канал недоступен по результатам health-check, пропущено")
                 continue
+
             if channel.pinned_only:
-                summary_lines.append(
-                    f"{label}: канал отслеживает только закреплённые сообщения, пропущено"
+                try:
+                    messages = await self._discord.fetch_pinned_messages(
+                        channel.discord_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Не удалось получить закреплённые сообщения канала %s при ручной пересылке",
+                        channel.discord_id,
+                    )
+                    _record("ошибка при запросе закреплённых сообщений")
+                    continue
+
+                current_ids = {msg.id for msg in messages}
+                previous_known = set(channel.known_pinned_ids)
+
+                if not messages:
+                    if (
+                        channel.storage_id is not None
+                        and channel.known_pinned_ids
+                    ):
+                        self._store.set_known_pinned_messages(channel.storage_id, [])
+                        channel.known_pinned_ids = set()
+                        state_changed = True
+                    _record("закреплённых сообщений нет")
+                    continue
+
+                if not channel.pinned_synced:
+                    if channel.storage_id is not None:
+                        self._store.set_known_pinned_messages(
+                            channel.storage_id, current_ids
+                        )
+                        self._store.set_pinned_synced(channel.storage_id, synced=True)
+                        channel.known_pinned_ids = set(current_ids)
+                        channel.pinned_synced = True
+                        state_changed = True
+                    else:
+                        channel.pinned_synced = True
+                    _record("закреплённые синхронизированы, новых нет")
+                    continue
+
+                new_ids = current_ids - previous_known
+                if not new_ids:
+                    _record("новых закреплённых сообщений нет")
+                    continue
+
+                ordered = sorted(
+                    (msg for msg in messages if msg.id in new_ids),
+                    key=lambda msg: sort_key(msg.id),
                 )
+                subset = ordered[-limit:]
+                engine = FilterEngine(channel.filters)
+                processed_ids: set[str] = set()
+
+                for msg in subset:
+                    candidate_id = msg.id
+                    processed_ids.add(candidate_id)
+                    if (
+                        msg.message_type not in _FORWARDABLE_MESSAGE_TYPES
+                        and not (msg.attachments or msg.embeds)
+                    ):
+                        continue
+                    decision = engine.evaluate(msg)
+                    if not decision.allowed:
+                        continue
+                    formatted = format_discord_message(
+                        msg, channel, message_kind="pinned"
+                    )
+                    try:
+                        await limiter.wait()
+                        await send_formatted(
+                            self._api,
+                            channel.telegram_chat_id,
+                            formatted,
+                            thread_id=channel.telegram_thread_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Не удалось отправить закреплённое сообщение %s "
+                            "в Telegram чат %s при ручной пересылке",
+                            msg.id,
+                            channel.telegram_chat_id,
+                        )
+                        continue
+                    forwarded += 1
+                    total_forwarded += 1
+
+                base_known = previous_known & current_ids
+                updated_known = base_known | processed_ids
+                if (
+                    channel.storage_id is not None
+                    and updated_known != channel.known_pinned_ids
+                ):
+                    self._store.set_known_pinned_messages(
+                        channel.storage_id, updated_known
+                    )
+                    self._store.set_pinned_synced(channel.storage_id, synced=True)
+                    channel.known_pinned_ids = set(updated_known)
+                    channel.pinned_synced = True
+                    state_changed = True
+
+                note = (
+                    f"переслано {forwarded} закреплённых из {len(subset)} сообщений"
+                    if forwarded
+                    else "подходящих закреплённых сообщений не найдено"
+                )
+                _record(note, forwarded)
                 continue
 
             try:
@@ -1549,20 +1724,16 @@ class TelegramController:
                     "Не удалось получить сообщения канала %s при ручной пересылке",
                     channel.discord_id,
                 )
-                summary_lines.append(f"{label}: ошибка при запросе сообщений")
+                _record("ошибка при запросе сообщений")
                 continue
 
             if not messages:
-                summary_lines.append(f"{label}: новых сообщений нет")
+                _record("новых сообщений нет")
                 continue
-
-            def sort_key(message_id: str) -> tuple[int, str]:
-                return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
 
             ordered = sorted(messages, key=lambda msg: sort_key(msg.id))
             subset = ordered[-limit:]
             engine = FilterEngine(channel.filters)
-            forwarded = 0
             last_seen = channel.last_message_id
 
             for msg in subset:
@@ -1600,15 +1771,6 @@ class TelegramController:
                 forwarded += 1
                 total_forwarded += 1
 
-            if forwarded:
-                summary_lines.append(
-                    f"{label}: переслано {forwarded} из {len(subset)} сообщений"
-                )
-            else:
-                summary_lines.append(
-                    f"{label}: подходящих сообщений не найдено"
-                )
-
             if (
                 last_seen
                 and channel.storage_id is not None
@@ -1616,6 +1778,21 @@ class TelegramController:
             ):
                 self._store.set_last_message(channel.storage_id, last_seen)
                 state_changed = True
+
+            note = (
+                f"переслано {forwarded} из {len(subset)} сообщений"
+                if forwarded
+                else "подходящих сообщений не найдено"
+            )
+            _record(note, forwarded)
+
+        if activity_entries:
+            self._store.record_manual_forward_activity(
+                requested=requested,
+                limit=limit,
+                total_forwarded=total_forwarded,
+                entries=activity_entries,
+            )
 
         if state_changed:
             self._on_change()
