@@ -401,19 +401,31 @@ class TelegramController:
         self._running = True
         self._on_change = on_change
         self._commands_registered = False
+        self._stop_requested = False
 
     async def run(self) -> None:
+        self._running = True
         await self._ensure_commands_registered()
-        while self._running:
-            updates = await self._api.get_updates(self._offset, timeout=25)
-            for update in updates:
-                self._offset = max(self._offset, int(update.get("update_id", 0)) + 1)
-                await self._handle_update(update)
+        if self._stop_requested:
+            self._stop_requested = False
+            self._running = False
+            return
+        try:
+            while self._running:
+                updates = await self._api.get_updates(self._offset, timeout=25)
+                for update in updates:
+                    self._offset = max(
+                        self._offset, int(update.get("update_id", 0)) + 1
+                    )
+                    await self._handle_update(update)
+        finally:
+            self._stop_requested = False
 
     def stop(self) -> None:
         """Stop the controller loop on the next iteration."""
 
         self._running = False
+        self._stop_requested = True
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message") or update.get("edited_message")
@@ -615,6 +627,19 @@ class TelegramController:
                     (
                         "/clear_filter <discord_id|all> <тип> [значение]",
                         "Удалить фильтр полностью или по значению.",
+                    ),
+                ],
+            ),
+            (
+                "📨 Дополнительно",
+                [
+                    (
+                        "/set_discord_link <discord_id|all> <on|off>",
+                        "Прикреплять ссылку на оригинальное сообщение в Discord.",
+                    ),
+                    (
+                        "/send_recent <кол-во> [discord_id|all]",
+                        "Ручная пересылка свежих сообщений из канала.",
                     ),
                 ],
             ),
@@ -1494,6 +1519,11 @@ class TelegramController:
             if not channel.active:
                 summary_lines.append(f"{label}: канал отключён, пропущено")
                 continue
+            if channel.blocked_by_health:
+                summary_lines.append(
+                    f"{label}: канал недоступен по результатам health-check, пропущено"
+                )
+                continue
             if channel.pinned_only:
                 summary_lines.append(
                     f"{label}: канал отслеживает только закреплённые сообщения, пропущено"
@@ -1538,7 +1568,9 @@ class TelegramController:
                 if not decision.allowed:
                     last_seen = candidate_id
                     continue
-                formatted = format_discord_message(msg, channel)
+                formatted = format_discord_message(
+                    msg, channel, message_kind="message"
+                )
                 try:
                     await limiter.wait()
                     await send_formatted(

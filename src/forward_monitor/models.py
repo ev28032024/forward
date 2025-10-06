@@ -61,6 +61,9 @@ class ChannelConfig:
     pinned_only: bool = False
     known_pinned_ids: Set[str] = field(default_factory=set)
     pinned_synced: bool = False
+    health_status: str = "unknown"
+    health_message: str | None = None
+    blocked_by_health: bool = False
 
     def with_updates(
         self,
@@ -86,6 +89,9 @@ class ChannelConfig:
             pinned_only=self.pinned_only,
             known_pinned_ids=set(self.known_pinned_ids),
             pinned_synced=self.pinned_synced,
+            health_status=self.health_status,
+            health_message=self.health_message,
+            blocked_by_health=self.blocked_by_health,
         )
 
 
@@ -123,6 +129,9 @@ class DiscordMessage:
     embeds: Sequence[Mapping[str, Any]]
     stickers: Sequence[Mapping[str, Any]]
     role_ids: Set[str]
+    mention_users: Mapping[str, str] = field(default_factory=dict)
+    mention_roles: Mapping[str, str] = field(default_factory=dict)
+    mention_channels: Mapping[str, str] = field(default_factory=dict)
     timestamp: str | None = None
     edited_timestamp: str | None = None
     message_type: int = 0

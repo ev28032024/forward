@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -13,6 +14,7 @@ from .models import DiscordMessage, NetworkOptions
 
 _API_BASE = "https://discord.com/api/v10"
 _DEFAULT_USER_AGENT = "DiscordBot (https://github.com, 1.0)"
+_ROLE_CACHE_TTL = 3600.0
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ class DiscordClient:
         self._token: str | None = None
         self._network = NetworkOptions()
         self._lock = asyncio.Lock()
+        self._role_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
     def set_token(self, token: str | None) -> None:
         self._token = token.strip() if token else None
@@ -102,9 +105,8 @@ class DiscordClient:
                     exc,
                 )
                 return []
-        return tuple(
-            _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
-        )
+        payloads = [payload for payload in data if isinstance(payload, Mapping)]
+        return await self._prepare_messages(payloads, channel_id)
 
     async def check_channel_exists(self, channel_id: str) -> bool:
         if not self._token:
@@ -187,9 +189,8 @@ class DiscordClient:
                     exc,
                 )
                 return []
-        return tuple(
-            _parse_message(payload, channel_id) for payload in data if isinstance(payload, Mapping)
-        )
+        payloads = [payload for payload in data if isinstance(payload, Mapping)]
+        return await self._prepare_messages(payloads, channel_id)
 
     def _choose_user_agent(self) -> str:
         return self._network.discord_user_agent or _DEFAULT_USER_AGENT
@@ -203,6 +204,115 @@ class DiscordClient:
         if login:
             return aiohttp.BasicAuth(login, password or "")
         return None
+
+    async def _prepare_messages(
+        self, payloads: Sequence[Mapping[str, Any]], channel_id: str
+    ) -> Sequence[DiscordMessage]:
+        if not payloads:
+            return ()
+
+        roles_to_resolve: dict[str, set[str]] = {}
+        for payload in payloads:
+            guild_id_raw = payload.get("guild_id")
+            if not guild_id_raw:
+                continue
+            guild_id = str(guild_id_raw)
+            mention_roles = payload.get("mention_roles") or []
+            role_ids = {
+                str(role_id)
+                for role_id in mention_roles
+                if isinstance(role_id, (str, int)) and str(role_id)
+            }
+            if role_ids:
+                roles_to_resolve.setdefault(guild_id, set()).update(role_ids)
+
+        role_name_map: dict[str, dict[str, str]] = {}
+        for guild_id, role_ids in roles_to_resolve.items():
+            resolved = await self._resolve_role_names(guild_id, role_ids)
+            if resolved:
+                role_name_map[guild_id] = resolved
+
+        messages: list[DiscordMessage] = []
+        for payload in payloads:
+            guild_id_raw = payload.get("guild_id")
+            guild_id = str(guild_id_raw) if guild_id_raw else ""
+            role_names = role_name_map.get(guild_id, {})
+            messages.append(_parse_message(payload, channel_id, role_names))
+        return tuple(messages)
+
+    async def _resolve_role_names(
+        self, guild_id: str, role_ids: set[str]
+    ) -> dict[str, str]:
+        if not guild_id or not role_ids or not self._token:
+            return {}
+
+        cached = self._role_cache.get(guild_id)
+        now = time.monotonic()
+        cache_data = cached[1] if cached else {}
+        needs_refresh = cached is None or cached[0] <= now
+        missing = {role_id for role_id in role_ids if role_id not in cache_data}
+
+        if needs_refresh or missing:
+            fetched = await self._fetch_roles(guild_id)
+            if fetched:
+                cache_data = {**cache_data, **fetched}
+                self._role_cache[guild_id] = (time.monotonic() + _ROLE_CACHE_TTL, cache_data)
+            elif cached and cached[0] <= now:
+                self._role_cache[guild_id] = (time.monotonic() + 300.0, cache_data)
+
+        return {role_id: cache_data.get(role_id, role_id) for role_id in role_ids}
+
+    async def _fetch_roles(self, guild_id: str) -> dict[str, str]:
+        if not self._token:
+            return {}
+
+        headers = {
+            "Authorization": self._token,
+            "User-Agent": self._choose_user_agent(),
+            "Accept": "application/json",
+        }
+
+        url = f"{_API_BASE}/guilds/{guild_id}/roles"
+        proxy = self._network.discord_proxy_url
+        proxy_auth = self._build_proxy_auth()
+
+        async with self._lock:
+            try:
+                timeout_cfg = aiohttp.ClientTimeout(total=15)
+                async with self._session.get(
+                    url,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=timeout_cfg,
+                    proxy_auth=proxy_auth,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.debug(
+                            "Не удалось получить роли гильдии %s: статус %s",
+                            guild_id,
+                            resp.status,
+                        )
+                        await resp.read()
+                        return {}
+                    payload = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                logger.debug(
+                    "Ошибка при получении ролей гильдии %s: %s",
+                    guild_id,
+                    exc,
+                )
+                return {}
+
+        roles: dict[str, str] = {}
+        if isinstance(payload, Sequence):
+            for item in payload:
+                if not isinstance(item, Mapping):
+                    continue
+                role_id = str(item.get("id") or "")
+                name = str(item.get("name") or "").strip()
+                if role_id and name:
+                    roles[role_id] = name
+        return roles
 
     async def verify_token(
         self,
@@ -312,7 +422,9 @@ class DiscordClient:
                 )
 
 
-def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessage:
+def _parse_message(
+    payload: Mapping[str, Any], channel_id: str, role_names: Mapping[str, str]
+) -> DiscordMessage:
     message_id = str(payload.get("id") or "0")
     author = payload.get("author") or {}
     author_id = str(author.get("id") or "0")
@@ -334,6 +446,44 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
     embeds = tuple(item for item in embeds_raw if isinstance(item, Mapping))
     stickers = tuple(item for item in stickers_raw if isinstance(item, Mapping))
 
+    mention_users: dict[str, str] = {}
+    for entry in payload.get("mentions") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        user_id = str(entry.get("id") or "")
+        if not user_id:
+            continue
+        display = (
+            str(entry.get("global_name") or "")
+            or str(entry.get("username") or "")
+            or str(entry.get("nick") or "")
+            or str(entry.get("name") or "")
+        )
+        if not display and isinstance(entry.get("member"), Mapping):
+            display = str(entry["member"].get("nick") or "")
+        if display:
+            mention_users[user_id] = display
+
+    mention_channels: dict[str, str] = {}
+    for entry in payload.get("mention_channels") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        channel_ref = str(entry.get("id") or "")
+        if not channel_ref:
+            continue
+        name = str(entry.get("name") or "").strip()
+        if name:
+            mention_channels[channel_ref] = name
+
+    mention_roles: dict[str, str] = {}
+    for role_id in payload.get("mention_roles") or []:
+        if not isinstance(role_id, (str, int)):
+            continue
+        key = str(role_id)
+        if not key:
+            continue
+        mention_roles[key] = role_names.get(key, key)
+
     message_type_raw = payload.get("type")
     try:
         message_type = int(str(message_type_raw))
@@ -351,6 +501,9 @@ def _parse_message(payload: Mapping[str, Any], channel_id: str) -> DiscordMessag
         embeds=embeds,
         stickers=stickers,
         role_ids=role_ids,
+        mention_users=mention_users,
+        mention_roles=mention_roles,
+        mention_channels=mention_channels,
         timestamp=payload.get("timestamp"),
         edited_timestamp=payload.get("edited_timestamp"),
         message_type=message_type,
