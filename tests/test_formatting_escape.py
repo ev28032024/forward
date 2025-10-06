@@ -18,6 +18,7 @@ def test_markdown_escape_preserves_special_chars() -> None:
     message = DiscordMessage(
         id="1",
         channel_id="1",
+        guild_id="g",
         author_id="1",
         author_name="User",
         content="*bold* _italic_ [link](url)",

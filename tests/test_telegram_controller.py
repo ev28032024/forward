@@ -43,6 +43,17 @@ class DummyAPI:
     async def answer_callback_query(self, callback_id: str, text: str) -> None:
         return None
 
+    async def send_photo(
+        self,
+        chat_id: int | str,
+        photo: str,
+        *,
+        caption: str | None = None,
+        parse_mode: str | None = None,
+        message_thread_id: int | None = None,
+    ) -> None:
+        self.messages.append((chat_id, f"PHOTO:{photo}"))
+
 
 class DummyDiscordClient:
     def __init__(self) -> None:

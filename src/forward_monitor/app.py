@@ -7,7 +7,7 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
@@ -32,7 +32,22 @@ def _parse_discord_timestamp(value: str | None) -> datetime | None:
         except ValueError:
             return None
 
+
+def _discord_snowflake_from_datetime(moment: datetime | None) -> int | None:
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    epoch = datetime(2015, 1, 1, tzinfo=timezone.utc)
+    delta = moment - epoch
+    milliseconds = int(delta.total_seconds() * 1000)
+    if milliseconds < 0:
+        return 0
+    return milliseconds << 22
+
 logger = logging.getLogger(__name__)
+
+_FORWARDABLE_MESSAGE_TYPES: set[int] = {0, 19, 20, 21, 23}
 
 
 @dataclass(slots=True)
@@ -181,6 +196,7 @@ class ForwardMonitorApp:
             return
 
         baseline = channel.added_at
+        baseline_marker = _discord_snowflake_from_datetime(baseline)
         bootstrap = channel.last_message_id is None
 
         try:
@@ -212,10 +228,22 @@ class ForwardMonitorApp:
                 interrupted = True
                 break
             candidate_id = msg.id
+            if msg.message_type not in _FORWARDABLE_MESSAGE_TYPES and not (
+                msg.attachments or msg.embeds
+            ):
+                last_seen = candidate_id
+                continue
             if bootstrap:
+                if baseline_marker is not None and candidate_id.isdigit():
+                    marker = baseline_marker
+                    candidate_numeric = int(candidate_id)
+                    if candidate_numeric <= marker:
+                        last_seen = candidate_id
+                        continue
                 if baseline is not None:
+                    baseline_ts = baseline
                     msg_time = _parse_discord_timestamp(msg.timestamp)
-                    if msg_time is not None and msg_time < baseline:
+                    if msg_time is not None and msg_time <= baseline_ts:
                         last_seen = candidate_id
                         continue
                 bootstrap = False

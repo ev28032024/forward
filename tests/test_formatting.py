@@ -25,6 +25,7 @@ def test_formatting_includes_label_and_author() -> None:
     message = DiscordMessage(
         id="1",
         channel_id="123",
+        guild_id="456",
         author_id="99",
         author_name="Author",
         content="original content",
@@ -52,6 +53,7 @@ def test_formatting_chunks_long_text() -> None:
     message = DiscordMessage(
         id="1",
         channel_id="123",
+        guild_id="456",
         author_id="99",
         author_name="Author",
         content="long text " * 20,
@@ -69,6 +71,7 @@ def test_channel_mentions_converted_in_content() -> None:
     message = DiscordMessage(
         id="2",
         channel_id="123",
+        guild_id="456",
         author_id="99",
         author_name="Author",
         content="See <#1234567890> for details",
@@ -83,3 +86,47 @@ def test_channel_mentions_converted_in_content() -> None:
     assert formatted.parse_mode == "HTML"
     assert "#1234567890" in formatted.text
     assert "See" in formatted.text
+
+
+def test_discord_link_appended_when_enabled() -> None:
+    channel = sample_channel()
+    channel.formatting.show_discord_link = True
+    message = DiscordMessage(
+        id="2",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+    )
+
+    formatted = format_discord_message(message, channel)
+
+    assert "https://discord.com/channels/999/123/2" in formatted.text
+
+
+def test_basic_markdown_translated_to_html() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="3",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="**Bold** __Underline__ ~~Strike~~ ||Spoiler||",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+    )
+
+    formatted = format_discord_message(message, channel)
+
+    assert "<b>Bold</b>" in formatted.text
+    assert "<u>Underline</u>" in formatted.text
+    assert "<s>Strike</s>" in formatted.text
+    assert "<tg-spoiler>Spoiler</tg-spoiler>" in formatted.text

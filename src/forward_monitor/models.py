@@ -15,6 +15,7 @@ class FormattingOptions:
     max_length: int = 3500
     ellipsis: str = "…"
     attachments_style: str = "summary"
+    show_discord_link: bool = False
 
 
 @dataclass(slots=True)
@@ -114,6 +115,7 @@ class DiscordMessage:
 
     id: str
     channel_id: str
+    guild_id: str | None
     author_id: str
     author_name: str
     content: str
@@ -123,6 +125,7 @@ class DiscordMessage:
     role_ids: Set[str]
     timestamp: str | None = None
     edited_timestamp: str | None = None
+    message_type: int = 0
 
 
 @dataclass(slots=True)
@@ -133,3 +136,4 @@ class FormattedTelegramMessage:
     extra_messages: Sequence[str]
     parse_mode: str | None
     disable_preview: bool
+    image_urls: Sequence[str] = ()
