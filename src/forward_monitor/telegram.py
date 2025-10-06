@@ -1682,22 +1682,23 @@ class TelegramController:
                     _record("закреплённые синхронизированы, новых нет")
                     continue
 
-                new_ids = current_ids - previous_known
-                if not new_ids:
-                    _record("новых закреплённых сообщений нет")
+                ordered = sorted(
+                    messages,
+                    key=lambda msg: sort_key(msg.id),
+                    reverse=True,
+                )
+                subset = ordered[:limit]
+                if not subset:
+                    _record("закреплённых сообщений нет")
                     continue
 
-                ordered = sorted(
-                    (msg for msg in messages if msg.id in new_ids),
-                    key=lambda msg: sort_key(msg.id),
-                )
-                subset = ordered[-limit:]
                 engine = FilterEngine(channel.filters)
-                processed_ids: set[str] = set()
+                processed_new_ids: set[str] = set()
 
                 for msg in subset:
                     candidate_id = msg.id
-                    processed_ids.add(candidate_id)
+                    if candidate_id not in previous_known:
+                        processed_new_ids.add(candidate_id)
                     if (
                         msg.message_type not in _FORWARDABLE_MESSAGE_TYPES
                         and not (msg.attachments or msg.embeds)
@@ -1729,7 +1730,7 @@ class TelegramController:
                     total_forwarded += 1
 
                 base_known = previous_known & current_ids
-                updated_known = base_known | processed_ids
+                updated_known = base_known | processed_new_ids
                 if (
                     channel.storage_id is not None
                     and updated_known != channel.known_pinned_ids
@@ -1742,21 +1743,25 @@ class TelegramController:
                     channel.pinned_synced = True
                     state_changed = True
 
-                note = (
-                    f"переслано {forwarded} закреплённых из {len(subset)} сообщений"
-                    if forwarded
-                    else "подходящих закреплённых сообщений не найдено"
-                )
-                _record(note, forwarded)
+                note_parts = []
+                if forwarded:
+                    note_parts.append(
+                        f"переслано {forwarded} закреплённых из {len(subset)} сообщений"
+                    )
+                else:
+                    note_parts.append("подходящих закреплённых сообщений не найдено")
+                remaining = len(ordered) - len(subset)
+                if remaining > 0:
+                    note_parts.append(f"осталось ещё {remaining} сообщений")
+                _record(", ".join(note_parts), forwarded)
                 continue
 
             marker = channel.last_message_id
-            fetch_limit = limit if marker is None else 100
+            fetch_limit = min(100, max(limit + 5, 2 * limit))
             try:
                 messages = await self._discord.fetch_messages(
                     channel.discord_id,
                     limit=fetch_limit,
-                    after=marker if marker else None,
                 )
             except Exception:
                 logger.exception(
@@ -1766,27 +1771,30 @@ class TelegramController:
                 _record("ошибка при запросе сообщений")
                 continue
 
-            filtered_messages = [msg for msg in messages if is_newer(msg.id, marker)]
-            if not filtered_messages:
-                _record("новых сообщений нет")
+            if not messages:
+                _record("сообщения не найдены")
                 continue
 
-            ordered = sorted(filtered_messages, key=lambda msg: sort_key(msg.id))
-            subset = ordered[:limit] if marker else ordered[-limit:]
+            ordered = sorted(messages, key=lambda msg: sort_key(msg.id), reverse=True)
+            subset = ordered[:limit]
+            if not subset:
+                _record("сообщения не найдены")
+                continue
             engine = FilterEngine(channel.filters)
             last_seen = marker
-
             for msg in subset:
                 candidate_id = msg.id
                 if (
                     msg.message_type not in _FORWARDABLE_MESSAGE_TYPES
                     and not (msg.attachments or msg.embeds)
                 ):
-                    last_seen = candidate_id
+                    if is_newer(candidate_id, last_seen):
+                        last_seen = candidate_id
                     continue
                 decision = engine.evaluate(msg)
                 if not decision.allowed:
-                    last_seen = candidate_id
+                    if is_newer(candidate_id, last_seen):
+                        last_seen = candidate_id
                     continue
                 formatted = format_discord_message(
                     msg, channel, message_kind="message"
@@ -1805,9 +1813,11 @@ class TelegramController:
                         msg.id,
                         channel.telegram_chat_id,
                     )
-                    last_seen = candidate_id
+                    if is_newer(candidate_id, last_seen):
+                        last_seen = candidate_id
                     continue
-                last_seen = candidate_id
+                if is_newer(candidate_id, last_seen):
+                    last_seen = candidate_id
                 forwarded += 1
                 total_forwarded += 1
 
@@ -1827,8 +1837,8 @@ class TelegramController:
                 ]
             else:
                 note_parts = ["подходящих сообщений не найдено"]
-            if marker and total_candidates > processed_candidates:
-                remaining = total_candidates - processed_candidates
+            remaining = total_candidates - processed_candidates
+            if remaining > 0:
                 note_parts.append(f"осталось ещё {remaining} сообщений")
             note = ", ".join(note_parts)
             _record(note, forwarded)
