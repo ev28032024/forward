@@ -95,7 +95,7 @@ async def _run_monitor_with_health(
         app._healthcheck_loop(
             cast(DiscordClient, discord),
             cast(TelegramAPI, telegram),
-            interval=0.05,
+            interval_override=0.05,
         )
     )
 

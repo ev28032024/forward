@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
 from .models import ChannelConfig, DiscordMessage, FormattedTelegramMessage
+from .utils import as_moscow_time
 
 EmbedPayload = Mapping[str, Any]
 AttachmentPayload = Mapping[str, Any]
@@ -93,7 +94,7 @@ def _format_timestamp_line(message: DiscordMessage) -> str:
     moment = _parse_timestamp(message.edited_timestamp or message.timestamp)
     if moment is None:
         moment = datetime.now(timezone.utc)
-    formatted = moment.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+    formatted = as_moscow_time(moment).strftime("%d.%m.%Y %H:%M %Z")
     return f"📅 <b>{_escape(formatted)}</b>"
 
 

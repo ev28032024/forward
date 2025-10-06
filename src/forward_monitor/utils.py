@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
+
+try:  # pragma: no cover - zoneinfo availability depends on platform
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - fallback for environments without tzdata
+    ZoneInfo = None  # type: ignore[misc,assignment]
 
 
 class RateLimiter:
@@ -53,3 +59,17 @@ def normalize_username(username: str | None) -> str | None:
         normalized = normalized[1:]
     normalized = normalized.strip().lower()
     return normalized or None
+
+
+if ZoneInfo is not None:  # pragma: no cover - executed when tzdata available
+    MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
+else:  # pragma: no cover - fallback branch for limited platforms
+    MOSCOW_TIMEZONE = timezone(timedelta(hours=3))
+
+
+def as_moscow_time(moment: datetime) -> datetime:
+    """Return ``moment`` converted to the Moscow timezone."""
+
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(MOSCOW_TIMEZONE)

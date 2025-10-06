@@ -88,7 +88,15 @@ class DummyDiscordClient:
         after: str | None = None,
     ) -> list[DiscordMessage]:
         self.fetch_calls.append((channel_id, limit, after))
-        return list(self.messages)
+        def _key(value: str) -> tuple[int, str]:
+            return (int(value), value) if value.isdigit() else (0, value)
+
+        filtered: list[DiscordMessage] = []
+        for message in self.messages:
+            if after is not None and not (_key(message.id) > _key(after)):
+                continue
+            filtered.append(message)
+        return list(filtered[:limit])
 
     async def fetch_pinned_messages(self, channel_id: str) -> list[DiscordMessage]:
         self.fetch_calls.append((channel_id, 0, None))
@@ -381,6 +389,8 @@ def test_status_reports_discord_link_and_manual_activity(tmp_path: Path) -> None
         assert "Ссылка на Discord: показывается" in status_text
         assert "📨 Ручные пересылки" in status_text
         assert "Запрошено: 1 (лимит 1), переслано: 1" in status_text
+        assert "MSK" in status_text
+        assert "Проверка состояния:" in status_text
 
     import asyncio
 
@@ -467,7 +477,7 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
         assert any(message.startswith("PHOTO:") for message in api.messages)
         assert any("<b>Bold text</b>" in message for message in api.messages)
         assert any("Всего переслано: 2" in message for message in api.messages)
-        assert ("123", 2, None) in dummy_client.fetch_calls
+        assert ("123", 100, "100") in dummy_client.fetch_calls
 
         activity = store.load_manual_forward_activity()
         assert activity is not None
@@ -478,6 +488,141 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
         assert activity.entries[0].forwarded == 2
         assert activity.entries[0].mode == "messages"
 
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_send_recent_only_new_messages(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+        record = store.get_channel("123")
+        assert record is not None
+        store.set_last_message(record.id, "105")
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="101",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="Alice",
+                content="old message",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="106",
+                channel_id="123",
+                guild_id="guild",
+                author_id="2",
+                author_name="Bob",
+                content="new-one",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="107",
+                channel_id="123",
+                guild_id="guild",
+                author_id="3",
+                author_name="Carol",
+                content="new-two",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+            DiscordMessage(
+                id="108",
+                channel_id="123",
+                guild_id="guild",
+                author_id="4",
+                author_name="Dave",
+                content="new-three",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+            ),
+        ]
+
+        api.messages.clear()
+        admin.args = "2 123"
+        await controller._dispatch("send_recent", admin)
+
+        record = store.get_channel("123")
+        assert record is not None
+        assert record.last_message_id == "107"
+        assert ("123", 100, "105") in dummy_client.fetch_calls
+        assert any("new-one" in message for message in api.messages)
+        assert any("new-two" in message for message in api.messages)
+        assert all("new-three" not in message for message in api.messages)
+        assert any("осталось ещё 1 сообщений" in message for message in api.messages)
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_set_healthcheck_updates_interval(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "30"
+        await controller._dispatch("set_healthcheck", admin)
+        assert store.get_setting("runtime.health_interval") == "30.00"
+        assert api.messages[-1] == "Интервал health-check обновлён"
+
+        admin.args = "5"
+        await controller._dispatch("set_healthcheck", admin)
+        assert store.get_setting("runtime.health_interval") == "30.00"
+        assert api.messages[-1] == "Минимальный интервал — 10 секунд"
 
     import asyncio
 
