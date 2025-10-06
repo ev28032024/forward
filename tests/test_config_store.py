@@ -47,6 +47,24 @@ def test_channel_lifecycle(tmp_path: Path) -> None:
     assert channel.pinned_synced is True
 
 
+def test_telegram_offset_helpers(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "offsets.sqlite")
+
+    assert store.get_telegram_offset() is None
+
+    store.set_telegram_offset(120)
+    assert store.get_telegram_offset() == 120
+
+    store.set_telegram_offset(-5)
+    assert store.get_telegram_offset() == 0
+
+    store.clear_telegram_offset()
+    assert store.get_telegram_offset() is None
+
+    store.set_setting("state.telegram.offset", "not-a-number")
+    assert store.get_telegram_offset() is None
+
+
 def test_filter_management(tmp_path: Path) -> None:
     store = ConfigStore(tmp_path / "filters.sqlite")
 

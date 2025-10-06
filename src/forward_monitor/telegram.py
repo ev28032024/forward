@@ -403,7 +403,8 @@ class TelegramController:
         self._api = api
         self._store = store
         self._discord = discord_client
-        self._offset = 0
+        stored_offset = self._store.get_telegram_offset()
+        self._offset = stored_offset if stored_offset is not None else 0
         self._running = True
         self._on_change = on_change
         self._commands_registered = False
@@ -419,11 +420,15 @@ class TelegramController:
         try:
             while self._running:
                 updates = await self._api.get_updates(self._offset, timeout=25)
+                highest_offset = self._offset
                 for update in updates:
-                    self._offset = max(
-                        self._offset, int(update.get("update_id", 0)) + 1
-                    )
+                    update_offset = self._extract_update_offset(update)
+                    if update_offset is not None and update_offset > highest_offset:
+                        highest_offset = update_offset
                     await self._handle_update(update)
+                if highest_offset != self._offset:
+                    self._offset = highest_offset
+                    self._store.set_telegram_offset(highest_offset)
         finally:
             self._stop_requested = False
 
@@ -550,6 +555,14 @@ class TelegramController:
         if not parts:
             return "—"
         return " / ".join(parts)
+
+    @staticmethod
+    def _extract_update_offset(update: dict[str, Any]) -> int | None:
+        try:
+            update_id = int(update.get("update_id", 0))
+        except (TypeError, ValueError):
+            return None
+        return max(0, update_id + 1)
 
     # ------------------------------------------------------------------
     # Basic commands

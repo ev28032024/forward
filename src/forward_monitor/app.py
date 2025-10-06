@@ -82,6 +82,7 @@ class ForwardMonitorApp:
         self._health_ready = asyncio.Event()
         self._config_version = 0
         self._health_version = -1
+        self._startup_time = datetime.now(timezone.utc)
         self._mark_config_dirty()
         self._refresh_event.set()
 
@@ -455,8 +456,14 @@ class ForwardMonitorApp:
             return
 
         baseline = channel.added_at
-        baseline_marker = _discord_snowflake_from_datetime(baseline)
         bootstrap = channel.last_message_id is None
+        if bootstrap:
+            startup = self._startup_time
+            if baseline is not None and baseline.tzinfo is None:
+                baseline = baseline.replace(tzinfo=timezone.utc)
+            if baseline is None or baseline < startup:
+                baseline = startup
+        baseline_marker = _discord_snowflake_from_datetime(baseline)
 
         try:
             messages = await discord_client.fetch_messages(
