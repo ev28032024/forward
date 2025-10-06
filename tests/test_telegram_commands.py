@@ -589,14 +589,14 @@ def test_send_recent_only_new_messages(tmp_path: Path) -> None:
         assert any("new-three" in message for message in api.messages)
         assert any("new-two" in message for message in api.messages)
         assert all("new-one" not in message for message in api.messages)
-        assert any("осталось ещё 2 сообщений" in message for message in api.messages)
+        assert any("осталось ещё 1 сообщений" in message for message in api.messages)
 
     import asyncio
 
     asyncio.run(runner())
 
 
-def test_send_recent_includes_history_when_needed(tmp_path: Path) -> None:
+def test_send_recent_ignores_history_when_not_requested(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
         store.set_setting("discord.token", "token")
@@ -686,8 +686,10 @@ def test_send_recent_includes_history_when_needed(tmp_path: Path) -> None:
         joined = "\n".join(api.messages)
         assert "fresh-top" in joined
         assert "fresh-second" in joined
-        assert "history-first" in joined
-        assert any("осталось ещё 1 сообщений" in message for message in api.messages)
+        assert "history-first" not in joined
+        assert not any(
+            "осталось ещё" in message for message in api.messages
+        )
 
     import asyncio
 
