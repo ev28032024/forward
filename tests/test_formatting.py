@@ -43,7 +43,7 @@ def test_formatting_includes_label_and_author() -> None:
     )
     formatted = format_discord_message(message, sample_channel())
     assert formatted.parse_mode == "HTML"
-    assert formatted.text.startswith("<b>━━━━━━━━")
+    assert formatted.text.startswith("<b>────── ✦ ──────</b>")
     assert "📣 <b>Label</b>" in formatted.text
     assert "💬 <b>Новое сообщение</b>" in formatted.text
     assert "👤 <b>Author</b>" in formatted.text
@@ -162,6 +162,51 @@ def test_pinned_header_icon() -> None:
     formatted = format_discord_message(message, channel, message_kind="pinned")
 
     assert "📌 <b>Закреплённое сообщение</b>" in formatted.text
+
+
+def test_markdown_escapes_are_removed() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="6",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="\\#TOKEN2049Singapore takeaways\n1\\.\n2\\.",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+    )
+
+    formatted = format_discord_message(message, channel)
+
+    assert "\\#" not in formatted.text
+    assert "#TOKEN2049Singapore takeaways" in formatted.text
+    assert "1." in formatted.text
+    assert "2." in formatted.text
+
+
+def test_id_tags_and_timestamps_are_formatted() -> None:
+    channel = sample_channel()
+    message = DiscordMessage(
+        id="7",
+        channel_id="123",
+        guild_id="999",
+        author_id="42",
+        author_name="Author",
+        content="<id:guide> <id:customize> <t:1757318400:f>",
+        attachments=(),
+        embeds=(),
+        stickers=(),
+        role_ids=set(),
+    )
+
+    formatted = format_discord_message(message, channel)
+
+    assert "#guide" in formatted.text
+    assert "#customize" in formatted.text
+    assert "08.09.2025 11:00 MSK" in formatted.text
 
 
 def test_mentions_display_names() -> None:

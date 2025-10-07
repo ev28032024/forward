@@ -21,7 +21,7 @@ _MESSAGE_KIND_LABELS = {
     "pinned": "Закреплённое сообщение",
 }
 _CHANNEL_ICON = "📣"
-_MESSAGE_SEPARATOR = "<b>━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"
+_MESSAGE_SEPARATOR = "<b>────── ✦ ──────</b>"
 
 
 def format_discord_message(
@@ -285,6 +285,9 @@ _EXTRA_SPACE_RE = re.compile(r"[ \t]{2,}")
 _TRIPLE_NEWLINES_RE = re.compile(r"\n{3,}")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _ANGLE_LINK_RE = re.compile(r"<(https?://[^\s<>]+)>")
+_GENERIC_ID_TAG_RE = re.compile(r"<id:([a-zA-Z0-9_\-]+)>")
+_TIMESTAMP_TAG_RE = re.compile(r"<t:([-?0-9]+)(?::([a-zA-Z]))?>")
+_ESCAPED_MARKDOWN_RE = re.compile(r"\\([\\*_`~|.!?#\-])")
 _ALLOWED_LINK_SCHEMES = {"http", "https"}
 
 
@@ -306,6 +309,11 @@ def _sanitize_content(text: str, message: DiscordMessage | None = None) -> str:
         cleaned = _CHANNEL_MENTION_RE.sub(lambda match: f"#{match.group(1)}", cleaned)
     cleaned = _ANGLE_LINK_RE.sub(r"\1", cleaned)
     cleaned = _CUSTOM_EMOJI_RE.sub("", cleaned)
+    cleaned = _GENERIC_ID_TAG_RE.sub(
+        lambda match: _format_generic_id_tag(match.group(1)), cleaned
+    )
+    cleaned = _TIMESTAMP_TAG_RE.sub(_format_timestamp_tag, cleaned)
+    cleaned = _ESCAPED_MARKDOWN_RE.sub(r"\1", cleaned)
     cleaned = _EXTRA_SPACE_RE.sub(" ", cleaned)
     cleaned = _TRIPLE_NEWLINES_RE.sub("\n\n", cleaned)
     return cleaned.strip()
@@ -375,6 +383,77 @@ def _apply_basic_markdown(text: str) -> str:
     for token, value in placeholders.items():
         result = result.replace(token, value)
     return result
+
+
+def _format_generic_id_tag(raw: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_\-]+", "", raw)
+    if not cleaned:
+        return ""
+    return f"#{cleaned}"
+
+
+def _format_timestamp_tag(match: re.Match[str]) -> str:
+    raw_value = match.group(1)
+    style = (match.group(2) or "f").lower()
+    try:
+        timestamp = int(raw_value)
+    except ValueError:
+        return match.group(0)
+    try:
+        moment = datetime.fromtimestamp(timestamp, timezone.utc)
+    except (OverflowError, OSError):
+        return match.group(0)
+
+    local = as_moscow_time(moment)
+
+    if style in _DISCORD_TIMESTAMP_FORMATS:
+        return local.strftime(_DISCORD_TIMESTAMP_FORMATS[style])
+    if style == "r":
+        return _format_relative_time(moment)
+    return local.strftime("%d.%m.%Y %H:%M %Z")
+
+
+def _format_relative_time(target: datetime) -> str:
+    now = datetime.now(timezone.utc)
+    delta = target - now
+    seconds = int(delta.total_seconds())
+    remaining = abs(seconds)
+    units: list[tuple[int, str]] = [
+        (31536000, "г."),
+        (2592000, "мес."),
+        (604800, "нед."),
+        (86400, "д."),
+        (3600, "ч."),
+        (60, "мин."),
+        (1, "сек."),
+    ]
+    value = 0
+    label = "сек."
+    for unit_seconds, unit_label in units:
+        if remaining >= unit_seconds:
+            value = max(1, remaining // unit_seconds)
+            label = unit_label
+            break
+    else:
+        value = 0
+        label = "сек."
+
+    if value == 0:
+        return "прямо сейчас"
+
+    if seconds < 0:
+        return f"{value} {label} назад"
+    return f"через {value} {label}"
+
+
+_DISCORD_TIMESTAMP_FORMATS = {
+    "t": "%H:%M",
+    "T": "%H:%M:%S",
+    "d": "%d.%m.%Y",
+    "D": "%d %B %Y",
+    "f": "%d.%m.%Y %H:%M %Z",
+    "F": "%d %B %Y %H:%M %Z",
+}
 
 
 _CODE_BLOCK_RE = re.compile(r"```(.*?)```", re.DOTALL)
