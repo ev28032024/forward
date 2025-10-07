@@ -488,6 +488,10 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
         record = store.get_channel("123")
         assert record is not None
         assert record.last_message_id == "102"
+        assert api.messages
+        assert api.messages[0] == (
+            "Пересылка запущена (каналов: 1, лимит: 2). Это может занять несколько минут."
+        )
         assert any(message.startswith("PHOTO:") for message in api.messages)
         assert any("<b>Bold text</b>" in message for message in api.messages)
         assert any("Всего переслано: 2" in message for message in api.messages)

@@ -1681,6 +1681,14 @@ class TelegramController:
             await self._api.send_message(ctx.chat_id, "Каналы не настроены")
             return
 
+        await self._api.send_message(
+            ctx.chat_id,
+            (
+                f"Пересылка запущена (каналов: {len(selected)}, лимит: {limit}). "
+                "Это может занять несколько минут."
+            ),
+        )
+
         rate_setting = self._store.get_setting("runtime.rate")
         try:
             rate_value = float(rate_setting) if rate_setting is not None else 8.0

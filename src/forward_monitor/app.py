@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeVar
 
 import aiohttp
 
@@ -49,6 +50,32 @@ def _discord_snowflake_from_datetime(moment: datetime | None) -> int | None:
 logger = logging.getLogger(__name__)
 
 _FORWARDABLE_MESSAGE_TYPES: set[int] = {0, 19, 20, 21, 23}
+
+
+_T = TypeVar("_T")
+_HEALTHCHECK_RETRY_ATTEMPTS = 3
+_HEALTHCHECK_RETRY_DELAY = 1.0
+
+
+async def _retry_async(
+    factory: Callable[[], Awaitable[_T]],
+    *,
+    attempts: int = _HEALTHCHECK_RETRY_ATTEMPTS,
+    delay: float = _HEALTHCHECK_RETRY_DELAY,
+    predicate: Callable[[_T], bool] | None = None,
+) -> _T:
+    if attempts <= 1:
+        return await factory()
+
+    result = await factory()
+    check = predicate or (lambda value: bool(value))
+
+    for _ in range(1, attempts):
+        if check(result):
+            return result
+        await asyncio.sleep(delay)
+        result = await factory()
+    return result
 
 
 @dataclass(slots=True)
@@ -263,7 +290,10 @@ class ForwardMonitorApp:
         discord_client.set_token(state.discord_token)
         discord_client.set_network_options(state.network)
 
-        proxy_result = await discord_client.check_proxy(state.network)
+        proxy_result = await _retry_async(
+            lambda: discord_client.check_proxy(state.network),
+            predicate=lambda result: result.ok,
+        )
         proxy_configured = bool(state.network.discord_proxy_url)
         if proxy_configured:
             proxy_status = "ok" if proxy_result.ok else "error"
@@ -293,8 +323,11 @@ class ForwardMonitorApp:
             token_status = "error"
             token_message = "Токен Discord не задан."
         else:
-            token_result = await discord_client.verify_token(
-                token_value, network=state.network
+            token_result = await _retry_async(
+                lambda: discord_client.verify_token(
+                    token_value, network=state.network
+                ),
+                predicate=lambda result: result.ok,
             )
             token_ok = token_result.ok
             token_status = "ok" if token_result.ok else "error"
@@ -346,8 +379,11 @@ class ForwardMonitorApp:
                     )
                 )
                 continue
-            await check_rate.wait()
-            exists = await discord_client.check_channel_exists(channel.discord_id)
+            async def _check_channel() -> bool:
+                await check_rate.wait()
+                return await discord_client.check_channel_exists(channel.discord_id)
+
+            exists = await _retry_async(_check_channel, predicate=lambda value: bool(value))
             if exists:
                 updates.append(HealthUpdate(key=key, status="ok", message=None, label=label))
             else:
