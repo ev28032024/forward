@@ -174,6 +174,60 @@ def _channel_sort_key(
     return (normalized, thread_sort, _message_id_sort_key(discord_id))
 
 
+def _panel_header(title: str, icon: str) -> str:
+    return f"<b>{icon} {html.escape(title)}</b>"
+
+
+def _panel_note(text: str, *, escape: bool = True) -> str:
+    content = html.escape(text) if escape else text
+    return f"<i>{content}</i>"
+
+
+def _panel_bullet(
+    text: str, *, indent: int = 1, icon: str | None = None
+) -> str:
+    prefix = _INDENT * indent
+    bullet = f"{icon} " if icon else "• "
+    return f"{prefix}{bullet}{text}"
+
+
+def _panel_message(
+    title: str,
+    *,
+    icon: str,
+    description: str | None = None,
+    description_escape: bool = True,
+    rows: Sequence[str] = (),
+) -> str:
+    lines = [_panel_header(title, icon)]
+    if description is not None:
+        lines.append(_panel_note(description, escape=description_escape))
+    if rows:
+        if description is not None:
+            lines.append("")
+        lines.extend(rows)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _group_channels_by_chat_and_thread(
+    records: Sequence[Any],
+) -> dict[str, dict[int | None, list[Any]]]:
+    grouped: dict[str, dict[int | None, list[Any]]] = {}
+    for record in records:
+        chat_id = getattr(record, "telegram_chat_id")
+        thread_id = getattr(record, "telegram_thread_id", None)
+        grouped.setdefault(chat_id, {}).setdefault(thread_id, []).append(record)
+    return grouped
+
+
+def _thread_sort_key(thread_id: int | None) -> tuple[int, int]:
+    if thread_id is None:
+        return (0, 0)
+    return (1, thread_id)
+
+
 class TelegramAPIProtocol(Protocol):
     async def get_updates(
         self,
@@ -564,14 +618,15 @@ class TelegramController:
         handler = getattr(self, f"cmd_{command}", None)
         if handler is None:
             if self._is_admin(ctx):
-                await self._api.send_message(
-                    ctx.chat_id,
-                    (
-                        "ℹ️ <b>Команда не найдена</b>\n"
+                await self._send_panel_message(
+                    ctx,
+                    title="Команда не найдена",
+                    icon="ℹ️",
+                    description=(
                         f"Не удалось распознать <code>/{html.escape(command)}</code>. "
                         "Откройте <code>/help</code> для полного списка."
                     ),
-                    parse_mode="HTML",
+                    description_escape=False,
                 )
             return
 
@@ -655,6 +710,71 @@ class TelegramController:
             return "—"
         return " / ".join(parts)
 
+    async def _send_panel_message(
+        self,
+        ctx: CommandContext,
+        *,
+        title: str,
+        icon: str = "ℹ️",
+        description: str | None = None,
+        description_escape: bool = True,
+        rows: Sequence[str] = (),
+    ) -> None:
+        message = _panel_message(
+            title,
+            icon=icon,
+            description=description,
+            description_escape=description_escape,
+            rows=rows,
+        )
+        await self._api.send_message(
+            ctx.chat_id,
+            message,
+            parse_mode="HTML",
+        )
+
+    async def _send_usage_error(
+        self,
+        ctx: CommandContext,
+        usage: str,
+        *,
+        tip: str | None = None,
+    ) -> None:
+        rows = [
+            _panel_bullet(
+                f"Использование: <code>{html.escape(usage)}</code>",
+                icon="📌",
+            )
+        ]
+        if tip:
+            rows.append(_panel_bullet(html.escape(tip), icon="💡"))
+        await self._send_panel_message(
+            ctx,
+            title="Неверный ввод",
+            icon="⚠️",
+            rows=rows,
+        )
+
+    async def _send_status_notice(
+        self,
+        ctx: CommandContext,
+        *,
+        title: str,
+        icon: str,
+        message: str,
+        message_icon: str,
+        escape: bool = True,
+    ) -> None:
+        rows = [_panel_bullet(message if not escape else html.escape(message), icon=message_icon)]
+        await self._send_panel_message(
+            ctx,
+            title=title,
+            icon=icon,
+            rows=rows,
+            description=None,
+            description_escape=True,
+        )
+
     @staticmethod
     def _extract_update_offset(update: dict[str, Any]) -> int | None:
         try:
@@ -667,14 +787,21 @@ class TelegramController:
     # Basic commands
     # ------------------------------------------------------------------
     async def cmd_start(self, ctx: CommandContext) -> None:
-        welcome_message = (
-            "👋 <b>Forward Monitor</b> на связи.\n"
-            "Откройте <code>/help</code>, чтобы перейти в панель управления."
-        )
-        await self._api.send_message(
-            ctx.chat_id,
-            welcome_message,
-            parse_mode="HTML",
+        await self._send_panel_message(
+            ctx,
+            title="Forward Monitor",
+            icon="👋",
+            description=(
+                "Готов помочь настроить пересылку. "
+                "Откройте <code>/help</code>, чтобы перейти в панель управления."
+            ),
+            description_escape=False,
+            rows=[
+                _panel_bullet(
+                    "Используйте команды ниже, чтобы управлять настройками.",
+                    icon="🛠️",
+                )
+            ],
         )
 
     async def cmd_help(self, ctx: CommandContext) -> None:
@@ -700,8 +827,11 @@ class TelegramController:
                 "📡 Каналы",
                 [
                     (
-                        "/add_channel <discord_id> <telegram_chat[:thread]> <название>",
-                        "Создать новую связку, выбрать тему и задать имя.",
+                        (
+                            "/add_channel <discord_id> <telegram_chat[:thread]> <название>"
+                            " [messages|pinned]"
+                        ),
+                        "Создать новую связку, выбрать тему, режим и задать имя.",
                     ),
                     (
                         "/set_thread <discord_id> <thread_id|clear>",
@@ -777,6 +907,12 @@ class TelegramController:
         lines = [
             "<b>🛠️ Forward Monitor • Основные команды</b>",
             "<i>Все настройки выполняются из этого чата: категории ниже.</i>",
+            "",
+            _panel_bullet(
+                "Для <code>/add_channel</code> можно указать режим <code>messages</code> "
+                "или <code>pinned</code> в конце команды, чтобы выбрать тип мониторинга.",
+                icon="💡",
+            ),
             "",
         ]
         for title, commands in sections:
@@ -1014,116 +1150,181 @@ class TelegramController:
         lines.append("")
         lines.append("<b>📡 Каналы</b>")
         if channel_configs:
-            grouped_channels: dict[str, list[ChannelConfig]] = {}
-            for channel in channel_configs:
-                grouped_channels.setdefault(channel.telegram_chat_id, []).append(channel)
-
-            for chat_id, group in sorted(
-                grouped_channels.items(), key=lambda item: _chat_sort_key(item[0])
+            grouped = _group_channels_by_chat_and_thread(channel_configs)
+            for chat_id, threads in sorted(
+                grouped.items(), key=lambda item: _chat_sort_key(item[0])
             ):
                 escaped_chat = html.escape(chat_id)
+                total = sum(len(items) for items in threads.values())
                 lines.append("")
                 lines.append(
                     f"💬 <b>Telegram <code>{escaped_chat}</code></b> — "
-                    f"{len(group)} "
-                    + ("связка" if len(group) == 1 else "связки")
+                    f"{total} "
+                    + ("связка" if total == 1 else "связки")
                 )
 
-                for channel in sorted(
-                    group,
-                    key=lambda item: _channel_sort_key(
-                        item.label, item.discord_id, item.telegram_thread_id
-                    ),
+                for thread_id, items in sorted(
+                    threads.items(), key=lambda item: _thread_sort_key(item[0])
                 ):
-                    health_status = channel.health_status
-                    health_message = channel.health_message
-                    if not channel.active:
-                        health_status = "disabled"
-                    status_icon = _health_icon(health_status)
-                    label = html.escape(_normalize_label(channel.label, channel.discord_id))
-                    discord_display = html.escape(channel.discord_id)
+                    if thread_id is None:
+                        thread_title = "Основной чат"
+                        thread_icon = "🗂️"
+                    else:
+                        thread_title = f"Тема <code>{thread_id}</code>"
+                        thread_icon = "🧵"
                     lines.append(
-                        f"{_INDENT}{status_icon} <b>{label}</b> — Discord "
-                        f"<code>{discord_display}</code>"
+                        _panel_bullet(
+                            f"<b>{thread_title}</b>",
+                            indent=1,
+                            icon=thread_icon,
+                        )
                     )
-                    if channel.telegram_thread_id is not None:
-                        thread_value = html.escape(str(channel.telegram_thread_id))
-                        lines.append(
-                            f"{_DOUBLE_INDENT}• Тема: <code>{thread_value}</code>"
+
+                    for channel in sorted(
+                        items,
+                        key=lambda item: _channel_sort_key(
+                            getattr(item, "label", item.discord_id),
+                            item.discord_id,
+                            item.telegram_thread_id,
+                        ),
+                    ):
+                        health_status = channel.health_status
+                        health_message = channel.health_message
+                        if not channel.active:
+                            health_status = "disabled"
+                        status_icon = _health_icon(health_status)
+                        label = html.escape(
+                            _normalize_label(channel.label, channel.discord_id)
                         )
-                    if health_message:
+                        discord_display = html.escape(channel.discord_id)
                         lines.append(
-                            f"{_DOUBLE_INDENT}• Статус: {html.escape(health_message)}"
+                            _panel_bullet(
+                                f"<b>{label}</b> — Discord <code>{discord_display}</code>",
+                                indent=2,
+                                icon=status_icon,
+                            )
                         )
-                    lines.append(
-                        f"{_DOUBLE_INDENT}• Предпросмотр ссылок: "
-                        + (
+                        if health_message:
+                            lines.append(
+                                _panel_bullet(
+                                    html.escape(health_message),
+                                    indent=3,
+                                    icon="🩺",
+                                )
+                            )
+                        preview_label = (
                             "выключен"
                             if channel.formatting.disable_preview
                             else "включен"
                         )
-                    )
-                    lines.append(
-                        (
-                            f"{_DOUBLE_INDENT}• Максимальная длина: "
-                            f"{channel.formatting.max_length} символов"
+                        link_channel_desc = (
+                            "показывается"
+                            if channel.formatting.show_discord_link
+                            else "скрыта"
                         )
-                    )
-                    link_channel_desc = (
-                        "показывается"
-                        if channel.formatting.show_discord_link
-                        else "скрыта"
-                    )
-                    lines.append(
-                        f"{_DOUBLE_INDENT}• Ссылка на Discord: {html.escape(link_channel_desc)}"
-                    )
-                    attachment_mode = (
-                        "краткий список"
-                        if channel.formatting.attachments_style.lower() == "summary"
-                        else "список ссылок"
-                    )
-                    lines.append(f"{_DOUBLE_INDENT}• Вложения: {attachment_mode}")
-                    lines.append(
-                        f"{_DOUBLE_INDENT}• Режим: "
-                        + (
+                        attachment_mode = (
+                            "краткий список"
+                            if channel.formatting.attachments_style.lower() == "summary"
+                            else "список ссылок"
+                        )
+                        mode_label = (
                             "закреплённые сообщения"
                             if channel.pinned_only
                             else "новые сообщения"
                         )
-                    )
-
-                    channel_filter_sets = _collect_filter_sets(channel.filters)
-                    extra_filters = {
-                        key: {
-                            value_key: value
-                            for value_key, value in channel_filter_sets.get(key, {}).items()
-                            if value_key not in default_filter_sets.get(key, {})
-                        }
-                        for key in _FILTER_TYPES
-                    }
-                    if any(extra_filters[name] for name in _FILTER_TYPES):
-                        lines.append(f"{_DOUBLE_INDENT}• Дополнительные фильтры")
-                        lines.extend(
-                            _describe_filters(
-                                extra_filters,
-                                indent=_DOUBLE_INDENT + _INDENT,
-                                empty_message="",
-                            )
-                        )
-                    else:
-                        if has_default_filters:
+                        if channel.telegram_thread_id is not None:
+                            thread_value = html.escape(str(channel.telegram_thread_id))
                             lines.append(
-                                (
-                                    f"{_DOUBLE_INDENT}• Дополнительные фильтры: нет, "
-                                    "используются глобальные"
+                                _panel_bullet(
+                                    f"Тема: <code>{thread_value}</code>",
+                                    indent=3,
+                                    icon="🧵",
+                                )
+                            )
+                        if not channel.active:
+                            lines.append(
+                                _panel_bullet(
+                                    "Канал отключён.",
+                                    indent=3,
+                                    icon="⏹️",
+                                )
+                            )
+                        lines.extend(
+                            [
+                                _panel_bullet(
+                                    f"Режим: {html.escape(mode_label)}",
+                                    indent=3,
+                                    icon="🎯",
+                                ),
+                                _panel_bullet(
+                                    f"Предпросмотр: {html.escape(preview_label)}",
+                                    indent=3,
+                                    icon="🔗",
+                                ),
+                                _panel_bullet(
+                                    (
+                                        f"Максимальная длина: {channel.formatting.max_length} "
+                                        "символов"
+                                    ),
+                                    indent=3,
+                                    icon="📏",
+                                ),
+                                _panel_bullet(
+                                    f"Ссылка на Discord: {html.escape(link_channel_desc)}",
+                                    indent=3,
+                                    icon="🔁",
+                                ),
+                                _panel_bullet(
+                                    f"Вложения: {html.escape(attachment_mode)}",
+                                    indent=3,
+                                    icon="📎",
+                                ),
+                            ]
+                        )
+
+                        channel_filter_sets = _collect_filter_sets(channel.filters)
+                        extra_filters = {
+                            key: {
+                                value_key: value
+                                for value_key, value in channel_filter_sets.get(key, {}).items()
+                                if value_key not in default_filter_sets.get(key, {})
+                            }
+                            for key in _FILTER_TYPES
+                        }
+                        if any(extra_filters[name] for name in _FILTER_TYPES):
+                            lines.append(
+                                _panel_bullet(
+                                    "Дополнительные фильтры:",
+                                    indent=3,
+                                    icon="🛡️",
+                                )
+                            )
+                            lines.extend(
+                                _describe_filters(
+                                    extra_filters,
+                                    indent=_INDENT * 4,
+                                    empty_message="",
                                 )
                             )
                         else:
-                            lines.append(f"{_DOUBLE_INDENT}• Дополнительные фильтры: нет")
-
-                lines.append("")
+                            if has_default_filters:
+                                lines.append(
+                                    _panel_bullet(
+                                        "Дополнительных фильтров нет, используются глобальные.",
+                                        indent=3,
+                                        icon="🛡️",
+                                    )
+                                )
+                            else:
+                                lines.append(
+                                    _panel_bullet(
+                                        "Дополнительные фильтры отсутствуют.",
+                                        indent=3,
+                                        icon="🛡️",
+                                    )
+                                )
         else:
-            lines.append(f"{_INDENT}• Не настроены")
+            lines.append(_panel_bullet("Не настроены", icon="ℹ️"))
 
         while lines and lines[-1] == "":
             lines.pop()
@@ -1142,40 +1343,68 @@ class TelegramController:
                 return
             self._store.add_admin(ctx.user_id, ctx.handle)
             self._on_change()
-            await self._api.send_message(
-                ctx.chat_id,
-                "Ваши административные данные обновлены",
+            await self._send_panel_message(
+                ctx,
+                title="Администрирование",
+                icon="👑",
+                rows=[
+                    _panel_bullet(
+                        "Ваши данные администратора обновлены.",
+                        icon="✅",
+                    )
+                ],
             )
             return
         self._store.add_admin(ctx.user_id, ctx.handle)
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Вы назначены администратором")
+        await self._send_panel_message(
+            ctx,
+            title="Администрирование",
+            icon="👑",
+            rows=[
+                _panel_bullet(
+                    "Вы назначены администратором.",
+                    icon="🎉",
+                )
+            ],
+        )
 
     async def cmd_admins(self, ctx: CommandContext) -> None:
         admins = self._store.list_admins()
         if admins:
-            lines = ["<b>👑 Администраторы</b>", ""]
-            for admin in admins:
-                lines.append(f"• {self._format_admin(admin)}")
-        else:
-            lines = [
-                "<b>👑 Администраторы</b>",
-                "",
-                "Пока никого нет. Используйте <code>/grant</code>, чтобы добавить доступ.",
+            rows = [
+                _panel_bullet(
+                    self._format_admin(admin),
+                    icon="🧑\u200d💼",
+                )
+                for admin in admins
             ]
-        await self._api.send_message(
-            ctx.chat_id,
-            "\n".join(lines),
-            parse_mode="HTML",
-        )
+            await self._send_panel_message(
+                ctx,
+                title="Администраторы",
+                icon="👑",
+                description="Список пользователей с правами управления.",
+                rows=rows,
+            )
+        else:
+            await self._send_panel_message(
+                ctx,
+                title="Администраторы",
+                icon="👑",
+                description="Список администраторов пуст.",
+                rows=[
+                    _panel_bullet(
+                        "Используйте <code>/grant</code>, чтобы выдать права.",
+                        icon="💡",
+                    )
+                ],
+                description_escape=True,
+            )
 
     async def cmd_grant(self, ctx: CommandContext) -> None:
         target = ctx.args.strip()
         if not target:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Укажите ID или @username",
-            )
+            await self._send_usage_error(ctx, "/grant <id|@user>")
             return
         user_id: int | None
         username: str | None
@@ -1185,7 +1414,13 @@ class TelegramController:
         else:
             normalized_username = normalize_username(target)
             if normalized_username is None:
-                await self._api.send_message(ctx.chat_id, "Неверное имя пользователя")
+                await self._send_status_notice(
+                    ctx,
+                    title="Администрирование",
+                    icon="⚠️",
+                    message="Неверное имя пользователя.",
+                    message_icon="❗️",
+                )
                 return
             username = normalized_username
             user_id = self._store.resolve_user_id(username)
@@ -1193,25 +1428,38 @@ class TelegramController:
         self._on_change()
         label = self._format_admin(AdminRecord(user_id=user_id, username=username))
         if user_id is None:
-            await self._api.send_message(
-                ctx.chat_id,
-                f"Выдан доступ {label}. Активируется после первого обращения.",
-                parse_mode="HTML",
+            await self._send_panel_message(
+                ctx,
+                title="Администрирование",
+                icon="👑",
+                rows=[
+                    _panel_bullet(
+                        (
+                            f"Выдан доступ {label}. Активируется после первого обращения."
+                        ),
+                        icon="✅",
+                    )
+                ],
+                description_escape=True,
             )
         else:
-            await self._api.send_message(
-                ctx.chat_id,
-                f"Выдан доступ {label}",
-                parse_mode="HTML",
+            await self._send_panel_message(
+                ctx,
+                title="Администрирование",
+                icon="👑",
+                rows=[
+                    _panel_bullet(
+                        f"Выдан доступ {label}",
+                        icon="✅",
+                    )
+                ],
+                description_escape=True,
             )
 
     async def cmd_revoke(self, ctx: CommandContext) -> None:
         target = ctx.args.strip()
         if not target:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Укажите ID или @username",
-            )
+            await self._send_usage_error(ctx, "/revoke <id|@user>")
             return
         label: str
         removed: bool
@@ -1222,18 +1470,37 @@ class TelegramController:
         else:
             normalized = normalize_username(target)
             if normalized is None:
-                await self._api.send_message(ctx.chat_id, "Неверное имя пользователя")
+                await self._send_status_notice(
+                    ctx,
+                    title="Администрирование",
+                    icon="⚠️",
+                    message="Неверное имя пользователя.",
+                    message_icon="❗️",
+                )
                 return
             removed = self._store.remove_admin(normalized)
             label = self._format_admin(AdminRecord(user_id=None, username=normalized))
         if not removed:
-            await self._api.send_message(ctx.chat_id, "Администратор не найден")
+            await self._send_status_notice(
+                ctx,
+                title="Администрирование",
+                icon="⚠️",
+                message="Администратор не найден.",
+                message_icon="❗️",
+            )
             return
         self._on_change()
-        await self._api.send_message(
-            ctx.chat_id,
-            f"Доступ отозван у {label}",
-            parse_mode="HTML",
+        await self._send_panel_message(
+            ctx,
+            title="Администрирование",
+            icon="👑",
+            rows=[
+                _panel_bullet(
+                    f"Доступ отозван у {label}",
+                    icon="✅",
+                )
+            ],
+            description_escape=True,
         )
 
     # ------------------------------------------------------------------
@@ -1242,15 +1509,18 @@ class TelegramController:
     async def cmd_set_discord_token(self, ctx: CommandContext) -> None:
         token = ctx.args.strip()
         if not token:
-            await self._api.send_message(ctx.chat_id, "Нужно передать токен")
+            await self._send_usage_error(ctx, "/set_discord_token <token>")
             return
 
         network = self._store.load_network_options()
         result = await self._discord.verify_token(token, network=network)
         if not result.ok:
-            await self._api.send_message(
-                ctx.chat_id,
-                result.error or "Не удалось проверить токен Discord.",
+            await self._send_status_notice(
+                ctx,
+                title="Discord",
+                icon="⚠️",
+                message=result.error or "Не удалось проверить токен Discord.",
+                message_icon="❗️",
             )
             return
 
@@ -1258,24 +1528,34 @@ class TelegramController:
         self._store.set_setting("discord.token", stored_value)
         self._on_change()
         display = result.display_name or "пользователь"
-        await self._api.send_message(
-            ctx.chat_id,
-            f"Токен Discord обновлён. Авторизация прошла успешно: {display}",
+        await self._send_panel_message(
+            ctx,
+            title="Discord",
+            icon="✅",
+            rows=[
+                _panel_bullet(
+                    f"Авторизация прошла успешно: {html.escape(display)}",
+                    icon="🔐",
+                )
+            ],
         )
 
     async def cmd_set_proxy(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if not parts:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /set_proxy <url|clear> [логин] [пароль]",
+            await self._send_usage_error(
+                ctx,
+                "/set_proxy <url|clear> [логин] [пароль]",
             )
             return
         if parts[0].lower() == "clear":
             if len(parts) > 1:
-                await self._api.send_message(
-                    ctx.chat_id,
-                    "Лишние параметры. Использование: /set_proxy clear",
+                await self._send_status_notice(
+                    ctx,
+                    title="Прокси",
+                    icon="⚠️",
+                    message="Лишние параметры для отключения прокси.",
+                    message_icon="❗️",
                 )
                 return
             self._store.delete_setting("proxy.discord.url")
@@ -1283,39 +1563,56 @@ class TelegramController:
             self._store.delete_setting("proxy.discord.password")
             self._store.delete_setting("proxy.discord")
             self._on_change()
-            await self._api.send_message(ctx.chat_id, "Прокси отключён")
+            await self._send_panel_message(
+                ctx,
+                title="Прокси",
+                icon="🌐",
+                rows=[
+                    _panel_bullet("Прокси отключён.", icon="✅"),
+                ],
+            )
             return
 
         if len(parts) > 3:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Слишком много параметров. Использование: /set_proxy <url> [логин] [пароль]",
+            await self._send_usage_error(
+                ctx,
+                "/set_proxy <url> [логин] [пароль]",
+                tip="Укажите не более трёх параметров.",
             )
             return
 
         proxy_url = parts[0]
         parsed = urlparse(proxy_url)
         if not parsed.scheme or not parsed.netloc:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Укажите корректный URL прокси (например, http://host:port).",
+            await self._send_status_notice(
+                ctx,
+                title="Прокси",
+                icon="⚠️",
+                message="Укажите корректный URL (например, http://host:port).",
+                message_icon="❗️",
             )
             return
 
         allowed_schemes = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
         if parsed.scheme.lower() not in allowed_schemes:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Поддерживаются схемы http, https, socks4, socks5.",
+            await self._send_status_notice(
+                ctx,
+                title="Прокси",
+                icon="⚠️",
+                message="Поддерживаются схемы http, https, socks4, socks5.",
+                message_icon="❗️",
             )
             return
 
         proxy_login = parts[1] if len(parts) >= 2 else None
         proxy_password = parts[2] if len(parts) >= 3 else None
         if proxy_login and ":" in proxy_login:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Логин не должен содержать двоеточие.",
+            await self._send_status_notice(
+                ctx,
+                title="Прокси",
+                icon="⚠️",
+                message="Логин не должен содержать двоеточие.",
+                message_icon="❗️",
             )
             return
 
@@ -1326,9 +1623,12 @@ class TelegramController:
 
         result = await self._discord.check_proxy(network)
         if not result.ok:
-            await self._api.send_message(
-                ctx.chat_id,
-                result.error or "Прокси не отвечает. Проверьте настройки.",
+            await self._send_status_notice(
+                ctx,
+                title="Прокси",
+                icon="⚠️",
+                message=result.error or "Прокси не отвечает. Проверьте настройки.",
+                message_icon="❗️",
             )
             return
 
@@ -1343,104 +1643,182 @@ class TelegramController:
             self._store.delete_setting("proxy.discord.password")
         self._store.delete_setting("proxy.discord")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Прокси обновлён. Проверка прошла успешно.")
+        rows = [
+            _panel_bullet(
+                f"URL: <code>{html.escape(proxy_url)}</code>",
+                icon="🔗",
+            ),
+            _panel_bullet("Подключение проверено.", icon="✅"),
+        ]
+        if proxy_login:
+            rows.append(
+                _panel_bullet(
+                    f"Логин: <code>{html.escape(proxy_login)}</code>",
+                    icon="👤",
+                )
+            )
+        await self._send_panel_message(
+            ctx,
+            title="Прокси",
+            icon="🌐",
+            rows=rows,
+        )
 
     async def cmd_set_user_agent(self, ctx: CommandContext) -> None:
         value = ctx.args.strip()
         if not value:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /set_user_agent <значение>",
-            )
+            await self._send_usage_error(ctx, "/set_user_agent <значение>")
             return
         self._store.set_setting("ua.discord", value)
         self._store.delete_setting("ua.discord.desktop")
         self._store.delete_setting("ua.discord.mobile")
         self._store.delete_setting("ua.discord.mobile_ratio")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "User-Agent сохранён")
+        await self._send_panel_message(
+            ctx,
+            title="Discord",
+            icon="🧾",
+            rows=[
+                _panel_bullet("User-Agent сохранён.", icon="✅"),
+            ],
+        )
 
     async def cmd_set_poll(self, ctx: CommandContext) -> None:
         try:
             value = float(ctx.args)
         except ValueError:
-            await self._api.send_message(ctx.chat_id, "Укажите число секунд")
+            await self._send_status_notice(
+                ctx,
+                title="Параметры",
+                icon="⚠️",
+                message="Укажите число секунд.",
+                message_icon="❗️",
+            )
             return
         self._store.set_setting("runtime.poll", f"{max(0.5, value):.2f}")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Интервал опроса обновлён")
+        await self._send_panel_message(
+            ctx,
+            title="Параметры",
+            icon="⏱️",
+            rows=[
+                _panel_bullet("Интервал опроса обновлён.", icon="✅"),
+            ],
+        )
 
     async def cmd_set_healthcheck(self, ctx: CommandContext) -> None:
         value_str = ctx.args.strip()
         if not value_str:
-            await self._api.send_message(
-                ctx.chat_id, "Использование: /set_healthcheck <секунды>"
-            )
+            await self._send_usage_error(ctx, "/set_healthcheck <секунды>")
             return
         try:
             value = float(value_str)
         except ValueError:
-            await self._api.send_message(ctx.chat_id, "Укажите число секунд")
+            await self._send_status_notice(
+                ctx,
+                title="Параметры",
+                icon="⚠️",
+                message="Укажите число секунд.",
+                message_icon="❗️",
+            )
             return
         if value < 10.0:
-            await self._api.send_message(
-                ctx.chat_id, "Минимальный интервал — 10 секунд"
+            await self._send_status_notice(
+                ctx,
+                title="Параметры",
+                icon="⚠️",
+                message="Минимальный интервал — 10 секунд.",
+                message_icon="❗️",
             )
             return
         self._store.set_setting("runtime.health_interval", f"{value:.2f}")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Интервал health-check обновлён")
+        await self._send_panel_message(
+            ctx,
+            title="Параметры",
+            icon="⏱️",
+            rows=[
+                _panel_bullet("Интервал health-check обновлён.", icon="✅"),
+            ],
+        )
 
     async def cmd_set_delay(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if len(parts) != 2:
-            await self._api.send_message(
-                ctx.chat_id, "Использование: /set_delay <min_s> <max_s>"
-            )
+            await self._send_usage_error(ctx, "/set_delay <min_s> <max_s>")
             return
         try:
             min_seconds = float(parts[0])
             max_seconds = float(parts[1])
         except ValueError:
-            await self._api.send_message(ctx.chat_id, "Укажите числа в секундах")
+            await self._send_status_notice(
+                ctx,
+                title="Параметры",
+                icon="⚠️",
+                message="Укажите числа в секундах.",
+                message_icon="❗️",
+            )
             return
         if min_seconds < 0 or max_seconds < min_seconds:
-            await self._api.send_message(ctx.chat_id, "Неверный диапазон")
+            await self._send_status_notice(
+                ctx,
+                title="Параметры",
+                icon="⚠️",
+                message="Неверный диапазон значений.",
+                message_icon="❗️",
+            )
             return
         self._store.set_setting("runtime.delay_min", f"{min_seconds:.2f}")
         self._store.set_setting("runtime.delay_max", f"{max_seconds:.2f}")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Диапазон задержек сохранён")
+        await self._send_panel_message(
+            ctx,
+            title="Параметры",
+            icon="⏱️",
+            rows=[
+                _panel_bullet("Диапазон задержек сохранён.", icon="✅"),
+            ],
+        )
 
     async def cmd_set_rate(self, ctx: CommandContext) -> None:
         value_str = ctx.args.strip()
         if not value_str:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /set_rate <в_секунду>",
-            )
+            await self._send_usage_error(ctx, "/set_rate <в_секунду>")
             return
         try:
             value = float(value_str)
         except ValueError:
-            await self._api.send_message(ctx.chat_id, "Неверное число")
+            await self._send_status_notice(
+                ctx,
+                title="Параметры",
+                icon="⚠️",
+                message="Неверное число.",
+                message_icon="❗️",
+            )
             return
         self._store.set_setting("runtime.rate", f"{max(0.1, value):.2f}")
         self._store.delete_setting("runtime.discord_rate")
         self._store.delete_setting("runtime.telegram_rate")
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Единый лимит обновлён")
+        await self._send_panel_message(
+            ctx,
+            title="Параметры",
+            icon="⏱️",
+            rows=[
+                _panel_bullet("Единый лимит обновлён.", icon="✅"),
+            ],
+        )
 
     # ------------------------------------------------------------------
     # Channel management
     # ------------------------------------------------------------------
     async def cmd_add_channel(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
+        usage = (
+            "/add_channel <discord_id> <telegram_chat[:thread]> <название> [messages|pinned]"
+        )
         if len(parts) < 3:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /add_channel <discord_id> <telegram_chat[:thread]> <название>",
-            )
+            await self._send_usage_error(ctx, usage)
             return
 
         mode_override: str | None = None
@@ -1457,9 +1835,12 @@ class TelegramController:
             candidate = tail.split("=", 1)[1]
             mode_override = mode_aliases.get(candidate)
             if mode_override is None:
-                await self._api.send_message(
-                    ctx.chat_id,
-                    "Допустимые режимы: messages, pinned",
+                await self._send_status_notice(
+                    ctx,
+                    title="Каналы",
+                    icon="⚠️",
+                    message="Допустимые режимы: messages, pinned.",
+                    message_icon="❗️",
                 )
                 return
             parts = parts[:-1]
@@ -1468,40 +1849,74 @@ class TelegramController:
             parts = parts[:-1]
 
         if len(parts) < 3:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /add_channel <discord_id> <telegram_chat[:thread]> <название>",
-            )
+            await self._send_usage_error(ctx, usage)
             return
 
         discord_id, telegram_chat_raw, *label_parts = parts
         label = " ".join(label_parts).strip()
         if not label:
-            await self._api.send_message(ctx.chat_id, "Укажите название канала")
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message="Укажите название канала.",
+                message_icon="❗️",
+            )
             return
         thread_id: int | None = None
         telegram_chat = telegram_chat_raw
         if ":" in telegram_chat_raw:
             chat_part, thread_part = telegram_chat_raw.split(":", 1)
             if not chat_part or not thread_part:
-                await self._api.send_message(ctx.chat_id, "Неверный формат chat:thread")
+                await self._send_status_notice(
+                    ctx,
+                    title="Каналы",
+                    icon="⚠️",
+                    message="Неверный формат chat:thread.",
+                    message_icon="❗️",
+                )
                 return
             telegram_chat = chat_part
             try:
                 thread_id = int(thread_part)
             except ValueError:
-                await self._api.send_message(ctx.chat_id, "Thread ID должен быть числом")
+                await self._send_status_notice(
+                    ctx,
+                    title="Каналы",
+                    icon="⚠️",
+                    message="Thread ID должен быть числом.",
+                    message_icon="❗️",
+                )
                 return
             if thread_id <= 0:
-                await self._api.send_message(ctx.chat_id, "Thread ID должен быть положительным")
+                await self._send_status_notice(
+                    ctx,
+                    title="Каналы",
+                    icon="⚠️",
+                    message="Thread ID должен быть положительным.",
+                    message_icon="❗️",
+                )
                 return
         if self._store.get_channel(discord_id):
-            await self._api.send_message(ctx.chat_id, "Канал уже существует")
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message="Связка с таким Discord каналом уже существует.",
+                message_icon="❗️",
+            )
             return
         token = self._store.get_setting("discord.token")
         if not token:
-            await self._api.send_message(
-                ctx.chat_id, "Сначала задайте токен Discord командой /set_discord_token"
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message=(
+                    "Сначала задайте токен командой <code>/set_discord_token</code>."
+                ),
+                message_icon="❗️",
+                escape=False,
             )
             return
 
@@ -1516,16 +1931,22 @@ class TelegramController:
                 "Не удалось проверить наличие Discord канала %s при создании связки",
                 discord_id,
             )
-            await self._api.send_message(
-                ctx.chat_id,
-                "Не удалось проверить канал. Убедитесь в корректности идентификатора.",
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message="Не удалось проверить канал. Проверьте идентификатор и доступ.",
+                message_icon="❗️",
             )
             return
 
         if not exists:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Канал не найден или нет доступа. Проверьте идентификатор и права бота.",
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message="Канал не найден или нет доступа. Проверьте идентификатор и права.",
+                message_icon="❗️",
             )
             return
 
@@ -1600,24 +2021,45 @@ class TelegramController:
                 self._store.set_pinned_synced(record.id, synced=False)
 
         self._on_change()
-        response = f"Связка {discord_id} → {telegram_chat} создана"
+        label_display = html.escape(label)
+        discord_display = html.escape(discord_id)
+        telegram_display = html.escape(telegram_chat)
+        mode_display = html.escape(mode_label)
+        rows = [
+            _panel_bullet(f"Название: <b>{label_display}</b>", icon="🏷️"),
+            _panel_bullet(f"Discord: <code>{discord_display}</code>", icon="🛰️"),
+            _panel_bullet(f"Telegram: <code>{telegram_display}</code>", icon="💬"),
+            _panel_bullet(f"Режим: {mode_display}", icon="🎯"),
+        ]
         if thread_id is not None:
-            response += f" (тема {thread_id})"
-        response += f" • режим: {mode_label}"
-        await self._api.send_message(ctx.chat_id, response)
+            rows.append(
+                _panel_bullet(
+                    f"Тема: <code>{thread_id}</code>",
+                    icon="🧵",
+                )
+            )
+        await self._send_panel_message(
+            ctx,
+            title="Связка создана",
+            icon="📡",
+            rows=rows,
+        )
 
     async def cmd_set_thread(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if len(parts) < 2:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /set_thread <discord_id> <thread_id|clear>",
-            )
+            await self._send_usage_error(ctx, "/set_thread <discord_id> <thread_id|clear>")
             return
         discord_id, value = parts[:2]
         record = self._store.get_channel(discord_id)
         if not record:
-            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message="Канал не найден.",
+                message_icon="❗️",
+            )
             return
         thread_id: int | None
         value_lower = value.lower()
@@ -1627,44 +2069,86 @@ class TelegramController:
             try:
                 thread_id = int(value)
             except ValueError:
-                await self._api.send_message(ctx.chat_id, "Thread ID должен быть числом")
+                await self._send_status_notice(
+                    ctx,
+                    title="Каналы",
+                    icon="⚠️",
+                    message="Thread ID должен быть числом.",
+                    message_icon="❗️",
+                )
                 return
             if thread_id <= 0:
-                await self._api.send_message(ctx.chat_id, "Thread ID должен быть положительным")
+                await self._send_status_notice(
+                    ctx,
+                    title="Каналы",
+                    icon="⚠️",
+                    message="Thread ID должен быть положительным.",
+                    message_icon="❗️",
+                )
                 return
         self._store.set_channel_thread(record.id, thread_id)
         self._on_change()
         if thread_id is None:
-            await self._api.send_message(ctx.chat_id, "Тема очищена")
+            await self._send_panel_message(
+                ctx,
+                title="Каналы",
+                icon="🧵",
+                rows=[_panel_bullet("Тема очищена.", icon="✅")],
+            )
         else:
-            await self._api.send_message(ctx.chat_id, f"Установлена тема {thread_id}")
+            await self._send_panel_message(
+                ctx,
+                title="Каналы",
+                icon="🧵",
+                rows=[
+                    _panel_bullet(
+                        f"Установлена тема <code>{thread_id}</code>",
+                        icon="✅",
+                    )
+                ],
+                description_escape=True,
+            )
 
     async def cmd_remove_channel(self, ctx: CommandContext) -> None:
         if not ctx.args:
-            await self._api.send_message(ctx.chat_id, "Укажите discord_id")
+            await self._send_usage_error(ctx, "/remove_channel <discord_id>")
             return
         removed = self._store.remove_channel(ctx.args)
         self._on_change()
         if removed:
-            await self._api.send_message(ctx.chat_id, "Связка удалена")
+            await self._send_panel_message(
+                ctx,
+                title="Каналы",
+                icon="🗑️",
+                rows=[_panel_bullet("Связка удалена.", icon="✅")],
+            )
         else:
-            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            await self._send_status_notice(
+                ctx,
+                title="Каналы",
+                icon="⚠️",
+                message="Канал не найден.",
+                message_icon="❗️",
+            )
 
     async def cmd_list_channels(self, ctx: CommandContext) -> None:
         channels = self._store.list_channels()
         if not channels:
-            await self._api.send_message(
-                ctx.chat_id,
-                (
-                    "<b>ℹ️ Каналы не настроены</b>\n"
-                    "Добавьте связку командой <code>/add_channel</code>."
-                ),
-                parse_mode="HTML",
+            await self._send_panel_message(
+                ctx,
+                title="Каналы не настроены",
+                icon="ℹ️",
+                description="Подключения отсутствуют.",
+                rows=[
+                    _panel_bullet(
+                        "Добавьте связку командой <code>/add_channel</code>.",
+                        icon="💡",
+                    )
+                ],
+                description_escape=True,
             )
             return
-        groups: dict[str, list[Any]] = {}
-        for record in channels:
-            groups.setdefault(record.telegram_chat_id, []).append(record)
+        grouped = _group_channels_by_chat_and_thread(channels)
 
         lines = [
             "<b>📡 Настроенные каналы</b>",
@@ -1672,39 +2156,74 @@ class TelegramController:
             "",
         ]
 
-        for chat_id, records in sorted(groups.items(), key=lambda item: _chat_sort_key(item[0])):
+        for chat_id, threads in sorted(grouped.items(), key=lambda item: _chat_sort_key(item[0])):
             escaped_chat = html.escape(chat_id)
-            lines.append(f"💬 <b>Telegram <code>{escaped_chat}</code></b>")
-            for record in sorted(
-                records,
-                key=lambda item: _channel_sort_key(
-                    getattr(item, "label", item.discord_id),
-                    item.discord_id,
-                    item.telegram_thread_id,
-                ),
+            total = sum(len(items) for items in threads.values())
+            lines.append(
+                f"💬 <b>Telegram <code>{escaped_chat}</code></b> — "
+                f"{total} "
+                + ("связка" if total == 1 else "связки")
+            )
+
+            for thread_id, items in sorted(
+                threads.items(), key=lambda item: _thread_sort_key(item[0])
             ):
-                health_status, health_message = self._store.get_health_status(
-                    f"channel.{record.discord_id}"
-                )
-                if not record.active:
-                    health_status = "disabled"
-                status_icon = _health_icon(health_status)
-                label = html.escape(_normalize_label(record.label, record.discord_id))
-                discord_id = html.escape(record.discord_id)
+                if thread_id is None:
+                    thread_title = "Основной чат"
+                    thread_icon = "🗂️"
+                else:
+                    thread_title = f"Тема <code>{thread_id}</code>"
+                    thread_icon = "🧵"
                 lines.append(
-                    f"{_INDENT}{status_icon} <b>{label}</b> — Discord <code>{discord_id}</code>"
+                    _panel_bullet(
+                        f"<b>{thread_title}</b>",
+                        indent=1,
+                        icon=thread_icon,
+                    )
                 )
-                if record.telegram_thread_id is not None:
-                    thread_info = html.escape(str(record.telegram_thread_id))
-                    lines.append(
-                        f"{_DOUBLE_INDENT}• Тема: <code>{thread_info}</code>"
+
+                for record in sorted(
+                    items,
+                    key=lambda item: _channel_sort_key(
+                        getattr(item, "label", item.discord_id),
+                        item.discord_id,
+                        item.telegram_thread_id,
+                    ),
+                ):
+                    health_status, health_message = self._store.get_health_status(
+                        f"channel.{record.discord_id}"
                     )
-                if health_message:
-                    lines.append(
-                        f"{_DOUBLE_INDENT}• Статус: {html.escape(health_message)}"
+                    if not record.active:
+                        health_status = "disabled"
+                    status_icon = _health_icon(health_status)
+                    label = html.escape(
+                        _normalize_label(record.label, record.discord_id)
                     )
-                if not record.active:
-                    lines.append(f"{_DOUBLE_INDENT}• Состояние: отключена")
+                    discord_id = html.escape(record.discord_id)
+                    lines.append(
+                        _panel_bullet(
+                            f"<b>{label}</b> — Discord <code>{discord_id}</code>",
+                            indent=2,
+                            icon=status_icon,
+                        )
+                    )
+                    if health_message:
+                        lines.append(
+                            _panel_bullet(
+                                html.escape(health_message),
+                                indent=3,
+                                icon="🩺",
+                            )
+                        )
+                    if not record.active:
+                        lines.append(
+                            _panel_bullet(
+                                "Связка отключена.",
+                                indent=3,
+                                icon="⏹️",
+                            )
+                        )
+
             lines.append("")
 
         while lines and lines[-1] == "":
@@ -1720,20 +2239,31 @@ class TelegramController:
     async def cmd_send_recent(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         if not parts:
-            await self._api.send_message(
-                ctx.chat_id, "Использование: /send_recent <кол-во> [discord_id|all]"
+            await self._send_usage_error(
+                ctx,
+                "/send_recent <кол-во> [discord_id|all]",
             )
             return
 
         try:
             requested = int(parts[0])
         except ValueError:
-            await self._api.send_message(ctx.chat_id, "Количество должно быть числом")
+            await self._send_status_notice(
+                ctx,
+                title="Ручная пересылка",
+                icon="⚠️",
+                message="Количество должно быть числом.",
+                message_icon="❗️",
+            )
             return
 
         if requested <= 0:
-            await self._api.send_message(
-                ctx.chat_id, "Количество должно быть положительным"
+            await self._send_status_notice(
+                ctx,
+                title="Ручная пересылка",
+                icon="⚠️",
+                message="Количество должно быть положительным.",
+                message_icon="❗️",
             )
             return
 
@@ -1741,8 +2271,15 @@ class TelegramController:
         limit = min(requested, 100)
         token = self._store.get_setting("discord.token")
         if not token:
-            await self._api.send_message(
-                ctx.chat_id, "Сначала задайте токен Discord командой /set_discord_token"
+            await self._send_status_notice(
+                ctx,
+                title="Ручная пересылка",
+                icon="⚠️",
+                message=(
+                    "Сначала задайте токен через <code>/set_discord_token</code>."
+                ),
+                message_icon="❗️",
+                escape=False,
             )
             return
 
@@ -1760,20 +2297,40 @@ class TelegramController:
         else:
             channel = channels_by_id.get(target)
             if not channel:
-                await self._api.send_message(ctx.chat_id, "Канал не найден")
+                await self._send_status_notice(
+                    ctx,
+                    title="Ручная пересылка",
+                    icon="⚠️",
+                    message="Канал не найден.",
+                    message_icon="❗️",
+                )
                 return
             selected = [channel]
 
         if not selected:
-            await self._api.send_message(ctx.chat_id, "Каналы не настроены")
+            await self._send_status_notice(
+                ctx,
+                title="Ручная пересылка",
+                icon="⚠️",
+                message="Каналы не настроены.",
+                message_icon="❗️",
+            )
             return
 
-        await self._api.send_message(
-            ctx.chat_id,
-            (
-                f"Пересылка запущена (каналов: {len(selected)}, лимит: {limit}). "
-                "Это может занять несколько минут."
-            ),
+        await self._send_panel_message(
+            ctx,
+            title="Ручная пересылка",
+            icon="📨",
+            rows=[
+                _panel_bullet(
+                    f"Каналов: {len(selected)}", icon="📡"
+                ),
+                _panel_bullet(f"Лимит: {limit}", icon="🎯"),
+                _panel_bullet(
+                    "Пересылка запущена, это может занять несколько минут.",
+                    icon="⏳",
+                ),
+            ],
         )
 
         rate_setting = self._store.get_setting("runtime.rate")
@@ -2069,9 +2626,9 @@ class TelegramController:
     async def cmd_set_monitoring(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=1)
         if len(parts) < 2:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /set_monitoring <discord_id|all> <messages|pinned>",
+            await self._send_usage_error(
+                ctx,
+                "/set_monitoring <discord_id|all> <messages|pinned>",
             )
             return
         target_key, mode_raw = parts
@@ -2086,9 +2643,12 @@ class TelegramController:
         }
         normalized_mode = mode_map.get(mode_key)
         if normalized_mode is None:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Допустимые режимы: messages, pinned",
+            await self._send_status_notice(
+                ctx,
+                title="Режим мониторинга",
+                icon="⚠️",
+                message="Допустимые режимы: messages, pinned.",
+                message_icon="❗️",
             )
             return
 
@@ -2100,12 +2660,23 @@ class TelegramController:
                 if normalized_mode == "pinned"
                 else "По умолчанию отслеживаются новые сообщения"
             )
-            await self._api.send_message(ctx.chat_id, description)
+            await self._send_panel_message(
+                ctx,
+                title="Режим мониторинга",
+                icon="🎯",
+                rows=[_panel_bullet(description, icon="✅")],
+            )
             return
 
         record = self._store.get_channel(target_key)
         if not record:
-            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            await self._send_status_notice(
+                ctx,
+                title="Режим мониторинга",
+                icon="⚠️",
+                message="Канал не найден.",
+                message_icon="❗️",
+            )
             return
 
         if normalized_mode == "messages":
@@ -2113,7 +2684,17 @@ class TelegramController:
             self._store.clear_known_pinned_messages(record.id)
             self._store.set_pinned_synced(record.id, synced=False)
             self._on_change()
-            await self._api.send_message(ctx.chat_id, "Канал переключён на обычные сообщения")
+            await self._send_panel_message(
+                ctx,
+                title="Режим мониторинга",
+                icon="🎯",
+                rows=[
+                    _panel_bullet(
+                        "Канал переключён на обычные сообщения.",
+                        icon="✅",
+                    )
+                ],
+            )
             return
 
         self._store.set_channel_option(record.id, "monitoring.mode", normalized_mode)
@@ -2136,51 +2717,85 @@ class TelegramController:
         else:
             self._store.set_pinned_synced(record.id, synced=False)
         self._on_change()
-        await self._api.send_message(
-            ctx.chat_id,
-            "Канал переключён на закреплённые сообщения",
+        await self._send_panel_message(
+            ctx,
+            title="Режим мониторинга",
+            icon="🎯",
+            rows=[
+                _panel_bullet(
+                    "Канал переключён на закреплённые сообщения.",
+                    icon="✅",
+                )
+            ],
         )
 
     async def cmd_add_filter(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=2)
         if len(parts) < 3:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /add_filter <discord_id|all> <тип> <значение>",
+            await self._send_usage_error(
+                ctx,
+                "/add_filter <discord_id|all> <тип> <значение>",
             )
             return
         target_key, filter_type_raw, value = parts
         filter_type = filter_type_raw.strip().lower()
         if filter_type not in _FILTER_TYPES:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Неизвестный тип фильтра. Допустимо: " + ", ".join(_FILTER_TYPES),
+            await self._send_status_notice(
+                ctx,
+                title="Фильтры",
+                icon="⚠️",
+                message="Неизвестный тип фильтра. Допустимо: "
+                + ", ".join(_FILTER_TYPES),
+                message_icon="❗️",
             )
             return
         channel_ids = self._resolve_channel_ids(target_key)
         if not channel_ids:
-            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            await self._send_status_notice(
+                ctx,
+                title="Фильтры",
+                icon="⚠️",
+                message="Канал не найден.",
+                message_icon="❗️",
+            )
             return
         added = False
         for channel_id in channel_ids:
             try:
                 changed = self._store.add_filter(channel_id, filter_type, value)
             except ValueError:
-                await self._api.send_message(ctx.chat_id, "Неверное значение фильтра")
+                await self._send_status_notice(
+                    ctx,
+                    title="Фильтры",
+                    icon="⚠️",
+                    message="Неверное значение фильтра.",
+                    message_icon="❗️",
+                )
                 return
             added = added or changed
         if added:
             self._on_change()
-            await self._api.send_message(ctx.chat_id, "Фильтр добавлен")
+            await self._send_panel_message(
+                ctx,
+                title="Фильтры",
+                icon="🛡️",
+                rows=[_panel_bullet("Фильтр добавлен.", icon="✅")],
+            )
         else:
-            await self._api.send_message(ctx.chat_id, "Такой фильтр уже существует")
+            await self._send_status_notice(
+                ctx,
+                title="Фильтры",
+                icon="⚠️",
+                message="Такой фильтр уже существует.",
+                message_icon="❗️",
+            )
 
     async def cmd_clear_filter(self, ctx: CommandContext) -> None:
         parts = ctx.args.split(maxsplit=2)
         if len(parts) < 2:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Использование: /clear_filter <discord_id|all> <тип> [значение]",
+            await self._send_usage_error(
+                ctx,
+                "/clear_filter <discord_id|all> <тип> [значение]",
             )
             return
         target_key, filter_type_raw = parts[0], parts[1]
@@ -2188,21 +2803,42 @@ class TelegramController:
         value = parts[2] if len(parts) == 3 else None
         channel_ids = self._resolve_channel_ids(target_key)
         if not channel_ids:
-            await self._api.send_message(ctx.chat_id, "Канал не найден")
+            await self._send_status_notice(
+                ctx,
+                title="Фильтры",
+                icon="⚠️",
+                message="Канал не найден.",
+                message_icon="❗️",
+            )
             return
         if filter_type in {"all", "*"}:
             removed = sum(self._store.clear_filters(channel_id) for channel_id in channel_ids)
             if removed:
                 self._on_change()
-                await self._api.send_message(ctx.chat_id, "Все фильтры очищены")
+                await self._send_panel_message(
+                    ctx,
+                    title="Фильтры",
+                    icon="🛡️",
+                    rows=[_panel_bullet("Все фильтры очищены.", icon="✅")],
+                )
             else:
-                await self._api.send_message(ctx.chat_id, "Фильтры уже очищены")
+                await self._send_status_notice(
+                    ctx,
+                    title="Фильтры",
+                    icon="⚠️",
+                    message="Фильтры уже очищены.",
+                    message_icon="❗️",
+                )
             return
 
         if filter_type not in _FILTER_TYPES:
-            await self._api.send_message(
-                ctx.chat_id,
-                "Неизвестный тип фильтра. Допустимо: " + ", ".join(_FILTER_TYPES),
+            await self._send_status_notice(
+                ctx,
+                title="Фильтры",
+                icon="⚠️",
+                message="Неизвестный тип фильтра. Допустимо: "
+                + ", ".join(_FILTER_TYPES),
+                message_icon="❗️",
             )
             return
 
@@ -2212,10 +2848,19 @@ class TelegramController:
                 removed += self._store.remove_filter(channel_id, filter_type, None)
             if removed:
                 self._on_change()
-                await self._api.send_message(ctx.chat_id, "Фильтры удалены")
+                await self._send_panel_message(
+                    ctx,
+                    title="Фильтры",
+                    icon="🛡️",
+                    rows=[_panel_bullet("Фильтры удалены.", icon="✅")],
+                )
             else:
-                await self._api.send_message(
-                    ctx.chat_id, "Фильтров этого типа не найдено"
+                await self._send_status_notice(
+                    ctx,
+                    title="Фильтры",
+                    icon="⚠️",
+                    message="Фильтров этого типа не найдено.",
+                    message_icon="❗️",
                 )
             return
 
@@ -2223,9 +2868,20 @@ class TelegramController:
             removed += self._store.remove_filter(channel_id, filter_type, value)
         if removed:
             self._on_change()
-            await self._api.send_message(ctx.chat_id, "Фильтр удалён")
+            await self._send_panel_message(
+                ctx,
+                title="Фильтры",
+                icon="🛡️",
+                rows=[_panel_bullet("Фильтр удалён.", icon="✅")],
+            )
         else:
-            await self._api.send_message(ctx.chat_id, "Такого фильтра не существует")
+            await self._send_status_notice(
+                ctx,
+                title="Фильтры",
+                icon="⚠️",
+                message="Такого фильтра не существует.",
+                message_icon="❗️",
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2239,11 +2895,23 @@ class TelegramController:
     ) -> None:
         parts = ctx.args.split(maxsplit=1)
         if len(parts) < 2:
-            await self._api.send_message(ctx.chat_id, "Неверные аргументы")
+            await self._send_status_notice(
+                ctx,
+                title="Настройки оформления",
+                icon="⚠️",
+                message="Неверные аргументы.",
+                message_icon="❗️",
+            )
             return
         target_key, value = parts[0], parts[1].strip()
         if allowed and value.lower() not in {item.lower() for item in allowed}:
-            await self._api.send_message(ctx.chat_id, f"Допустимо: {', '.join(allowed)}")
+            await self._send_status_notice(
+                ctx,
+                title="Настройки оформления",
+                icon="⚠️",
+                message=f"Допустимо: {', '.join(allowed)}",
+                message_icon="❗️",
+            )
             return
 
         if option in {"disable_preview", "show_discord_link"}:
@@ -2252,7 +2920,13 @@ class TelegramController:
             try:
                 int(value)
             except ValueError:
-                await self._api.send_message(ctx.chat_id, "Введите целое число")
+                await self._send_status_notice(
+                    ctx,
+                    title="Настройки оформления",
+                    icon="⚠️",
+                    message="Введите целое число.",
+                    message_icon="❗️",
+                )
                 return
 
         if target_key.lower() in {"all", "*"}:
@@ -2260,11 +2934,22 @@ class TelegramController:
         else:
             record = self._store.get_channel(target_key)
             if not record:
-                await self._api.send_message(ctx.chat_id, "Канал не найден")
+                await self._send_status_notice(
+                    ctx,
+                    title="Настройки оформления",
+                    icon="⚠️",
+                    message="Канал не найден.",
+                    message_icon="❗️",
+                )
                 return
             self._store.set_channel_option(record.id, f"formatting.{option}", value)
         self._on_change()
-        await self._api.send_message(ctx.chat_id, "Обновлено")
+        await self._send_panel_message(
+            ctx,
+            title="Настройки оформления",
+            icon="🎨",
+            rows=[_panel_bullet("Обновлено.", icon="✅")],
+        )
 
     def _resolve_channel_ids(self, key: str) -> list[int]:
         key_lower = key.lower()
@@ -2282,14 +2967,21 @@ class TelegramController:
         self._commands_registered = True
 
     async def _notify_access_denied(self, ctx: CommandContext) -> None:
-        await self._api.send_message(
-            ctx.chat_id,
-            (
-                "🚫 <b>Нет доступа</b>\n"
-                "Эта команда доступна только администраторам. "
-                "Попросите администратора выдать права через <code>/grant</code>."
-            ),
-            parse_mode="HTML",
+        await self._send_panel_message(
+            ctx,
+            title="Нет доступа",
+            icon="🚫",
+            rows=[
+                _panel_bullet(
+                    (
+                        "Эта команда доступна только администраторам. "
+                        "Попросите выдать права через <code>/grant</code>."
+                    ),
+                    icon="🛡️",
+                )
+            ],
+            description="Недостаточно прав для выполнения команды.",
+            description_escape=True,
         )
 
 
@@ -2330,22 +3022,64 @@ def _split_html_lines(lines: Sequence[str], limit: int = 3500) -> list[str]:
     current: list[str] = []
     current_len = 0
 
-    for line in lines:
-        parts = _split_single_line(line, limit)
+    def flush() -> None:
+        nonlocal current, current_len
+        if current:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+
+    def append_line(text: str) -> None:
+        nonlocal current_len
+        parts = _split_single_line(text, limit)
         for part in parts:
             part_len = len(part)
             extra = part_len + (1 if current else 0)
             if current and current_len + extra > limit:
-                chunks.append("\n".join(current))
-                current = [part]
-                current_len = part_len
+                flush()
+            if current:
+                current.append(part)
+                current_len += part_len + 1
             else:
-                if current:
-                    current_len += 1
                 current.append(part)
                 current_len += part_len
-    if current:
-        chunks.append("\n".join(current))
+
+    def append_block(block: list[str]) -> None:
+        nonlocal current_len
+        if not block:
+            return
+        block_len = sum(len(item) for item in block) + max(len(block) - 1, 0)
+        if block_len > limit:
+            for item in block:
+                append_line(item)
+            return
+        extra = block_len + (1 if current else 0)
+        if current and current_len + extra > limit:
+            flush()
+        for index, item in enumerate(block):
+            if current:
+                current.append(item)
+                current_len += len(item) + 1
+            else:
+                current.append(item)
+                current_len += len(item)
+
+    block: list[str] = []
+    for line in lines:
+        if line == "":
+            append_block(block)
+            block = []
+            if current and current_len + 1 > limit:
+                flush()
+            if current:
+                current.append("")
+                current_len += 1
+            else:
+                current.append("")
+        else:
+            block.append(line)
+    append_block(block)
+    flush()
     return chunks or [""]
 
 
