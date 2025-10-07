@@ -43,12 +43,14 @@ def test_formatting_includes_label_and_author() -> None:
     )
     formatted = format_discord_message(message, sample_channel())
     assert formatted.parse_mode == "HTML"
-    assert formatted.text.startswith("📣 <b>Label</b>")
+    assert formatted.text.startswith("<b>━━━━━━━━")
+    assert "📣 <b>Label</b>" in formatted.text
     assert "💬 <b>Новое сообщение</b>" in formatted.text
     assert "👤 <b>Author</b>" in formatted.text
     assert "original content" in formatted.text
     assert "file.txt" in formatted.text
     assert "📅 <b>02.01.2024 06:04 MSK</b>" in formatted.text
+    assert formatted.text.rstrip().endswith("</b>")
 
 
 def test_formatting_chunks_long_text() -> None:

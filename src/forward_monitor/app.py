@@ -17,7 +17,7 @@ from .config_store import ConfigStore
 from .discord import DiscordClient
 from .filters import FilterEngine
 from .formatting import format_discord_message
-from .models import ChannelConfig, NetworkOptions, RuntimeOptions
+from .models import ChannelConfig, DiscordMessage, NetworkOptions, RuntimeOptions
 from .telegram import TelegramAPI, TelegramController, send_formatted
 from .utils import RateLimiter, parse_delay_setting
 
@@ -457,10 +457,11 @@ class ForwardMonitorApp:
 
         baseline = channel.added_at
         bootstrap = channel.last_message_id is None
+        if baseline is not None and baseline.tzinfo is None:
+            baseline = baseline.replace(tzinfo=timezone.utc)
+        startup = self._startup_time
+        startup_marker = _discord_snowflake_from_datetime(startup)
         if bootstrap:
-            startup = self._startup_time
-            if baseline is not None and baseline.tzinfo is None:
-                baseline = baseline.replace(tzinfo=timezone.utc)
             if baseline is None or baseline < startup:
                 baseline = startup
         baseline_marker = _discord_snowflake_from_datetime(baseline)
@@ -485,15 +486,30 @@ class ForwardMonitorApp:
         def sort_key(message_id: str) -> tuple[int, str]:
             return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
 
-        ordered = sorted(messages, key=lambda msg: sort_key(msg.id))
+        unique_messages: dict[str, DiscordMessage] = {}
+        for msg in messages:
+            unique_messages.setdefault(msg.id, msg)
+
+        ordered = sorted(unique_messages.values(), key=lambda msg: sort_key(msg.id))
         engine = FilterEngine(channel.filters)
-        last_seen = channel.last_message_id
-        interrupted = False
+        previous_last_message = channel.last_message_id
+        last_seen = previous_last_message
+        startup_ts = startup
         for msg in ordered:
             if self._refresh_event.is_set():
-                interrupted = True
                 break
             candidate_id = msg.id
+            if startup_marker is not None and candidate_id.isdigit():
+                candidate_numeric = int(candidate_id)
+                if candidate_numeric <= startup_marker:
+                    last_seen = candidate_id
+                    continue
+            message_timestamp = _parse_discord_timestamp(msg.timestamp)
+            if message_timestamp is not None and message_timestamp.tzinfo is None:
+                message_timestamp = message_timestamp.replace(tzinfo=timezone.utc)
+            if message_timestamp is not None and message_timestamp <= startup_ts:
+                last_seen = candidate_id
+                continue
             if msg.message_type not in _FORWARDABLE_MESSAGE_TYPES and not (
                 msg.attachments or msg.embeds
             ):
@@ -508,8 +524,7 @@ class ForwardMonitorApp:
                         continue
                 if baseline is not None:
                     baseline_ts = baseline
-                    msg_time = _parse_discord_timestamp(msg.timestamp)
-                    if msg_time is not None and msg_time <= baseline_ts:
+                    if message_timestamp is not None and message_timestamp <= baseline_ts:
                         last_seen = candidate_id
                         continue
                 bootstrap = False
@@ -520,7 +535,6 @@ class ForwardMonitorApp:
             formatted = format_discord_message(msg, channel, message_kind="message")
             await telegram_rate.wait()
             if self._refresh_event.is_set():
-                interrupted = True
                 break
             try:
                 await send_formatted(
@@ -542,9 +556,10 @@ class ForwardMonitorApp:
             last_seen = candidate_id
             await self._sleep_within(runtime)
 
-        if not interrupted and last_seen and channel.storage_id is not None:
-            self._store.set_last_message(channel.storage_id, last_seen)
+        if last_seen and last_seen != previous_last_message:
             channel.last_message_id = last_seen
+            if channel.storage_id is not None:
+                self._store.set_last_message(channel.storage_id, last_seen)
 
     async def _process_pinned_channel(
         self,

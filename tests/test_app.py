@@ -240,6 +240,122 @@ def test_monitor_skips_messages_before_start(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_monitor_skips_messages_before_restart(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        record = store.add_channel("discord", "telegram", label="Test")
+
+        processed_time = datetime(2023, 1, 1, 10, 0, tzinfo=timezone.utc)
+        pending_time = datetime(2023, 1, 1, 11, 45, tzinfo=timezone.utc)
+        startup_time = datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc)
+        fresh_time = datetime(2023, 1, 1, 12, 5, tzinfo=timezone.utc)
+
+        processed_id = str(_discord_snowflake_from_datetime(processed_time))
+        pending_id = str(_discord_snowflake_from_datetime(pending_time))
+        fresh_id = str(_discord_snowflake_from_datetime(fresh_time))
+
+        store.set_last_message(record.id, processed_id)
+        store.close()
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        app._startup_time = startup_time
+
+        state = app._reload_state()
+        channel = state.channels[0]
+
+        pending_message = DiscordMessage(
+            id=pending_id,
+            channel_id=channel.discord_id,
+            guild_id="1",
+            author_id="42",
+            author_name="Pending",
+            content="Pending message",
+            attachments=(),
+            embeds=(),
+            stickers=(),
+            role_ids=set(),
+            timestamp=pending_time.isoformat(),
+            message_type=0,
+        )
+        fresh_message = DiscordMessage(
+            id=fresh_id,
+            channel_id=channel.discord_id,
+            guild_id="1",
+            author_id="43",
+            author_name="Fresh",
+            content="Fresh message",
+            attachments=(),
+            embeds=(),
+            stickers=(),
+            role_ids=set(),
+            timestamp=fresh_time.isoformat(),
+            message_type=0,
+        )
+
+        class MessageDiscord:
+            async def fetch_messages(
+                self,
+                channel_id: str,
+                *,
+                limit: int = 50,
+                after: str | None = None,
+                before: str | None = None,
+            ) -> list[DiscordMessage]:
+                return [pending_message, fresh_message, fresh_message]
+
+        class RecordingTelegram:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send_message(
+                self,
+                chat_id: int | str,
+                text: str,
+                *,
+                parse_mode: str | None = None,
+                disable_preview: bool = True,
+                message_thread_id: int | None = None,
+            ) -> None:
+                self.sent.append(text)
+
+            async def send_photo(
+                self,
+                chat_id: int | str,
+                photo: str,
+                *,
+                caption: str | None = None,
+                parse_mode: str | None = None,
+                message_thread_id: int | None = None,
+            ) -> None:
+                raise AssertionError("photos are not expected")
+
+        telegram_api = RecordingTelegram()
+        runtime = RuntimeOptions()
+        telegram_rate = RateLimiter(1000)
+
+        app._refresh_event.clear()
+        await app._process_channel(
+            channel,
+            cast(DiscordClient, MessageDiscord()),
+            cast(TelegramAPI, telegram_api),
+            telegram_rate,
+            runtime,
+        )
+
+        assert len(telegram_api.sent) == 1
+        assert "Fresh message" in telegram_api.sent[0]
+        assert "Pending message" not in telegram_api.sent[0]
+
+        stored = app._store.get_channel(channel.discord_id)
+        assert stored is not None
+        assert stored.last_message_id == fresh_id
+
+        app._store.close()
+
+    asyncio.run(runner())
+
+
 def test_monitor_waits_for_health_before_processing(tmp_path: Path) -> None:
     async def runner() -> None:
         db_path = tmp_path / "db.sqlite"
