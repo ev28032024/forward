@@ -7,7 +7,16 @@ import html
 import logging
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Protocol, Sequence
+from datetime import datetime, timezone
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Iterable,
+    Protocol,
+    Sequence,
+)
 from urllib.parse import urlparse
 
 import aiohttp
@@ -22,7 +31,7 @@ from .config_store import (
 from .discord import DiscordClient
 from .filters import FilterEngine
 from .formatting import format_discord_message
-from .models import FilterConfig, FormattedTelegramMessage
+from .models import DiscordMessage, FilterConfig, FormattedTelegramMessage
 from .utils import RateLimiter, as_moscow_time, normalize_username, parse_delay_setting
 
 if TYPE_CHECKING:
@@ -73,6 +82,44 @@ def _format_rate(value: float) -> str:
         if formatted.endswith("."):
             formatted += "0"
     return formatted
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_discord_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _message_timestamp(message: "DiscordMessage") -> datetime | None:
+    return _parse_discord_timestamp(message.edited_timestamp or message.timestamp)
+
+
+def _message_id_sort_key(message_id: str) -> tuple[int, str]:
+    return (
+        (int(message_id), message_id)
+        if message_id.isdigit()
+        else (0, message_id)
+    )
+
+
+def _message_order_key(message: "DiscordMessage") -> tuple[datetime, tuple[int, str]]:
+    moment = _message_timestamp(message)
+    if moment is None:
+        moment = datetime.fromtimestamp(0, timezone.utc)
+    return (moment, _message_id_sort_key(message.id))
 
 
 class TelegramAPIProtocol(Protocol):
@@ -1621,13 +1668,12 @@ class TelegramController:
                 "Запрошено больше 100 сообщений, будет переслано не более 100 из каждого канала."
             )
 
-        def sort_key(message_id: str) -> tuple[int, str]:
-            return (int(message_id), message_id) if message_id.isdigit() else (0, message_id)
-
         def is_newer(message_id: str, marker: str | None) -> bool:
             if marker is None:
                 return True
-            return sort_key(message_id) > sort_key(marker)
+            return _message_id_sort_key(message_id) > _message_id_sort_key(marker)
+
+        invocation_time = _utcnow()
 
         for channel in selected:
             raw_label = channel.label or channel.discord_id
@@ -1695,12 +1741,8 @@ class TelegramController:
                     _record("закреплённые синхронизированы, новых нет")
                     continue
 
-                ordered = sorted(
-                    messages,
-                    key=lambda msg: sort_key(msg.id),
-                    reverse=True,
-                )
-                subset = ordered[:limit]
+                ordered = sorted(messages, key=_message_order_key)
+                subset = ordered[-limit:]
                 if not subset:
                     _record("закреплённых сообщений нет")
                     continue
@@ -1788,15 +1830,24 @@ class TelegramController:
                 _record("сообщения не найдены")
                 continue
 
-            ordered = sorted(messages, key=lambda msg: sort_key(msg.id), reverse=True)
-            candidates = [msg for msg in ordered if is_newer(msg.id, marker)]
-            subset = candidates[:limit]
-            if not subset:
-                if marker is None:
-                    _record("сообщения не найдены")
-                else:
-                    _record("новых сообщений не найдено")
+            seen_ids: set[str] = set()
+            eligible: list[DiscordMessage] = []
+            for msg in messages:
+                if msg.id in seen_ids:
+                    continue
+                seen_ids.add(msg.id)
+                moment = _message_timestamp(msg)
+                if moment and moment > invocation_time:
+                    continue
+                eligible.append(msg)
+
+            if not eligible:
+                _record("подходящих сообщений не найдено")
                 continue
+
+            eligible.sort(key=_message_order_key)
+            subset = eligible[-limit:]
+
             engine = FilterEngine(channel.filters)
             last_seen = marker
             for msg in subset:
@@ -1846,7 +1897,7 @@ class TelegramController:
                 self._store.set_last_message(channel.storage_id, last_seen)
                 state_changed = True
 
-            total_candidates = len(candidates)
+            total_candidates = len(eligible)
             processed_candidates = len(subset)
             if forwarded:
                 note_parts = [
