@@ -489,9 +489,11 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
         assert record is not None
         assert record.last_message_id == "102"
         assert api.messages
-        assert api.messages[0] == (
-            "Пересылка запущена (каналов: 1, лимит: 2). Это может занять несколько минут."
-        )
+        first_message = api.messages[0]
+        assert first_message.startswith("<b>📨 Ручная пересылка</b>")
+        assert "Каналов: 1" in first_message
+        assert "Лимит: 2" in first_message
+        assert "Пересылка запущена" in first_message
         assert any(message.startswith("PHOTO:") for message in api.messages)
         assert any("<b>Bold text</b>" in message for message in api.messages)
         assert any("Всего переслано: 2" in message for message in api.messages)
@@ -1249,12 +1251,16 @@ def test_set_healthcheck_updates_interval(tmp_path: Path) -> None:
         admin.args = "30"
         await controller._dispatch("set_healthcheck", admin)
         assert store.get_setting("runtime.health_interval") == "30.00"
-        assert api.messages[-1] == "Интервал health-check обновлён"
+        last_message = api.messages[-1]
+        assert last_message.startswith("<b>⏱️ Параметры</b>")
+        assert "Интервал health-check обновлён." in last_message
 
         admin.args = "5"
         await controller._dispatch("set_healthcheck", admin)
         assert store.get_setting("runtime.health_interval") == "30.00"
-        assert api.messages[-1] == "Минимальный интервал — 10 секунд"
+        error_message = api.messages[-1]
+        assert error_message.startswith("<b>⚠️ Параметры</b>")
+        assert "Минимальный интервал — 10 секунд." in error_message
 
     import asyncio
 
