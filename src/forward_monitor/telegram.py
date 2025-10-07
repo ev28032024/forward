@@ -153,6 +153,27 @@ def _prepare_recent_messages(
     return [message for _, message in sortable]
 
 
+def _normalize_label(label: str | None, fallback: str) -> str:
+    candidate = (label or "").strip()
+    return candidate or fallback
+
+
+def _chat_sort_key(chat_id: str) -> tuple[int, str]:
+    try:
+        numeric = int(chat_id)
+    except (TypeError, ValueError):
+        return (1, chat_id.lower())
+    return (0, f"{numeric:020d}")
+
+
+def _channel_sort_key(
+    label: str, discord_id: str, thread_id: int | None
+) -> tuple[str, int, tuple[int, str]]:
+    normalized = _normalize_label(label, discord_id).casefold()
+    thread_sort = -1 if thread_id is None else thread_id
+    return (normalized, thread_sort, _message_id_sort_key(discord_id))
+
+
 class TelegramAPIProtocol(Protocol):
     async def get_updates(
         self,
@@ -763,11 +784,15 @@ class TelegramController:
             for command, description in commands:
                 lines.append(f"• <code>{html.escape(command)}</code> — {html.escape(description)}")
             lines.append("")
-        await self._api.send_message(
-            ctx.chat_id,
-            "\n".join(lines),
-            parse_mode="HTML",
-        )
+        while lines and lines[-1] == "":
+            lines.pop()
+
+        for chunk in _split_html_lines(lines):
+            await self._api.send_message(
+                ctx.chat_id,
+                chunk,
+                parse_mode="HTML",
+            )
 
     async def cmd_status(self, ctx: CommandContext) -> None:
         token_value = self._store.get_setting("discord.token")
@@ -989,86 +1014,112 @@ class TelegramController:
         lines.append("")
         lines.append("<b>📡 Каналы</b>")
         if channel_configs:
+            grouped_channels: dict[str, list[ChannelConfig]] = {}
             for channel in channel_configs:
-                health_status, health_message = self._store.get_health_status(
-                    f"channel.{channel.discord_id}"
-                )
-                if not channel.active:
-                    health_status = "disabled"
-                status_icon = _health_icon(health_status)
-                lines.append(f"{status_icon} <b>{html.escape(channel.label)}</b>")
+                grouped_channels.setdefault(channel.telegram_chat_id, []).append(channel)
+
+            for chat_id, group in sorted(
+                grouped_channels.items(), key=lambda item: _chat_sort_key(item[0])
+            ):
+                escaped_chat = html.escape(chat_id)
+                lines.append("")
                 lines.append(
-                    f"{_INDENT}• Discord: <code>{html.escape(channel.discord_id)}</code>"
-                )
-                lines.append(
-                    f"{_INDENT}• Telegram: <code>{html.escape(channel.telegram_chat_id)}</code>"
-                )
-                if channel.telegram_thread_id is not None:
-                    thread_value = html.escape(str(channel.telegram_thread_id))
-                    lines.append(
-                        f"{_INDENT}• Тема: <code>{thread_value}</code>"
-                    )
-                if health_message:
-                    lines.append(f"{_INDENT}• Статус: {html.escape(health_message)}")
-                lines.append(
-                    f"{_INDENT}• Предпросмотр ссылок: "
-                    + (
-                        "выключен"
-                        if channel.formatting.disable_preview
-                        else "включен"
-                    )
-                )
-                lines.append(
-                    f"{_INDENT}• Максимальная длина: {channel.formatting.max_length} символов"
-                )
-                link_channel_desc = (
-                    "показывается"
-                    if channel.formatting.show_discord_link
-                    else "скрыта"
-                )
-                lines.append(
-                    f"{_INDENT}• Ссылка на Discord: {html.escape(link_channel_desc)}"
-                )
-                attachment_mode = (
-                    "краткий список"
-                    if channel.formatting.attachments_style.lower() == "summary"
-                    else "список ссылок"
-                )
-                lines.append(f"{_INDENT}• Вложения: {attachment_mode}")
-                lines.append(
-                    f"{_INDENT}• Режим: "
-                    + (
-                        "закреплённые сообщения"
-                        if channel.pinned_only
-                        else "новые сообщения"
-                    )
+                    f"💬 <b>Telegram <code>{escaped_chat}</code></b> — "
+                    f"{len(group)} "
+                    + ("связка" if len(group) == 1 else "связки")
                 )
 
-                channel_filter_sets = _collect_filter_sets(channel.filters)
-                extra_filters = {
-                    key: {
-                        value_key: value
-                        for value_key, value in channel_filter_sets.get(key, {}).items()
-                        if value_key not in default_filter_sets.get(key, {})
-                    }
-                    for key in _FILTER_TYPES
-                }
-                if any(extra_filters[name] for name in _FILTER_TYPES):
-                    lines.append(f"{_INDENT}• Дополнительные фильтры")
-                    lines.extend(
-                        _describe_filters(
-                            extra_filters,
-                            indent=_DOUBLE_INDENT,
-                            empty_message="",
+                for channel in sorted(
+                    group,
+                    key=lambda item: _channel_sort_key(
+                        item.label, item.discord_id, item.telegram_thread_id
+                    ),
+                ):
+                    health_status = channel.health_status
+                    health_message = channel.health_message
+                    if not channel.active:
+                        health_status = "disabled"
+                    status_icon = _health_icon(health_status)
+                    label = html.escape(_normalize_label(channel.label, channel.discord_id))
+                    discord_display = html.escape(channel.discord_id)
+                    lines.append(
+                        f"{_INDENT}{status_icon} <b>{label}</b> — Discord "
+                        f"<code>{discord_display}</code>"
+                    )
+                    if channel.telegram_thread_id is not None:
+                        thread_value = html.escape(str(channel.telegram_thread_id))
+                        lines.append(
+                            f"{_DOUBLE_INDENT}• Тема: <code>{thread_value}</code>"
+                        )
+                    if health_message:
+                        lines.append(
+                            f"{_DOUBLE_INDENT}• Статус: {html.escape(health_message)}"
+                        )
+                    lines.append(
+                        f"{_DOUBLE_INDENT}• Предпросмотр ссылок: "
+                        + (
+                            "выключен"
+                            if channel.formatting.disable_preview
+                            else "включен"
                         )
                     )
-                else:
-                    if has_default_filters:
-                        lines.append(
-                            f"{_INDENT}• Дополнительные фильтры: нет, используются глобальные"
+                    lines.append(
+                        (
+                            f"{_DOUBLE_INDENT}• Максимальная длина: "
+                            f"{channel.formatting.max_length} символов"
+                        )
+                    )
+                    link_channel_desc = (
+                        "показывается"
+                        if channel.formatting.show_discord_link
+                        else "скрыта"
+                    )
+                    lines.append(
+                        f"{_DOUBLE_INDENT}• Ссылка на Discord: {html.escape(link_channel_desc)}"
+                    )
+                    attachment_mode = (
+                        "краткий список"
+                        if channel.formatting.attachments_style.lower() == "summary"
+                        else "список ссылок"
+                    )
+                    lines.append(f"{_DOUBLE_INDENT}• Вложения: {attachment_mode}")
+                    lines.append(
+                        f"{_DOUBLE_INDENT}• Режим: "
+                        + (
+                            "закреплённые сообщения"
+                            if channel.pinned_only
+                            else "новые сообщения"
+                        )
+                    )
+
+                    channel_filter_sets = _collect_filter_sets(channel.filters)
+                    extra_filters = {
+                        key: {
+                            value_key: value
+                            for value_key, value in channel_filter_sets.get(key, {}).items()
+                            if value_key not in default_filter_sets.get(key, {})
+                        }
+                        for key in _FILTER_TYPES
+                    }
+                    if any(extra_filters[name] for name in _FILTER_TYPES):
+                        lines.append(f"{_DOUBLE_INDENT}• Дополнительные фильтры")
+                        lines.extend(
+                            _describe_filters(
+                                extra_filters,
+                                indent=_DOUBLE_INDENT + _INDENT,
+                                empty_message="",
+                            )
                         )
                     else:
-                        lines.append(f"{_INDENT}• Дополнительные фильтры: нет")
+                        if has_default_filters:
+                            lines.append(
+                                (
+                                    f"{_DOUBLE_INDENT}• Дополнительные фильтры: нет, "
+                                    "используются глобальные"
+                                )
+                            )
+                        else:
+                            lines.append(f"{_DOUBLE_INDENT}• Дополнительные фильтры: нет")
 
                 lines.append("")
         else:
@@ -1602,33 +1653,69 @@ class TelegramController:
     async def cmd_list_channels(self, ctx: CommandContext) -> None:
         channels = self._store.list_channels()
         if not channels:
-            await self._api.send_message(ctx.chat_id, "Каналы не настроены")
+            await self._api.send_message(
+                ctx.chat_id,
+                (
+                    "<b>ℹ️ Каналы не настроены</b>\n"
+                    "Добавьте связку командой <code>/add_channel</code>."
+                ),
+                parse_mode="HTML",
+            )
             return
-        lines = ["<b>📡 Настроенные каналы</b>", ""]
+        groups: dict[str, list[Any]] = {}
         for record in channels:
-            label = html.escape(record.label or record.discord_id)
-            discord_id = html.escape(record.discord_id)
-            chat_id = html.escape(record.telegram_chat_id)
-            health_status, _ = self._store.get_health_status(
-                f"channel.{record.discord_id}"
-            )
-            if not record.active:
-                health_status = "disabled"
-            status_icon = _health_icon(health_status)
-            thread_info = ""
-            if record.telegram_thread_id is not None:
-                thread_info = (
-                    f" (тема <code>{html.escape(str(record.telegram_thread_id))}</code>)"
+            groups.setdefault(record.telegram_chat_id, []).append(record)
+
+        lines = [
+            "<b>📡 Настроенные каналы</b>",
+            "<i>Сгруппированы по чатам Telegram и темам.</i>",
+            "",
+        ]
+
+        for chat_id, records in sorted(groups.items(), key=lambda item: _chat_sort_key(item[0])):
+            escaped_chat = html.escape(chat_id)
+            lines.append(f"💬 <b>Telegram <code>{escaped_chat}</code></b>")
+            for record in sorted(
+                records,
+                key=lambda item: _channel_sort_key(
+                    getattr(item, "label", item.discord_id),
+                    item.discord_id,
+                    item.telegram_thread_id,
+                ),
+            ):
+                health_status, health_message = self._store.get_health_status(
+                    f"channel.{record.discord_id}"
                 )
-            lines.append(
-                f"{status_icon} <b>{label}</b> — Discord <code>{discord_id}</code> → "
-                f"Telegram <code>{chat_id}</code>{thread_info}"
+                if not record.active:
+                    health_status = "disabled"
+                status_icon = _health_icon(health_status)
+                label = html.escape(_normalize_label(record.label, record.discord_id))
+                discord_id = html.escape(record.discord_id)
+                lines.append(
+                    f"{_INDENT}{status_icon} <b>{label}</b> — Discord <code>{discord_id}</code>"
+                )
+                if record.telegram_thread_id is not None:
+                    thread_info = html.escape(str(record.telegram_thread_id))
+                    lines.append(
+                        f"{_DOUBLE_INDENT}• Тема: <code>{thread_info}</code>"
+                    )
+                if health_message:
+                    lines.append(
+                        f"{_DOUBLE_INDENT}• Статус: {html.escape(health_message)}"
+                    )
+                if not record.active:
+                    lines.append(f"{_DOUBLE_INDENT}• Состояние: отключена")
+            lines.append("")
+
+        while lines and lines[-1] == "":
+            lines.pop()
+
+        for chunk in _split_html_lines(lines):
+            await self._api.send_message(
+                ctx.chat_id,
+                chunk,
+                parse_mode="HTML",
             )
-        await self._api.send_message(
-            ctx.chat_id,
-            "\n".join(lines),
-            parse_mode="HTML",
-        )
 
     async def cmd_send_recent(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
