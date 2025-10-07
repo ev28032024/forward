@@ -1158,7 +1158,7 @@ class TelegramController:
                 total = sum(len(items) for items in threads.values())
                 lines.append("")
                 lines.append(
-                    f"💬 <b>Telegram <code>{escaped_chat}</code></b> — "
+                    f"<b>Telegram <code>{escaped_chat}</code></b> — "
                     f"{total} "
                     + ("связка" if total == 1 else "связки")
                 )
@@ -1168,15 +1168,12 @@ class TelegramController:
                 ):
                     if thread_id is None:
                         thread_title = "Основной чат"
-                        thread_icon = "🗂️"
                     else:
                         thread_title = f"Тема <code>{thread_id}</code>"
-                        thread_icon = "🧵"
                     lines.append(
                         _panel_bullet(
                             f"<b>{thread_title}</b>",
                             indent=1,
-                            icon=thread_icon,
                         )
                     )
 
@@ -1197,11 +1194,14 @@ class TelegramController:
                             _normalize_label(channel.label, channel.discord_id)
                         )
                         discord_display = html.escape(channel.discord_id)
+                        channel_line = (
+                            f"{status_icon} <b>{label}</b> — "
+                            f"Discord <code>{discord_display}</code>"
+                        )
                         lines.append(
                             _panel_bullet(
-                                f"<b>{label}</b> — Discord <code>{discord_display}</code>",
+                                channel_line,
                                 indent=2,
-                                icon=status_icon,
                             )
                         )
                         if health_message:
@@ -1209,7 +1209,6 @@ class TelegramController:
                                 _panel_bullet(
                                     html.escape(health_message),
                                     indent=3,
-                                    icon="🩺",
                                 )
                             )
                         preview_label = (
@@ -1238,7 +1237,6 @@ class TelegramController:
                                 _panel_bullet(
                                     f"Тема: <code>{thread_value}</code>",
                                     indent=3,
-                                    icon="🧵",
                                 )
                             )
                         if not channel.active:
@@ -1246,7 +1244,6 @@ class TelegramController:
                                 _panel_bullet(
                                     "Канал отключён.",
                                     indent=3,
-                                    icon="⏹️",
                                 )
                             )
                         lines.extend(
@@ -1254,12 +1251,10 @@ class TelegramController:
                                 _panel_bullet(
                                     f"Режим: {html.escape(mode_label)}",
                                     indent=3,
-                                    icon="🎯",
                                 ),
                                 _panel_bullet(
                                     f"Предпросмотр: {html.escape(preview_label)}",
                                     indent=3,
-                                    icon="🔗",
                                 ),
                                 _panel_bullet(
                                     (
@@ -1267,17 +1262,14 @@ class TelegramController:
                                         "символов"
                                     ),
                                     indent=3,
-                                    icon="📏",
                                 ),
                                 _panel_bullet(
                                     f"Ссылка на Discord: {html.escape(link_channel_desc)}",
                                     indent=3,
-                                    icon="🔁",
                                 ),
                                 _panel_bullet(
                                     f"Вложения: {html.escape(attachment_mode)}",
                                     indent=3,
-                                    icon="📎",
                                 ),
                             ]
                         )
@@ -1296,7 +1288,6 @@ class TelegramController:
                                 _panel_bullet(
                                     "Дополнительные фильтры:",
                                     indent=3,
-                                    icon="🛡️",
                                 )
                             )
                             lines.extend(
@@ -1312,7 +1303,6 @@ class TelegramController:
                                     _panel_bullet(
                                         "Дополнительных фильтров нет, используются глобальные.",
                                         indent=3,
-                                        icon="🛡️",
                                     )
                                 )
                             else:
@@ -1320,7 +1310,6 @@ class TelegramController:
                                     _panel_bullet(
                                         "Дополнительные фильтры отсутствуют.",
                                         indent=3,
-                                        icon="🛡️",
                                     )
                                 )
         else:
@@ -2156,11 +2145,13 @@ class TelegramController:
             "",
         ]
 
-        for chat_id, threads in sorted(grouped.items(), key=lambda item: _chat_sort_key(item[0])):
+        for chat_id, threads in sorted(
+            grouped.items(), key=lambda item: _chat_sort_key(item[0])
+        ):
             escaped_chat = html.escape(chat_id)
             total = sum(len(items) for items in threads.values())
             lines.append(
-                f"💬 <b>Telegram <code>{escaped_chat}</code></b> — "
+                f"<b>Telegram <code>{escaped_chat}</code></b> — "
                 f"{total} "
                 + ("связка" if total == 1 else "связки")
             )
@@ -2170,15 +2161,12 @@ class TelegramController:
             ):
                 if thread_id is None:
                     thread_title = "Основной чат"
-                    thread_icon = "🗂️"
                 else:
                     thread_title = f"Тема <code>{thread_id}</code>"
-                    thread_icon = "🧵"
                 lines.append(
                     _panel_bullet(
                         f"<b>{thread_title}</b>",
                         indent=1,
-                        icon=thread_icon,
                     )
                 )
 
@@ -2200,11 +2188,14 @@ class TelegramController:
                         _normalize_label(record.label, record.discord_id)
                     )
                     discord_id = html.escape(record.discord_id)
+                    channel_line = (
+                        f"{status_icon} <b>{label}</b> — "
+                        f"Discord <code>{discord_id}</code>"
+                    )
                     lines.append(
                         _panel_bullet(
-                            f"<b>{label}</b> — Discord <code>{discord_id}</code>",
+                            channel_line,
                             indent=2,
-                            icon=status_icon,
                         )
                     )
                     if health_message:
@@ -2212,7 +2203,6 @@ class TelegramController:
                             _panel_bullet(
                                 html.escape(health_message),
                                 indent=3,
-                                icon="🩺",
                             )
                         )
                     if not record.active:
@@ -2220,7 +2210,6 @@ class TelegramController:
                             _panel_bullet(
                                 "Связка отключена.",
                                 indent=3,
-                                icon="⏹️",
                             )
                         )
 
