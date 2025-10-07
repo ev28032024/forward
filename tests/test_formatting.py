@@ -257,7 +257,7 @@ def test_angle_bracket_links_are_unwrapped() -> None:
     assert "https://example.com" in formatted.text
 
 
-def test_numeric_hashtags_are_linked() -> None:
+def test_numeric_hashtags_are_plain_text() -> None:
     channel = sample_channel()
     message = DiscordMessage(
         id="6",
@@ -274,12 +274,8 @@ def test_numeric_hashtags_are_linked() -> None:
 
     formatted = format_discord_message(message, channel)
 
-    assert (
-        '<a href="https://t.me/s/hashtag?hashtag=123456">#123456</a>'
-        in formatted.text
-    )
-    assert (
-        '<a href="https://t.me/s/hashtag?hashtag=987654">#987654</a>'
-        in formatted.text
-    )
+    assert "#123456" in formatted.text
+    assert "#987654" in formatted.text
+    assert "https://t.me/s/hashtag?hashtag=123456" not in formatted.text
+    assert "https://t.me/s/hashtag?hashtag=987654" not in formatted.text
     assert "#token" in formatted.text

@@ -397,9 +397,7 @@ def _format_numeric_hashtag(match: re.Match[str]) -> str:
     value = match.group(1)
     if not value:
         return match.group(0)
-    return (
-        f"<a href=\"https://t.me/s/hashtag?hashtag={value}\">#{value}</a>"
-    )
+    return f"#{value}"
 
 
 def _format_timestamp_tag(match: re.Match[str]) -> str:
