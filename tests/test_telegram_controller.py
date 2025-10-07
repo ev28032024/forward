@@ -453,10 +453,11 @@ def test_list_channels_grouped_output(tmp_path: Path) -> None:
         await controller._dispatch("list_channels", admin)
         payload = "\n".join(text for _, text in api.messages)
 
-        assert payload.count("💬 <b>Telegram") == 2
+        assert payload.count("<b>Telegram <code>") == 2
         assert "Alpha" in payload and "Beta" in payload and "Gamma" in payload
         assert payload.index("Alpha") < payload.index("Beta")
-        assert "🧵 <b>Тема <code>2</code></b>" in payload
+        normalized_payload = payload.replace("\u00A0", " ")
+        assert "• <b>Тема <code>2</code></b>" in normalized_payload
         assert "Нет доступа" in payload
 
     asyncio.run(runner())
@@ -492,13 +493,14 @@ def test_status_groups_channels_by_chat(tmp_path: Path) -> None:
         await controller._dispatch("status", admin)
         combined = "\n".join(text for _, text in api.messages)
 
-        assert combined.count("💬 <b>Telegram") == 2
+        assert combined.count("<b>Telegram <code>") == 2
         first_idx = combined.index("-1001")
         second_idx = combined.index("-1002")
         assert first_idx < second_idx
         first_group = combined[first_idx:second_idx]
         assert "Alpha" in first_group and "Beta" in first_group
         assert "Gamma" in combined[second_idx:]
-        assert "🧵 <b>Тема <code>2</code></b>" in combined
+        normalized_combined = combined.replace("\u00A0", " ")
+        assert "• <b>Тема <code>2</code></b>" in normalized_combined
 
     asyncio.run(runner())
