@@ -457,7 +457,7 @@ def test_list_channels_grouped_output(tmp_path: Path) -> None:
         assert "Alpha" in payload and "Beta" in payload and "Gamma" in payload
         assert payload.index("Alpha") < payload.index("Beta")
         normalized_payload = payload.replace("\u00A0", " ")
-        assert "• <b>Тема <code>2</code></b>" in normalized_payload
+        assert "🧵 <b>Тема <code>2</code></b>" in normalized_payload
         assert "Нет доступа" in payload
 
     asyncio.run(runner())
@@ -501,6 +501,6 @@ def test_status_groups_channels_by_chat(tmp_path: Path) -> None:
         assert "Alpha" in first_group and "Beta" in first_group
         assert "Gamma" in combined[second_idx:]
         normalized_combined = combined.replace("\u00A0", " ")
-        assert "• <b>Тема <code>2</code></b>" in normalized_combined
+        assert "🧵 <b>Тема <code>2</code></b>" in normalized_combined
 
     asyncio.run(runner())

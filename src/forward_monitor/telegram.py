@@ -14,6 +14,7 @@ from typing import (
     Awaitable,
     Callable,
     Iterable,
+    Mapping,
     Protocol,
     Sequence,
 )
@@ -226,6 +227,64 @@ def _thread_sort_key(thread_id: int | None) -> tuple[int, int]:
     if thread_id is None:
         return (0, 0)
     return (1, thread_id)
+
+
+def _thread_separator(*, indent: int = 1, width: int = 28) -> str:
+    return f"{_INDENT * indent}<code>{'─' * width}</code>"
+
+
+def _format_thread_title(thread_id: int | None) -> str:
+    if thread_id is None:
+        return "Основной чат"
+    return f"Тема <code>{html.escape(str(thread_id))}</code>"
+
+
+def _format_channel_groups(
+    grouped: Mapping[str, Mapping[int | None, Sequence[Any]]],
+    *,
+    render_entry: Callable[[Any], tuple[str, str, Sequence[tuple[int, str | None, str]]]],
+    separator_width: int = 28,
+) -> list[str]:
+    lines: list[str] = []
+    for chat_id, threads in sorted(grouped.items(), key=lambda item: _chat_sort_key(item[0])):
+        escaped_chat = html.escape(chat_id)
+        total = sum(len(items) for items in threads.values())
+        lines.append(
+            f"<b>Telegram <code>{escaped_chat}</code></b> · "
+            f"{total} "
+            + ("связка" if total == 1 else "связки")
+        )
+        for index, (thread_id, items) in enumerate(
+            sorted(threads.items(), key=lambda item: _thread_sort_key(item[0]))
+        ):
+            if index > 0:
+                lines.append("")
+            lines.append(_thread_separator(indent=1, width=separator_width))
+            lines.append(
+                _panel_bullet(
+                    f"<b>{_format_thread_title(thread_id)}</b>",
+                    indent=1,
+                    icon="🧵",
+                )
+            )
+            for record in sorted(
+                items,
+                key=lambda item: _channel_sort_key(
+                    getattr(item, "label", item.discord_id),
+                    item.discord_id,
+                    getattr(item, "telegram_thread_id", None),
+                ),
+            ):
+                icon, header, extra_rows = render_entry(record)
+                lines.append(_panel_bullet(header, indent=2, icon=icon))
+                for indent_level, extra_icon, extra_text in extra_rows:
+                    lines.append(
+                        _panel_bullet(extra_text, indent=indent_level, icon=extra_icon)
+                    )
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 class TelegramAPIProtocol(Protocol):
@@ -1151,167 +1210,94 @@ class TelegramController:
         lines.append("<b>📡 Каналы</b>")
         if channel_configs:
             grouped = _group_channels_by_chat_and_thread(channel_configs)
-            for chat_id, threads in sorted(
-                grouped.items(), key=lambda item: _chat_sort_key(item[0])
-            ):
-                escaped_chat = html.escape(chat_id)
-                total = sum(len(items) for items in threads.values())
-                lines.append("")
-                lines.append(
-                    f"<b>Telegram <code>{escaped_chat}</code></b> — "
-                    f"{total} "
-                    + ("связка" if total == 1 else "связки")
+
+            def _render_config(channel: "ChannelConfig") -> tuple[
+                str, str, Sequence[tuple[int, str | None, str]]
+            ]:
+                health_status = channel.health_status
+                health_message = channel.health_message
+                if not channel.active:
+                    health_status = "disabled"
+                status_icon = _health_icon(health_status)
+                label = html.escape(_normalize_label(channel.label, channel.discord_id))
+                discord_display = html.escape(channel.discord_id)
+                header = f"<b>{label}</b> · Discord <code>{discord_display}</code>"
+
+                preview_label = (
+                    "выключен"
+                    if channel.formatting.disable_preview
+                    else "включен"
+                )
+                link_channel_desc = (
+                    "показывается"
+                    if channel.formatting.show_discord_link
+                    else "скрыта"
+                )
+                attachment_mode = (
+                    "краткий список"
+                    if channel.formatting.attachments_style.lower() == "summary"
+                    else "список ссылок"
+                )
+                mode_label = (
+                    "закреплённые сообщения"
+                    if channel.pinned_only
+                    else "новые сообщения"
                 )
 
-                for thread_id, items in sorted(
-                    threads.items(), key=lambda item: _thread_sort_key(item[0])
-                ):
-                    if thread_id is None:
-                        thread_title = "Основной чат"
-                    else:
-                        thread_title = f"Тема <code>{thread_id}</code>"
-                    lines.append(
-                        _panel_bullet(
-                            f"<b>{thread_title}</b>",
-                            indent=1,
-                        )
-                    )
-
-                    for channel in sorted(
-                        items,
-                        key=lambda item: _channel_sort_key(
-                            getattr(item, "label", item.discord_id),
-                            item.discord_id,
-                            item.telegram_thread_id,
+                extra_rows: list[tuple[int, str | None, str]] = []
+                if health_message:
+                    extra_rows.append((3, "🩺", html.escape(health_message)))
+                if not channel.active:
+                    extra_rows.append((3, "⏸️", html.escape("Канал отключён.")))
+                extra_rows.extend(
+                    [
+                        (3, "🎯", f"Режим: {html.escape(mode_label)}"),
+                        (3, "🖼️", f"Предпросмотр: {html.escape(preview_label)}"),
+                        (
+                            3,
+                            "🧾",
+                            (
+                                f"Максимальная длина: {channel.formatting.max_length} "
+                                "символов"
+                            ),
                         ),
-                    ):
-                        health_status = channel.health_status
-                        health_message = channel.health_message
-                        if not channel.active:
-                            health_status = "disabled"
-                        status_icon = _health_icon(health_status)
-                        label = html.escape(
-                            _normalize_label(channel.label, channel.discord_id)
-                        )
-                        discord_display = html.escape(channel.discord_id)
-                        channel_line = (
-                            f"{status_icon} <b>{label}</b> — "
-                            f"Discord <code>{discord_display}</code>"
-                        )
-                        lines.append(
-                            _panel_bullet(
-                                channel_line,
-                                indent=2,
-                            )
-                        )
-                        if health_message:
-                            lines.append(
-                                _panel_bullet(
-                                    html.escape(health_message),
-                                    indent=3,
-                                )
-                            )
-                        preview_label = (
-                            "выключен"
-                            if channel.formatting.disable_preview
-                            else "включен"
-                        )
-                        link_channel_desc = (
-                            "показывается"
-                            if channel.formatting.show_discord_link
-                            else "скрыта"
-                        )
-                        attachment_mode = (
-                            "краткий список"
-                            if channel.formatting.attachments_style.lower() == "summary"
-                            else "список ссылок"
-                        )
-                        mode_label = (
-                            "закреплённые сообщения"
-                            if channel.pinned_only
-                            else "новые сообщения"
-                        )
-                        if channel.telegram_thread_id is not None:
-                            thread_value = html.escape(str(channel.telegram_thread_id))
-                            lines.append(
-                                _panel_bullet(
-                                    f"Тема: <code>{thread_value}</code>",
-                                    indent=3,
-                                )
-                            )
-                        if not channel.active:
-                            lines.append(
-                                _panel_bullet(
-                                    "Канал отключён.",
-                                    indent=3,
-                                )
-                            )
-                        lines.extend(
-                            [
-                                _panel_bullet(
-                                    f"Режим: {html.escape(mode_label)}",
-                                    indent=3,
-                                ),
-                                _panel_bullet(
-                                    f"Предпросмотр: {html.escape(preview_label)}",
-                                    indent=3,
-                                ),
-                                _panel_bullet(
-                                    (
-                                        f"Максимальная длина: {channel.formatting.max_length} "
-                                        "символов"
-                                    ),
-                                    indent=3,
-                                ),
-                                _panel_bullet(
-                                    f"Ссылка на Discord: {html.escape(link_channel_desc)}",
-                                    indent=3,
-                                ),
-                                _panel_bullet(
-                                    f"Вложения: {html.escape(attachment_mode)}",
-                                    indent=3,
-                                ),
-                            ]
-                        )
+                        (3, "🔗", f"Ссылка на Discord: {html.escape(link_channel_desc)}"),
+                        (3, "📎", f"Вложения: {html.escape(attachment_mode)}"),
+                    ]
+                )
 
-                        channel_filter_sets = _collect_filter_sets(channel.filters)
-                        extra_filters = {
-                            key: {
-                                value_key: value
-                                for value_key, value in channel_filter_sets.get(key, {}).items()
-                                if value_key not in default_filter_sets.get(key, {})
-                            }
-                            for key in _FILTER_TYPES
-                        }
-                        if any(extra_filters[name] for name in _FILTER_TYPES):
-                            lines.append(
-                                _panel_bullet(
-                                    "Дополнительные фильтры:",
-                                    indent=3,
-                                )
-                            )
-                            lines.extend(
-                                _describe_filters(
-                                    extra_filters,
-                                    indent=_INDENT * 4,
-                                    empty_message="",
-                                )
-                            )
-                        else:
-                            if has_default_filters:
-                                lines.append(
-                                    _panel_bullet(
-                                        "Дополнительных фильтров нет, используются глобальные.",
-                                        indent=3,
-                                    )
-                                )
-                            else:
-                                lines.append(
-                                    _panel_bullet(
-                                        "Дополнительные фильтры отсутствуют.",
-                                        indent=3,
-                                    )
-                                )
+                channel_filter_sets = _collect_filter_sets(channel.filters)
+                extra_filters = {
+                    key: {
+                        value_key: value
+                        for value_key, value in channel_filter_sets.get(key, {}).items()
+                        if value_key not in default_filter_sets.get(key, {})
+                    }
+                    for key in _FILTER_TYPES
+                }
+                if any(extra_filters[name] for name in _FILTER_TYPES):
+                    extra_rows.append((3, "🎛️", "Дополнительные фильтры"))
+                    for filter_line in _describe_filters(
+                        extra_filters, indent="", empty_message=""
+                    ):
+                        extra_rows.append((4, None, filter_line))
+                else:
+                    message = (
+                        "Дополнительных фильтров нет, используются глобальные."
+                        if has_default_filters
+                        else "Дополнительные фильтры отсутствуют."
+                    )
+                    extra_rows.append((3, "🎛️", html.escape(message)))
+
+                return status_icon, header, extra_rows
+
+            lines.extend(
+                [""]
+                + _format_channel_groups(
+                    grouped,
+                    render_entry=_render_config,
+                )
+            )
         else:
             lines.append(_panel_bullet("Не настроены", icon="ℹ️"))
 
@@ -2145,78 +2131,31 @@ class TelegramController:
             "",
         ]
 
-        for chat_id, threads in sorted(
-            grouped.items(), key=lambda item: _chat_sort_key(item[0])
-        ):
-            escaped_chat = html.escape(chat_id)
-            total = sum(len(items) for items in threads.values())
-            lines.append(
-                f"<b>Telegram <code>{escaped_chat}</code></b> — "
-                f"{total} "
-                + ("связка" if total == 1 else "связки")
+        def _render_record(record: Any) -> tuple[
+            str, str, Sequence[tuple[int, str | None, str]]
+        ]:
+            health_status, health_message = self._store.get_health_status(
+                f"channel.{record.discord_id}"
             )
+            if not record.active:
+                health_status = "disabled"
+            status_icon = _health_icon(health_status)
+            label = html.escape(_normalize_label(record.label, record.discord_id))
+            discord_id = html.escape(record.discord_id)
+            header = f"<b>{label}</b> · Discord <code>{discord_id}</code>"
+            extra: list[tuple[int, str | None, str]] = []
+            if health_message:
+                extra.append((3, "🩺", html.escape(health_message)))
+            if not record.active:
+                extra.append((3, "⏸️", html.escape("Связка отключена.")))
+            return status_icon, header, extra
 
-            for thread_id, items in sorted(
-                threads.items(), key=lambda item: _thread_sort_key(item[0])
-            ):
-                if thread_id is None:
-                    thread_title = "Основной чат"
-                else:
-                    thread_title = f"Тема <code>{thread_id}</code>"
-                lines.append(
-                    _panel_bullet(
-                        f"<b>{thread_title}</b>",
-                        indent=1,
-                    )
-                )
-
-                for record in sorted(
-                    items,
-                    key=lambda item: _channel_sort_key(
-                        getattr(item, "label", item.discord_id),
-                        item.discord_id,
-                        item.telegram_thread_id,
-                    ),
-                ):
-                    health_status, health_message = self._store.get_health_status(
-                        f"channel.{record.discord_id}"
-                    )
-                    if not record.active:
-                        health_status = "disabled"
-                    status_icon = _health_icon(health_status)
-                    label = html.escape(
-                        _normalize_label(record.label, record.discord_id)
-                    )
-                    discord_id = html.escape(record.discord_id)
-                    channel_line = (
-                        f"{status_icon} <b>{label}</b> — "
-                        f"Discord <code>{discord_id}</code>"
-                    )
-                    lines.append(
-                        _panel_bullet(
-                            channel_line,
-                            indent=2,
-                        )
-                    )
-                    if health_message:
-                        lines.append(
-                            _panel_bullet(
-                                html.escape(health_message),
-                                indent=3,
-                            )
-                        )
-                    if not record.active:
-                        lines.append(
-                            _panel_bullet(
-                                "Связка отключена.",
-                                indent=3,
-                            )
-                        )
-
-            lines.append("")
-
-        while lines and lines[-1] == "":
-            lines.pop()
+        lines.extend(
+            _format_channel_groups(
+                grouped,
+                render_entry=_render_record,
+            )
+        )
 
         for chunk in _split_html_lines(lines):
             await self._api.send_message(
