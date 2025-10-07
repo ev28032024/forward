@@ -240,6 +240,145 @@ def test_monitor_skips_messages_before_start(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_monitor_discards_old_messages_with_newer_ids(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        record = store.add_channel("discord", "telegram", label="Test")
+        store.close()
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        app._startup_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE channels SET added_at=? WHERE id=?",
+            (app._startup_time.isoformat(), record.id),
+        )
+        conn.commit()
+        conn.close()
+
+        state = app._reload_state()
+        channel = state.channels[0]
+
+        fresh_time = app._startup_time + timedelta(minutes=1)
+        stale_time = app._startup_time - timedelta(days=1)
+        future_time = app._startup_time + timedelta(minutes=2)
+
+        fresh_id = str(_discord_snowflake_from_datetime(fresh_time))
+        future_id = str(_discord_snowflake_from_datetime(future_time))
+        stale_id = str(int(fresh_id) + 1)
+
+        messages = [
+            DiscordMessage(
+                id=fresh_id,
+                channel_id=channel.discord_id,
+                guild_id="1",
+                author_id="42",
+                author_name="Fresh",
+                content="Fresh message",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp=fresh_time.isoformat(),
+                message_type=0,
+            ),
+            DiscordMessage(
+                id=stale_id,
+                channel_id=channel.discord_id,
+                guild_id="1",
+                author_id="43",
+                author_name="Stale",
+                content="Old but high id",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp=stale_time.isoformat(),
+                message_type=0,
+            ),
+            DiscordMessage(
+                id=future_id,
+                channel_id=channel.discord_id,
+                guild_id="1",
+                author_id="44",
+                author_name="Future",
+                content="Future message",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp=future_time.isoformat(),
+                message_type=0,
+            ),
+        ]
+
+        class MessageDiscord:
+            async def fetch_messages(
+                self,
+                channel_id: str,
+                *,
+                limit: int = 50,
+                after: str | None = None,
+                before: str | None = None,
+            ) -> list[DiscordMessage]:
+                return messages
+
+        class RecordingTelegram:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send_message(
+                self,
+                chat_id: int | str,
+                text: str,
+                *,
+                parse_mode: str | None = None,
+                disable_preview: bool = True,
+                message_thread_id: int | None = None,
+            ) -> None:
+                self.sent.append(text)
+
+            async def send_photo(
+                self,
+                chat_id: int | str,
+                photo: str,
+                *,
+                caption: str | None = None,
+                parse_mode: str | None = None,
+                message_thread_id: int | None = None,
+            ) -> None:
+                raise AssertionError("photos are not expected")
+
+        telegram_api = RecordingTelegram()
+        runtime = RuntimeOptions()
+        telegram_rate = RateLimiter(1000)
+
+        app._refresh_event.clear()
+
+        await app._process_channel(
+            channel,
+            cast(DiscordClient, MessageDiscord()),
+            cast(TelegramAPI, telegram_api),
+            telegram_rate,
+            runtime,
+        )
+
+        assert len(telegram_api.sent) == 2
+        assert any("Fresh message" in entry for entry in telegram_api.sent)
+        assert not any("Old but high id" in entry for entry in telegram_api.sent)
+        assert any("Future message" in entry for entry in telegram_api.sent)
+
+        stored = app._store.get_channel(channel.discord_id)
+        assert stored is not None
+        assert stored.last_message_id == future_id
+
+        app._store.close()
+
+    asyncio.run(runner())
+
+
 def test_monitor_waits_for_health_before_processing(tmp_path: Path) -> None:
     async def runner() -> None:
         db_path = tmp_path / "db.sqlite"

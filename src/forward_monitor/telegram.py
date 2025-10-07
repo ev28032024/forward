@@ -49,6 +49,11 @@ _DOUBLE_INDENT = _NBSP * 4
 
 _FORWARDABLE_MESSAGE_TYPES: set[int] = {0, 19, 20, 21, 23}
 
+_CHUNK_START_BANNER = "<code>┏━━ НАЧАЛО ━━┓</code>"
+_CHUNK_CONTINUE_BANNER = "<code>┠━━ ПРОДОЛЖЕНИЕ ━━┨</code>"
+_CHUNK_CONTINUE_HINT = "<i>Продолжение в следующем сообщении…</i>"
+_CHUNK_END_BANNER = "<code>┗━━ КОНЕЦ ━━┛</code>"
+
 
 _HEALTH_ICONS = {
     "ok": "🟢",
@@ -2131,18 +2136,15 @@ async def send_formatted(
     *,
     thread_id: int | None = None,
 ) -> None:
+    text_chunks: list[str] = []
     if message.text:
+        text_chunks.append(message.text)
+    text_chunks.extend(extra for extra in message.extra_messages if extra)
+
+    for chunk in _decorate_text_chunks(text_chunks):
         await api.send_message(
             chat_id,
-            message.text,
-            parse_mode=message.parse_mode,
-            disable_preview=message.disable_preview,
-            message_thread_id=thread_id,
-        )
-    for extra in message.extra_messages:
-        await api.send_message(
-            chat_id,
-            extra,
+            chunk,
             parse_mode=message.parse_mode,
             disable_preview=message.disable_preview,
             message_thread_id=thread_id,
@@ -2154,6 +2156,25 @@ async def send_formatted(
             parse_mode=None,
             message_thread_id=thread_id,
         )
+
+
+def _decorate_text_chunks(chunks: Sequence[str]) -> Sequence[str]:
+    if not chunks:
+        return ()
+    if len(chunks) == 1:
+        return (chunks[0],)
+
+    decorated: list[str] = []
+    total = len(chunks)
+
+    first = f"{_CHUNK_START_BANNER}\n{chunks[0]}\n{_CHUNK_CONTINUE_HINT}"
+    decorated.append(first)
+
+    for position, chunk in enumerate(chunks[1:], start=2):
+        suffix = _CHUNK_END_BANNER if position == total else _CHUNK_CONTINUE_HINT
+        decorated.append(f"{_CHUNK_CONTINUE_BANNER}\n{chunk}\n{suffix}")
+
+    return tuple(decorated)
 
 
 def _split_html_lines(lines: Sequence[str], limit: int = 3500) -> list[str]:
