@@ -378,6 +378,7 @@ def _apply_basic_markdown(text: str) -> str:
     escaped = _UNDERLINE_RE.sub(lambda m: f"<u>{m.group(1)}</u>", escaped)
     escaped = _STRIKE_RE.sub(lambda m: f"<s>{m.group(1)}</s>", escaped)
     escaped = _SPOILER_RE.sub(lambda m: f"<tg-spoiler>{m.group(1)}</tg-spoiler>", escaped)
+    escaped = _NUMERIC_HASHTAG_RE.sub(_format_numeric_hashtag, escaped)
 
     result = escaped
     for token, value in placeholders.items():
@@ -390,6 +391,15 @@ def _format_generic_id_tag(raw: str) -> str:
     if not cleaned:
         return ""
     return f"#{cleaned}"
+
+
+def _format_numeric_hashtag(match: re.Match[str]) -> str:
+    value = match.group(1)
+    if not value:
+        return match.group(0)
+    return (
+        f"<a href=\"https://t.me/s/hashtag?hashtag={value}\">#{value}</a>"
+    )
 
 
 def _format_timestamp_tag(match: re.Match[str]) -> str:
@@ -462,6 +472,9 @@ _BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _UNDERLINE_RE = re.compile(r"__(.+?)__", re.DOTALL)
 _STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
 _SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
+_NUMERIC_HASHTAG_RE = re.compile(
+    r"(?:(?<=^)|(?<=[^0-9A-Za-z_/:]))#([0-9]{1,64})(?![0-9A-Za-z_])"
+)
 
 _IMAGE_EXTENSIONS = (
     ".png",
