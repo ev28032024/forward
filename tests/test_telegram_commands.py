@@ -63,6 +63,7 @@ class DummyDiscordClient:
         self.proxies: list[str | None] = []
         self.fetch_calls: list[tuple[str, int, str | None, str | None]] = []
         self.messages: list[DiscordMessage] = []
+        self.messages_by_channel: dict[str, list[DiscordMessage]] | None = None
         self.checked_channels: list[str] = []
         self.existing_channels: set[str] | None = None
 
@@ -94,8 +95,13 @@ class DummyDiscordClient:
         def _key(value: str) -> tuple[int, str]:
             return (int(value), value) if value.isdigit() else (0, value)
 
+        if self.messages_by_channel is not None:
+            pool = list(self.messages_by_channel.get(channel_id, []))
+        else:
+            pool = list(self.messages)
+
         filtered: list[DiscordMessage] = []
-        for message in self.messages:
+        for message in pool:
             if after is not None and not (_key(message.id) > _key(after)):
                 continue
             if before is not None and not (_key(message.id) < _key(before)):
@@ -106,6 +112,8 @@ class DummyDiscordClient:
 
     async def fetch_pinned_messages(self, channel_id: str) -> list[DiscordMessage]:
         self.fetch_calls.append((channel_id, 0, None, None))
+        if self.messages_by_channel is not None:
+            return list(self.messages_by_channel.get(channel_id, []))
         return list(self.messages)
 
     async def check_channel_exists(self, channel_id: str) -> bool:
@@ -916,6 +924,301 @@ def test_send_recent_deduplicates_messages(tmp_path: Path) -> None:
 
     asyncio.run(runner())
 
+
+def test_send_recent_all_channels_respects_limit_and_order(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Alpha"
+        await controller._dispatch("add_channel", admin)
+        admin.args = "789 654 Beta"
+        await controller._dispatch("add_channel", admin)
+
+        duplicate = DiscordMessage(
+            id="645",
+            channel_id="789",
+            guild_id="guild",
+            author_id="5",
+            author_name="Eve",
+            content="beta-dup",
+            attachments=(),
+            embeds=(),
+            stickers=(),
+            role_ids=set(),
+            timestamp="2023-12-03T18:02:00+00:00",
+        )
+
+        dummy_client.messages_by_channel = {
+            "123": [
+                DiscordMessage(
+                    id="500",
+                    channel_id="123",
+                    guild_id="guild",
+                    author_id="1",
+                    author_name="Alice",
+                    content="alpha-old",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T17:55:00+00:00",
+                ),
+                DiscordMessage(
+                    id="510",
+                    channel_id="123",
+                    guild_id="guild",
+                    author_id="2",
+                    author_name="Bob",
+                    content="alpha-middle",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:05:00+00:00",
+                ),
+                DiscordMessage(
+                    id="520",
+                    channel_id="123",
+                    guild_id="guild",
+                    author_id="3",
+                    author_name="Carol",
+                    content="alpha-new",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:10:00+00:00",
+                ),
+                DiscordMessage(
+                    id="530",
+                    channel_id="123",
+                    guild_id="guild",
+                    author_id="4",
+                    author_name="Dave",
+                    content="alpha-latest",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:15:00+00:00",
+                ),
+            ],
+            "789": [
+                DiscordMessage(
+                    id="640",
+                    channel_id="789",
+                    guild_id="guild",
+                    author_id="6",
+                    author_name="Frank",
+                    content="beta-old",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T17:50:00+00:00",
+                ),
+                duplicate,
+                duplicate,
+                DiscordMessage(
+                    id="650",
+                    channel_id="789",
+                    guild_id="guild",
+                    author_id="7",
+                    author_name="Grace",
+                    content="beta-fresh",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:05:00+00:00",
+                ),
+                DiscordMessage(
+                    id="660",
+                    channel_id="789",
+                    guild_id="guild",
+                    author_id="8",
+                    author_name="Heidi",
+                    content="beta-latest",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:10:00+00:00",
+                ),
+            ],
+        }
+
+        admin.args = "3 all"
+        await controller._dispatch("send_recent", admin)
+
+        forwarded = [
+            text
+            for text in api.messages
+            if "📣 <b>" in text and "💬" in text
+        ]
+
+        alpha_messages = [
+            text for text in forwarded if "📣 <b>Alpha</b>" in text
+        ]
+        beta_messages = [
+            text for text in forwarded if "📣 <b>Beta</b>" in text
+        ]
+
+        assert len(alpha_messages) == 3
+        assert len(beta_messages) == 3
+
+        def extract_contents(messages: list[str], prefix: str) -> list[str]:
+            extracted: list[str] = []
+            for message in messages:
+                for part in message.splitlines():
+                    stripped = part.strip()
+                    if stripped.startswith(prefix):
+                        extracted.append(stripped)
+                        break
+            return extracted
+
+        assert extract_contents(alpha_messages, "alpha-") == [
+            "alpha-middle",
+            "alpha-new",
+            "alpha-latest",
+        ]
+
+        assert extract_contents(beta_messages, "beta-") == [
+            "beta-dup",
+            "beta-fresh",
+            "beta-latest",
+        ]
+
+        assert sum("beta-dup" in message for message in beta_messages) == 1
+
+    asyncio.run(runner())
+
+
+def test_send_recent_all_channels_respects_invocation_time(
+    tmp_path: Path,
+) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Alpha"
+        await controller._dispatch("add_channel", admin)
+        admin.args = "789 654 Beta"
+        await controller._dispatch("add_channel", admin)
+
+        dummy_client.messages_by_channel = {
+            "123": [
+                DiscordMessage(
+                    id="700",
+                    channel_id="123",
+                    guild_id="guild",
+                    author_id="1",
+                    author_name="Alice",
+                    content="alpha-before",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T17:59:00+00:00",
+                ),
+                DiscordMessage(
+                    id="701",
+                    channel_id="123",
+                    guild_id="guild",
+                    author_id="1",
+                    author_name="Alice",
+                    content="alpha-after",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:00:30+00:00",
+                ),
+            ],
+            "789": [
+                DiscordMessage(
+                    id="800",
+                    channel_id="789",
+                    guild_id="guild",
+                    author_id="2",
+                    author_name="Bob",
+                    content="beta-before",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T17:58:00+00:00",
+                ),
+                DiscordMessage(
+                    id="801",
+                    channel_id="789",
+                    guild_id="guild",
+                    author_id="2",
+                    author_name="Bob",
+                    content="beta-after",
+                    attachments=(),
+                    embeds=(),
+                    stickers=(),
+                    role_ids=set(),
+                    timestamp="2023-12-03T18:01:00+00:00",
+                ),
+            ],
+        }
+
+        with patch(
+            "forward_monitor.telegram._utcnow",
+            return_value=datetime(2023, 12, 3, 18, 0, tzinfo=timezone.utc),
+        ):
+            admin.args = "2 all"
+            await controller._dispatch("send_recent", admin)
+
+        forwarded = "\n".join(
+            text for text in api.messages if "📣 <b>" in text and "💬" in text
+        )
+
+        assert "alpha-before" in forwarded
+        assert "beta-before" in forwarded
+        assert "alpha-after" not in forwarded
+        assert "beta-after" not in forwarded
+
+    asyncio.run(runner())
 
 def test_set_healthcheck_updates_interval(tmp_path: Path) -> None:
     async def runner() -> None:

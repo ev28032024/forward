@@ -104,7 +104,12 @@ def _parse_discord_timestamp(value: str | None) -> datetime | None:
 
 
 def _message_timestamp(message: "DiscordMessage") -> datetime | None:
-    return _parse_discord_timestamp(message.edited_timestamp or message.timestamp)
+    """Return the original creation timestamp for sorting purposes."""
+
+    created = _parse_discord_timestamp(message.timestamp)
+    if created is not None:
+        return created
+    return _parse_discord_timestamp(message.edited_timestamp)
 
 
 def _message_id_sort_key(message_id: str) -> tuple[int, str]:
@@ -120,6 +125,32 @@ def _message_order_key(message: "DiscordMessage") -> tuple[datetime, tuple[int, 
     if moment is None:
         moment = datetime.fromtimestamp(0, timezone.utc)
     return (moment, _message_id_sort_key(message.id))
+
+
+def _prepare_recent_messages(
+    messages: Sequence["DiscordMessage"], *, invocation_time: datetime
+) -> list["DiscordMessage"]:
+    """Deduplicate and sort messages up to the invocation moment."""
+
+    seen_ids: set[str] = set()
+    epoch = datetime.fromtimestamp(0, timezone.utc)
+    sortable: list[tuple[tuple[datetime, tuple[int, str], int], "DiscordMessage"]] = []
+    for index, message in enumerate(messages):
+        if message.id in seen_ids:
+            continue
+        seen_ids.add(message.id)
+        moment = _message_timestamp(message)
+        if moment is not None and moment > invocation_time:
+            continue
+        key = (
+            moment or epoch,
+            _message_id_sort_key(message.id),
+            index,
+        )
+        sortable.append((key, message))
+
+    sortable.sort(key=lambda item: item[0])
+    return [message for _, message in sortable]
 
 
 class TelegramAPIProtocol(Protocol):
@@ -1830,23 +1861,17 @@ class TelegramController:
                 _record("сообщения не найдены")
                 continue
 
-            seen_ids: set[str] = set()
-            eligible: list[DiscordMessage] = []
-            for msg in messages:
-                if msg.id in seen_ids:
-                    continue
-                seen_ids.add(msg.id)
-                moment = _message_timestamp(msg)
-                if moment and moment > invocation_time:
-                    continue
-                eligible.append(msg)
+            eligible = _prepare_recent_messages(
+                messages, invocation_time=invocation_time
+            )
 
             if not eligible:
                 _record("подходящих сообщений не найдено")
                 continue
 
-            eligible.sort(key=_message_order_key)
+            total_candidates = len(eligible)
             subset = eligible[-limit:]
+            processed_candidates = len(subset)
 
             engine = FilterEngine(channel.filters)
             last_seen = marker
@@ -1897,8 +1922,6 @@ class TelegramController:
                 self._store.set_last_message(channel.storage_id, last_seen)
                 state_changed = True
 
-            total_candidates = len(eligible)
-            processed_candidates = len(subset)
             if forwarded:
                 note_parts = [
                     f"переслано {forwarded} из {processed_candidates} сообщений"
