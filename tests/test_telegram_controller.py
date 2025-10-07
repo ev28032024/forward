@@ -393,3 +393,112 @@ def test_controller_registers_bot_commands(tmp_path: Path) -> None:
         assert api.commands == expected
 
     asyncio.run(runner())
+
+
+def test_help_lists_all_commands(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
+
+        ctx = CommandContext(
+            chat_id=1,
+            user_id=42,
+            username="Explorer",
+            handle="explorer",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("help", ctx)
+        combined = "\n".join(text for _, text in api.messages)
+        for info in BOT_COMMANDS:
+            assert f"/{info.name}" in combined
+
+    asyncio.run(runner())
+
+
+def test_list_channels_grouped_output(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
+
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="Admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+        await controller._dispatch("claim", admin)
+
+        store.add_channel("100", "-1001", "Alpha")
+        store.add_channel("200", "-1001", "Beta", telegram_thread_id=2)
+        store.add_channel("300", "-1002", "Gamma")
+        store.set_health_status("channel.200", "error", "Нет доступа")
+
+        api.messages.clear()
+        await controller._dispatch("list_channels", admin)
+        payload = "\n".join(text for _, text in api.messages)
+
+        assert payload.count("💬 <b>Telegram") == 2
+        assert "Alpha" in payload and "Beta" in payload and "Gamma" in payload
+        assert payload.index("Alpha") < payload.index("Beta")
+        assert "Тема: <code>2</code>" in payload
+        assert "Нет доступа" in payload
+
+    asyncio.run(runner())
+
+
+def test_status_groups_channels_by_chat(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
+
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="Admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+        await controller._dispatch("claim", admin)
+
+        store.add_channel("100", "-1001", "Alpha")
+        store.add_channel("200", "-1001", "Beta", telegram_thread_id=2)
+        store.add_channel("300", "-1002", "Gamma")
+        store.set_health_status("channel.200", "error", "Нет доступа")
+
+        api.messages.clear()
+        await controller._dispatch("status", admin)
+        combined = "\n".join(text for _, text in api.messages)
+
+        assert combined.count("💬 <b>Telegram") == 2
+        first_idx = combined.index("-1001")
+        second_idx = combined.index("-1002")
+        assert first_idx < second_idx
+        first_group = combined[first_idx:second_idx]
+        assert "Alpha" in first_group and "Beta" in first_group
+        assert "Gamma" in combined[second_idx:]
+        assert "Тема: <code>2</code>" in combined
+
+    asyncio.run(runner())
