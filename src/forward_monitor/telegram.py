@@ -229,10 +229,6 @@ def _thread_sort_key(thread_id: int | None) -> tuple[int, int]:
     return (1, thread_id)
 
 
-def _thread_separator(*, indent: int = 1, width: int = 28) -> str:
-    return f"{_INDENT * indent}<code>{'─' * width}</code>"
-
-
 def _format_thread_title(thread_id: int | None) -> str:
     if thread_id is None:
         return "Основной чат"
@@ -243,7 +239,6 @@ def _format_channel_groups(
     grouped: Mapping[str, Mapping[int | None, Sequence[Any]]],
     *,
     render_entry: Callable[[Any], tuple[str, str, Sequence[tuple[int, str | None, str]]]],
-    separator_width: int = 28,
 ) -> list[str]:
     lines: list[str] = []
     for chat_id, threads in sorted(grouped.items(), key=lambda item: _chat_sort_key(item[0])):
@@ -259,14 +254,7 @@ def _format_channel_groups(
         ):
             if index > 0:
                 lines.append("")
-            lines.append(_thread_separator(indent=1, width=separator_width))
-            lines.append(
-                _panel_bullet(
-                    f"<b>{_format_thread_title(thread_id)}</b>",
-                    indent=1,
-                    icon="🧵",
-                )
-            )
+            lines.append(f"{_INDENT}🧵 <b>{_format_thread_title(thread_id)}</b>")
             for record in sorted(
                 items,
                 key=lambda item: _channel_sort_key(
@@ -1246,25 +1234,25 @@ class TelegramController:
 
                 extra_rows: list[tuple[int, str | None, str]] = []
                 if health_message:
-                    extra_rows.append((3, "🩺", html.escape(health_message)))
+                    extra_rows.append((3, None, html.escape(health_message)))
                 if not channel.active:
-                    extra_rows.append((3, "⏸️", html.escape("Канал отключён.")))
-                extra_rows.extend(
-                    [
-                        (3, "🎯", f"Режим: {html.escape(mode_label)}"),
-                        (3, "🖼️", f"Предпросмотр: {html.escape(preview_label)}"),
-                        (
-                            3,
-                            "🧾",
-                            (
-                                f"Максимальная длина: {channel.formatting.max_length} "
-                                "символов"
-                            ),
-                        ),
-                        (3, "🔗", f"Ссылка на Discord: {html.escape(link_channel_desc)}"),
-                        (3, "📎", f"Вложения: {html.escape(attachment_mode)}"),
-                    ]
-                )
+                    extra_rows.append((3, None, html.escape("Канал отключён.")))
+
+                details = [
+                    ("Режим", mode_label),
+                    ("Предпросмотр", preview_label),
+                    (
+                        "Максимальная длина",
+                        f"{channel.formatting.max_length} символов",
+                    ),
+                    ("Ссылка на Discord", link_channel_desc),
+                    ("Вложения", attachment_mode),
+                ]
+
+                for title, value in details:
+                    extra_rows.append(
+                        (3, None, f"{title}: {html.escape(str(value))}")
+                    )
 
                 channel_filter_sets = _collect_filter_sets(channel.filters)
                 extra_filters = {
@@ -1276,18 +1264,24 @@ class TelegramController:
                     for key in _FILTER_TYPES
                 }
                 if any(extra_filters[name] for name in _FILTER_TYPES):
-                    extra_rows.append((3, "🎛️", "Дополнительные фильтры"))
-                    for filter_line in _describe_filters(
-                        extra_filters, indent="", empty_message=""
-                    ):
-                        extra_rows.append((4, None, filter_line))
+                    extra_rows.append((3, None, "Дополнительные фильтры:"))
+                    for filter_type in _FILTER_TYPES:
+                        values = extra_filters.get(filter_type, {})
+                        if not values:
+                            continue
+                        filter_label = html.escape(
+                            _FILTER_LABELS.get(filter_type, filter_type)
+                        )
+                        extra_rows.append((4, None, f"{filter_label}:"))
+                        for display in sorted(values.values(), key=str.lower):
+                            extra_rows.append((5, None, html.escape(display)))
                 else:
                     message = (
                         "Дополнительных фильтров нет, используются глобальные."
                         if has_default_filters
                         else "Дополнительные фильтры отсутствуют."
                     )
-                    extra_rows.append((3, "🎛️", html.escape(message)))
+                    extra_rows.append((3, None, html.escape(message)))
 
                 return status_icon, header, extra_rows
 
@@ -2145,9 +2139,9 @@ class TelegramController:
             header = f"<b>{label}</b> · Discord <code>{discord_id}</code>"
             extra: list[tuple[int, str | None, str]] = []
             if health_message:
-                extra.append((3, "🩺", html.escape(health_message)))
+                extra.append((3, None, html.escape(health_message)))
             if not record.active:
-                extra.append((3, "⏸️", html.escape("Связка отключена.")))
+                extra.append((3, None, html.escape("Связка отключена.")))
             return status_icon, header, extra
 
         lines.extend(
