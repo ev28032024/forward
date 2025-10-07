@@ -21,6 +21,7 @@ _MESSAGE_KIND_LABELS = {
     "pinned": "Закреплённое сообщение",
 }
 _CHANNEL_ICON = "📣"
+_MESSAGE_SEPARATOR = "<b>━━━━━━━━━━━━━━━━━━━━━━━━━━</b>"
 
 
 def format_discord_message(
@@ -40,25 +41,31 @@ def format_discord_message(
     )
     link_block = _build_link_block(message, formatting.show_discord_link)
 
-    blocks: list[str] = []
+    inner_blocks: list[str] = []
     header = _build_header(channel.label, message.author_name, message_kind)
     if header:
-        blocks.append(header)
+        inner_blocks.append(header)
 
     if content:
-        blocks.append(_format_text_block(content))
+        inner_blocks.append(_format_text_block(content))
     for embed in embed_blocks:
-        blocks.append(_format_text_block(embed))
+        inner_blocks.append(_format_text_block(embed))
     if attachments_block:
-        blocks.append(attachments_block)
+        inner_blocks.append(attachments_block)
     if link_block:
-        blocks.append(link_block)
+        inner_blocks.append(link_block)
 
     date_line = _format_timestamp_line(message)
     if date_line:
-        blocks.append(date_line)
+        inner_blocks.append(date_line)
 
-    combined = "\n\n".join(block for block in blocks if block)
+    decorated_blocks: list[str] = []
+    separator = _MESSAGE_SEPARATOR
+    decorated_blocks.append(separator)
+    decorated_blocks.extend(block for block in inner_blocks if block)
+    decorated_blocks.append(separator)
+
+    combined = "\n\n".join(block for block in decorated_blocks if block)
     chunks = _chunk_html_text(combined, formatting.max_length, formatting.ellipsis)
 
     return FormattedTelegramMessage(
