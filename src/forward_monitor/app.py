@@ -571,6 +571,15 @@ class ForwardMonitorApp:
     ) -> None:
         if not channel.active or channel.blocked_by_health:
             return
+
+        baseline = channel.added_at
+        if baseline is not None and baseline.tzinfo is None:
+            baseline = baseline.replace(tzinfo=timezone.utc)
+        startup = self._startup_time
+        cutoff_ts = startup
+        if baseline is not None and baseline > cutoff_ts:
+            cutoff_ts = baseline
+        cutoff_marker = _discord_snowflake_from_datetime(cutoff_ts)
         try:
             messages = await discord_client.fetch_pinned_messages(channel.discord_id)
         except asyncio.CancelledError:
@@ -622,6 +631,24 @@ class ForwardMonitorApp:
             if self._refresh_event.is_set():
                 interrupted = True
                 break
+            candidate_id = msg.id
+            if cutoff_marker is not None and candidate_id.isdigit():
+                candidate_numeric = int(candidate_id)
+                if candidate_numeric <= cutoff_marker:
+                    processed_ids.add(candidate_id)
+                    continue
+            message_timestamp = _parse_discord_timestamp(msg.timestamp)
+            if message_timestamp is not None and message_timestamp.tzinfo is None:
+                message_timestamp = message_timestamp.replace(tzinfo=timezone.utc)
+            if message_timestamp is not None and message_timestamp <= cutoff_ts:
+                processed_ids.add(candidate_id)
+                continue
+            if (
+                msg.message_type not in _FORWARDABLE_MESSAGE_TYPES
+                and not (msg.attachments or msg.embeds)
+            ):
+                processed_ids.add(candidate_id)
+                continue
             decision = engine.evaluate(msg)
             if not decision.allowed:
                 processed_ids.add(msg.id)

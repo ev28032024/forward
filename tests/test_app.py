@@ -356,6 +356,187 @@ def test_monitor_skips_messages_before_restart(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_pinned_monitor_skips_messages_before_start(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        record = store.add_channel("discord", "telegram", label="Test")
+        store.set_channel_option(record.id, "monitoring.mode", "pinned")
+        store.set_known_pinned_messages(record.id, [])
+        store.set_pinned_synced(record.id, synced=True)
+        store.close()
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        startup_time = datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc)
+        app._startup_time = startup_time
+
+        state = app._reload_state()
+        channel = state.channels[0]
+        assert channel.pinned_only is True
+
+        old_time = startup_time - timedelta(days=1)
+        old_id = str(_discord_snowflake_from_datetime(old_time))
+
+        old_message = DiscordMessage(
+            id=old_id,
+            channel_id=channel.discord_id,
+            guild_id="guild",
+            author_id="42",
+            author_name="Old",
+            content="Pinned before start",
+            attachments=(),
+            embeds=(),
+            stickers=(),
+            role_ids=set(),
+            timestamp=old_time.isoformat(),
+            message_type=0,
+        )
+
+        class PinnedDiscord:
+            async def fetch_pinned_messages(self, channel_id: str) -> list[DiscordMessage]:
+                return [old_message]
+
+        class RecordingTelegram:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send_message(
+                self,
+                chat_id: int | str,
+                text: str,
+                *,
+                parse_mode: str | None = None,
+                disable_preview: bool = True,
+                message_thread_id: int | None = None,
+            ) -> None:
+                self.sent.append(text)
+
+            async def send_photo(
+                self,
+                chat_id: int | str,
+                photo: str,
+                *,
+                caption: str | None = None,
+                parse_mode: str | None = None,
+                message_thread_id: int | None = None,
+            ) -> None:
+                raise AssertionError("photos are not expected")
+
+        telegram_api = RecordingTelegram()
+        runtime = RuntimeOptions()
+        telegram_rate = RateLimiter(1000)
+
+        app._refresh_event.clear()
+
+        await app._process_channel(
+            channel,
+            cast(DiscordClient, PinnedDiscord()),
+            cast(TelegramAPI, telegram_api),
+            telegram_rate,
+            runtime,
+        )
+
+        assert telegram_api.sent == []
+        assert old_id in channel.known_pinned_ids
+
+        refreshed = app._store.load_channel_configurations()
+        assert refreshed and old_id in refreshed[0].known_pinned_ids
+
+        app._store.close()
+
+    asyncio.run(runner())
+
+
+def test_pinned_monitor_records_unforwardable_messages(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        record = store.add_channel("discord", "telegram", label="Test")
+        store.set_channel_option(record.id, "monitoring.mode", "pinned")
+        store.set_known_pinned_messages(record.id, [])
+        store.set_pinned_synced(record.id, synced=True)
+        store.close()
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        startup_time = datetime(2023, 1, 1, 12, 0, tzinfo=timezone.utc)
+        app._startup_time = startup_time
+
+        state = app._reload_state()
+        channel = state.channels[0]
+
+        recent_time = startup_time + timedelta(minutes=5)
+        system_id = str(_discord_snowflake_from_datetime(recent_time))
+
+        system_message = DiscordMessage(
+            id=system_id,
+            channel_id=channel.discord_id,
+            guild_id="guild",
+            author_id="99",
+            author_name="System",
+            content="System notice",
+            attachments=(),
+            embeds=(),
+            stickers=(),
+            role_ids=set(),
+            timestamp=recent_time.isoformat(),
+            message_type=6,
+        )
+
+        class PinnedDiscord:
+            async def fetch_pinned_messages(self, channel_id: str) -> list[DiscordMessage]:
+                return [system_message]
+
+        class RecordingTelegram:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send_message(
+                self,
+                chat_id: int | str,
+                text: str,
+                *,
+                parse_mode: str | None = None,
+                disable_preview: bool = True,
+                message_thread_id: int | None = None,
+            ) -> None:
+                self.sent.append(text)
+
+            async def send_photo(
+                self,
+                chat_id: int | str,
+                photo: str,
+                *,
+                caption: str | None = None,
+                parse_mode: str | None = None,
+                message_thread_id: int | None = None,
+            ) -> None:
+                raise AssertionError("photos are not expected")
+
+        telegram_api = RecordingTelegram()
+        runtime = RuntimeOptions()
+        telegram_rate = RateLimiter(1000)
+
+        app._refresh_event.clear()
+
+        await app._process_channel(
+            channel,
+            cast(DiscordClient, PinnedDiscord()),
+            cast(TelegramAPI, telegram_api),
+            telegram_rate,
+            runtime,
+        )
+
+        assert telegram_api.sent == []
+        assert system_id in channel.known_pinned_ids
+
+        refreshed = app._store.load_channel_configurations()
+        assert refreshed and system_id in refreshed[0].known_pinned_ids
+
+        app._store.close()
+
+    asyncio.run(runner())
+
+
 def test_monitor_waits_for_health_before_processing(tmp_path: Path) -> None:
     async def runner() -> None:
         db_path = tmp_path / "db.sqlite"
