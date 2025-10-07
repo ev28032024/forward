@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, cast
+from unittest.mock import patch
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
@@ -498,6 +500,88 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_send_recent_sends_messages_in_chronological_order(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="202",
+                channel_id="123",
+                guild_id="guild",
+                author_id="2",
+                author_name="Bob",
+                content="third",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp="2023-12-03T18:05:00+00:00",
+            ),
+            DiscordMessage(
+                id="200",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="Alice",
+                content="first",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp="2023-12-03T18:00:00+00:00",
+            ),
+            DiscordMessage(
+                id="201",
+                channel_id="123",
+                guild_id="guild",
+                author_id="3",
+                author_name="Carol",
+                content="second",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp="2023-12-03T18:02:00+00:00",
+            ),
+        ]
+
+        admin.args = "3 123"
+        await controller._dispatch("send_recent", admin)
+
+        indices = {
+            label: next(
+                i for i, text in enumerate(api.messages) if label in text
+            )
+            for label in ("first", "second", "third")
+        }
+        assert indices["first"] < indices["second"] < indices["third"]
+
+    asyncio.run(runner())
+
+
 def test_send_recent_only_new_messages(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
@@ -589,14 +673,14 @@ def test_send_recent_only_new_messages(tmp_path: Path) -> None:
         assert any("new-three" in message for message in api.messages)
         assert any("new-two" in message for message in api.messages)
         assert all("new-one" not in message for message in api.messages)
-        assert any("осталось ещё 1 сообщений" in message for message in api.messages)
+        assert any("осталось ещё 2 сообщений" in message for message in api.messages)
 
     import asyncio
 
     asyncio.run(runner())
 
 
-def test_send_recent_ignores_history_when_not_requested(tmp_path: Path) -> None:
+def test_send_recent_includes_recent_history(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
         store.set_setting("discord.token", "token")
@@ -686,12 +770,149 @@ def test_send_recent_ignores_history_when_not_requested(tmp_path: Path) -> None:
         joined = "\n".join(api.messages)
         assert "fresh-top" in joined
         assert "fresh-second" in joined
-        assert "history-first" not in joined
-        assert not any(
-            "осталось ещё" in message for message in api.messages
+        assert "history-first" in joined
+        assert "history-second" not in joined
+        assert any(
+            "осталось ещё 1 сообщений" in message for message in api.messages
         )
 
     import asyncio
+
+    asyncio.run(runner())
+
+
+def test_send_recent_respects_invocation_time(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        dummy_client.messages = [
+            DiscordMessage(
+                id="301",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="Alice",
+                content="before",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp="2023-12-03T17:59:00+00:00",
+            ),
+            DiscordMessage(
+                id="302",
+                channel_id="123",
+                guild_id="guild",
+                author_id="2",
+                author_name="Bob",
+                content="after",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp="2023-12-03T18:00:05+00:00",
+            ),
+        ]
+
+        with patch(
+            "forward_monitor.telegram._utcnow",
+            return_value=datetime(2023, 12, 3, 18, 0, tzinfo=timezone.utc),
+        ):
+            admin.args = "3 123"
+            await controller._dispatch("send_recent", admin)
+
+        assert any("before" in message for message in api.messages)
+        assert all("after" not in message for message in api.messages)
+
+    asyncio.run(runner())
+
+
+def test_send_recent_deduplicates_messages(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+        admin.args = "123 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        duplicate = DiscordMessage(
+            id="401",
+            channel_id="123",
+            guild_id="guild",
+            author_id="2",
+            author_name="Bob",
+            content="duplicate",
+            attachments=(),
+            embeds=(),
+            stickers=(),
+            role_ids=set(),
+            timestamp="2023-12-03T18:10:00+00:00",
+        )
+        dummy_client.messages = [
+            DiscordMessage(
+                id="400",
+                channel_id="123",
+                guild_id="guild",
+                author_id="1",
+                author_name="Alice",
+                content="first",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp="2023-12-03T18:05:00+00:00",
+            ),
+            duplicate,
+            duplicate,
+        ]
+
+        admin.args = "3 123"
+        await controller._dispatch("send_recent", admin)
+
+        duplicate_occurrences = [
+            message for message in api.messages if "duplicate" in message
+        ]
+        assert len(duplicate_occurrences) == 1
 
     asyncio.run(runner())
 
