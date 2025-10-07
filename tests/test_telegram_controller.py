@@ -456,7 +456,7 @@ def test_list_channels_grouped_output(tmp_path: Path) -> None:
         assert payload.count("💬 <b>Telegram") == 2
         assert "Alpha" in payload and "Beta" in payload and "Gamma" in payload
         assert payload.index("Alpha") < payload.index("Beta")
-        assert "Тема: <code>2</code>" in payload
+        assert "🧵 <b>Тема <code>2</code></b>" in payload
         assert "Нет доступа" in payload
 
     asyncio.run(runner())
@@ -499,6 +499,6 @@ def test_status_groups_channels_by_chat(tmp_path: Path) -> None:
         first_group = combined[first_idx:second_idx]
         assert "Alpha" in first_group and "Beta" in first_group
         assert "Gamma" in combined[second_idx:]
-        assert "Тема: <code>2</code>" in combined
+        assert "🧵 <b>Тема <code>2</code></b>" in combined
 
     asyncio.run(runner())
