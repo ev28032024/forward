@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Iterable, cast
+from typing import AsyncIterator, Iterable, cast
 
 from forward_monitor.config_store import ConfigStore
 from forward_monitor.discord import DiscordClient, ProxyCheckResult, TokenCheckResult
-from forward_monitor.models import NetworkOptions
+from forward_monitor.models import DiscordMessage, NetworkOptions
 from forward_monitor.telegram import BOT_COMMANDS, CommandContext, TelegramController
+from forward_monitor.utils import ChannelProcessingGuard
 
 
 class DummyAPI:
@@ -502,5 +504,90 @@ def test_status_groups_channels_by_chat(tmp_path: Path) -> None:
         assert "Gamma" in combined[second_idx:]
         normalized_combined = combined.replace("\u00A0", " ")
         assert "🧵 <b>Тема <code>2</code></b>" in normalized_combined
+
+    asyncio.run(runner())
+
+
+def test_manual_forward_uses_channel_guard(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+
+        class ManualDiscord(DummyDiscordClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.token: str | None = None
+                self.options: NetworkOptions | None = None
+
+            def set_token(self, token: str | None) -> None:
+                self.token = token
+
+            def set_network_options(self, options: NetworkOptions) -> None:
+                self.options = options
+
+            async def fetch_messages(
+                self,
+                channel_id: str,
+                *,
+                limit: int = 50,
+                after: str | None = None,
+                before: str | None = None,
+            ) -> list[DiscordMessage]:
+                return [
+                    DiscordMessage(
+                        id="1001",
+                        channel_id=channel_id,
+                        guild_id=None,
+                        author_id="42",
+                        author_name="Tester",
+                        content="hello",
+                        attachments=(),
+                        embeds=(),
+                        stickers=(),
+                        role_ids=set(),
+                    )
+                ]
+
+        class RecordingGuard(ChannelProcessingGuard):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls: list[str] = []
+
+            @asynccontextmanager
+            async def lock(self, key: str) -> AsyncIterator[None]:
+                self.calls.append(f"enter:{key}")
+                try:
+                    async with super().lock(key):
+                        yield
+                finally:
+                    self.calls.append(f"exit:{key}")
+
+        guard = RecordingGuard()
+        discord = ManualDiscord()
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, discord),
+            on_change=lambda: None,
+            channel_guard=guard,
+        )
+
+        store.add_admin(1, "admin")
+        store.set_setting("discord.token", "token")
+        store.add_channel("123", "456", label="Demo")
+
+        ctx = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="Admin",
+            handle="admin",
+            args="1 123",
+            message={},
+        )
+
+        await controller._dispatch("send_recent", ctx)
+
+        assert guard.calls == ["enter:123", "exit:123"]
+        assert any(chat_id == 1 for chat_id, _ in api.messages)
 
     asyncio.run(runner())

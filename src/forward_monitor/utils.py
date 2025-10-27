@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import AsyncIterator
 
 try:  # pragma: no cover - zoneinfo availability depends on platform
     from zoneinfo import ZoneInfo
@@ -31,6 +33,24 @@ class RateLimiter:
             if now < self._next_time:
                 await asyncio.sleep(self._next_time - now)
             self._next_time = time.perf_counter() + self._interval
+
+
+class ChannelProcessingGuard:
+    """Coordinate access to channel-specific operations across coroutines."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._registry_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def lock(self, channel_id: str) -> AsyncIterator[None]:
+        async with self._registry_lock:
+            lock = self._locks.get(channel_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[channel_id] = lock
+        async with lock:
+            yield
 
 
 def parse_delay_setting(value: str | None, default: float = 0.0) -> float:

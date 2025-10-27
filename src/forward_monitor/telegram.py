@@ -33,7 +33,13 @@ from .discord import DiscordClient
 from .filters import FilterEngine
 from .formatting import format_discord_message
 from .models import DiscordMessage, FilterConfig, FormattedTelegramMessage
-from .utils import RateLimiter, as_moscow_time, normalize_username, parse_delay_setting
+from .utils import (
+    ChannelProcessingGuard,
+    RateLimiter,
+    as_moscow_time,
+    normalize_username,
+    parse_delay_setting,
+)
 
 if TYPE_CHECKING:
     from .models import ChannelConfig
@@ -599,6 +605,7 @@ class TelegramController:
         *,
         discord_client: DiscordClient,
         on_change: Callable[[], None],
+        channel_guard: ChannelProcessingGuard | None = None,
     ) -> None:
         self._api = api
         self._store = store
@@ -609,6 +616,7 @@ class TelegramController:
         self._on_change = on_change
         self._commands_registered = False
         self._stop_requested = False
+        self._channel_guard = channel_guard
 
     async def run(self) -> None:
         self._running = True
@@ -2279,18 +2287,21 @@ class TelegramController:
             return _message_id_sort_key(message_id) > _message_id_sort_key(marker)
 
         invocation_time = _utcnow()
+        guard = self._channel_guard
 
-        for channel in selected:
-            raw_label = channel.label or channel.discord_id
+        async def process_single_channel(channel_cfg: ChannelConfig) -> None:
+            nonlocal total_forwarded, state_changed
+
+            raw_label = channel_cfg.label or channel_cfg.discord_id
             label = html.escape(raw_label)
-            mode = "pinned" if channel.pinned_only else "messages"
+            mode = "pinned" if channel_cfg.pinned_only else "messages"
             forwarded = 0
 
             def _record(note_text: str, forwarded_count: int = 0) -> None:
                 summary_lines.append(f"{label}: {note_text}")
                 activity_entries.append(
                     ManualForwardEntry(
-                        discord_id=channel.discord_id,
+                        discord_id=channel_cfg.discord_id,
                         label=raw_label,
                         forwarded=forwarded_count,
                         mode=mode,
@@ -2298,142 +2309,133 @@ class TelegramController:
                     )
                 )
 
-            if not channel.active:
+            if not channel_cfg.active:
                 _record("канал отключён, пропущено")
-                continue
-            if channel.blocked_by_health:
+                return
+            if channel_cfg.blocked_by_health:
                 _record("канал недоступен по результатам health-check, пропущено")
-                continue
+                return
 
-            if channel.pinned_only:
+            if channel_cfg.pinned_only:
                 try:
                     messages = await self._discord.fetch_pinned_messages(
-                        channel.discord_id
+                        channel_cfg.discord_id
                     )
                 except Exception:
                     logger.exception(
                         "Не удалось получить закреплённые сообщения канала %s при ручной пересылке",
-                        channel.discord_id,
+                        channel_cfg.discord_id,
                     )
                     _record("ошибка при запросе закреплённых сообщений")
-                    continue
+                    return
 
                 current_ids = {msg.id for msg in messages}
-                previous_known = set(channel.known_pinned_ids)
+                previous_known = set(channel_cfg.known_pinned_ids)
 
                 if not messages:
                     if (
-                        channel.storage_id is not None
-                        and channel.known_pinned_ids
+                        channel_cfg.storage_id is not None
+                        and channel_cfg.known_pinned_ids
                     ):
-                        self._store.set_known_pinned_messages(channel.storage_id, [])
-                        channel.known_pinned_ids = set()
+                        self._store.set_known_pinned_messages(channel_cfg.storage_id, [])
+                        channel_cfg.known_pinned_ids = set()
                         state_changed = True
                     _record("закреплённых сообщений нет")
-                    continue
+                    return
 
-                if not channel.pinned_synced:
-                    if channel.storage_id is not None:
+                if not channel_cfg.pinned_synced:
+                    if channel_cfg.storage_id is not None:
                         self._store.set_known_pinned_messages(
-                            channel.storage_id, current_ids
+                            channel_cfg.storage_id, current_ids
                         )
-                        self._store.set_pinned_synced(channel.storage_id, synced=True)
-                        channel.known_pinned_ids = set(current_ids)
-                        channel.pinned_synced = True
+                        self._store.set_pinned_synced(
+                            channel_cfg.storage_id, synced=True
+                        )
+                        channel_cfg.known_pinned_ids = set(current_ids)
+                        channel_cfg.pinned_synced = True
                         state_changed = True
                     else:
-                        channel.pinned_synced = True
+                        channel_cfg.pinned_synced = True
                     _record("закреплённые синхронизированы, новых нет")
-                    continue
+                    return
 
                 ordered = sorted(messages, key=_message_order_key)
                 subset = ordered[-limit:]
                 if not subset:
                     _record("закреплённых сообщений нет")
-                    continue
+                    return
 
-                engine = FilterEngine(channel.filters)
+                engine = FilterEngine(channel_cfg.filters)
                 processed_new_ids: set[str] = set()
 
                 for msg in subset:
                     candidate_id = msg.id
                     if candidate_id not in previous_known:
+                        decision = engine.evaluate(msg)
+                        if decision.allowed:
+                            formatted = format_discord_message(
+                                msg, channel_cfg, message_kind="pinned"
+                            )
+                            try:
+                                await limiter.wait()
+                                await send_formatted(
+                                    self._api,
+                                    channel_cfg.telegram_chat_id,
+                                    formatted,
+                                    thread_id=channel_cfg.telegram_thread_id,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Не удалось отправить закреплённое сообщение %s "
+                                    "в Telegram чат %s",
+                                    msg.id,
+                                    channel_cfg.telegram_chat_id,
+                                )
+                                continue
+                            forwarded += 1
+                            total_forwarded += 1
+                            processed_new_ids.add(candidate_id)
+                    else:
                         processed_new_ids.add(candidate_id)
-                    if (
-                        msg.message_type not in _FORWARDABLE_MESSAGE_TYPES
-                        and not (msg.attachments or msg.embeds)
-                    ):
-                        continue
-                    decision = engine.evaluate(msg)
-                    if not decision.allowed:
-                        continue
-                    formatted = format_discord_message(
-                        msg, channel, message_kind="pinned"
-                    )
-                    try:
-                        await limiter.wait()
-                        await send_formatted(
-                            self._api,
-                            channel.telegram_chat_id,
-                            formatted,
-                            thread_id=channel.telegram_thread_id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Не удалось отправить закреплённое сообщение %s "
-                            "в Telegram чат %s при ручной пересылке",
-                            msg.id,
-                            channel.telegram_chat_id,
-                        )
-                        continue
-                    forwarded += 1
-                    total_forwarded += 1
 
-                base_known = previous_known & current_ids
-                updated_known = base_known | processed_new_ids
                 if (
-                    channel.storage_id is not None
-                    and updated_known != channel.known_pinned_ids
+                    channel_cfg.storage_id is not None
+                    and processed_new_ids
+                    and processed_new_ids != previous_known
                 ):
                     self._store.set_known_pinned_messages(
-                        channel.storage_id, updated_known
+                        channel_cfg.storage_id, processed_new_ids
                     )
-                    self._store.set_pinned_synced(channel.storage_id, synced=True)
-                    channel.known_pinned_ids = set(updated_known)
-                    channel.pinned_synced = True
+                    channel_cfg.known_pinned_ids = set(processed_new_ids)
                     state_changed = True
 
-                note_parts = []
                 if forwarded:
-                    note_parts.append(
-                        f"переслано {forwarded} закреплённых из {len(subset)} сообщений"
+                    _record(
+                        f"переслано {forwarded} закреплённых из {len(subset)} сообщений",
+                        forwarded,
                     )
                 else:
-                    note_parts.append("подходящих закреплённых сообщений не найдено")
-                remaining = len(ordered) - len(subset)
-                if remaining > 0:
-                    note_parts.append(f"осталось ещё {remaining} сообщений")
-                _record(", ".join(note_parts), forwarded)
-                continue
+                    _record("подходящих закреплённых сообщений не найдено")
+                return
 
-            marker = channel.last_message_id
+            marker = channel_cfg.last_message_id
             fetch_limit = min(100, max(limit + 5, 2 * limit))
             try:
                 messages = await self._discord.fetch_messages(
-                    channel.discord_id,
+                    channel_cfg.discord_id,
                     limit=fetch_limit,
                 )
             except Exception:
                 logger.exception(
                     "Не удалось получить сообщения канала %s при ручной пересылке",
-                    channel.discord_id,
+                    channel_cfg.discord_id,
                 )
                 _record("ошибка при запросе сообщений")
-                continue
+                return
 
             if not messages:
                 _record("сообщения не найдены")
-                continue
+                return
 
             eligible = _prepare_recent_messages(
                 messages, invocation_time=invocation_time
@@ -2441,13 +2443,13 @@ class TelegramController:
 
             if not eligible:
                 _record("подходящих сообщений не найдено")
-                continue
+                return
 
             total_candidates = len(eligible)
             subset = eligible[-limit:]
             processed_candidates = len(subset)
 
-            engine = FilterEngine(channel.filters)
+            engine = FilterEngine(channel_cfg.filters)
             last_seen = marker
             for msg in subset:
                 candidate_id = msg.id
@@ -2464,21 +2466,21 @@ class TelegramController:
                         last_seen = candidate_id
                     continue
                 formatted = format_discord_message(
-                    msg, channel, message_kind="message"
+                    msg, channel_cfg, message_kind="message"
                 )
                 try:
                     await limiter.wait()
                     await send_formatted(
                         self._api,
-                        channel.telegram_chat_id,
+                        channel_cfg.telegram_chat_id,
                         formatted,
-                        thread_id=channel.telegram_thread_id,
+                        thread_id=channel_cfg.telegram_thread_id,
                     )
                 except Exception:
                     logger.exception(
                         "Не удалось отправить сообщение %s в Telegram чат %s при ручной пересылке",
                         msg.id,
-                        channel.telegram_chat_id,
+                        channel_cfg.telegram_chat_id,
                     )
                     if is_newer(candidate_id, last_seen):
                         last_seen = candidate_id
@@ -2490,10 +2492,10 @@ class TelegramController:
 
             if (
                 last_seen
-                and channel.storage_id is not None
-                and last_seen != channel.last_message_id
+                and channel_cfg.storage_id is not None
+                and last_seen != channel_cfg.last_message_id
             ):
-                self._store.set_last_message(channel.storage_id, last_seen)
+                self._store.set_last_message(channel_cfg.storage_id, last_seen)
                 state_changed = True
 
             if forwarded:
@@ -2507,6 +2509,13 @@ class TelegramController:
                 note_parts.append(f"осталось ещё {remaining} сообщений")
             note = ", ".join(note_parts)
             _record(note, forwarded)
+
+        for channel in selected:
+            if guard is None:
+                await process_single_channel(channel)
+            else:
+                async with guard.lock(channel.discord_id):
+                    await process_single_channel(channel)
 
         if activity_entries:
             self._store.record_manual_forward_activity(

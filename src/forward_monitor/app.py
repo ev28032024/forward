@@ -20,7 +20,7 @@ from .filters import FilterEngine
 from .formatting import format_discord_message
 from .models import ChannelConfig, DiscordMessage, NetworkOptions, RuntimeOptions
 from .telegram import TelegramAPI, TelegramController, send_formatted
-from .utils import RateLimiter, parse_delay_setting
+from .utils import ChannelProcessingGuard, RateLimiter, parse_delay_setting
 
 
 def _parse_discord_timestamp(value: str | None) -> datetime | None:
@@ -110,6 +110,7 @@ class ForwardMonitorApp:
         self._config_version = 0
         self._health_version = -1
         self._startup_time = datetime.now(timezone.utc)
+        self._channel_guard = ChannelProcessingGuard()
         self._mark_config_dirty()
         self._refresh_event.set()
 
@@ -122,6 +123,7 @@ class ForwardMonitorApp:
                 self._store,
                 discord_client=discord_client,
                 on_change=self._signal_refresh,
+                channel_guard=self._channel_guard,
             )
 
             async def run_monitor() -> None:
@@ -478,11 +480,38 @@ class ForwardMonitorApp:
         telegram_rate: RateLimiter,
         runtime: RuntimeOptions,
     ) -> None:
+        guard = self._channel_guard
+        if guard is None:
+            await self._process_channel_inner(
+                channel,
+                discord_client,
+                telegram_api,
+                telegram_rate,
+                runtime,
+            )
+            return
+        async with guard.lock(channel.discord_id):
+            await self._process_channel_inner(
+                channel,
+                discord_client,
+                telegram_api,
+                telegram_rate,
+                runtime,
+            )
+
+    async def _process_channel_inner(
+        self,
+        channel: ChannelConfig,
+        discord_client: DiscordClient,
+        telegram_api: TelegramAPI,
+        telegram_rate: RateLimiter,
+        runtime: RuntimeOptions,
+    ) -> None:
         if not channel.active or channel.blocked_by_health:
             return
 
         if channel.pinned_only:
-            await self._process_pinned_channel(
+            await self._process_pinned_channel_inner(
                 channel,
                 discord_client,
                 telegram_api,
@@ -598,6 +627,33 @@ class ForwardMonitorApp:
                 self._store.set_last_message(channel.storage_id, last_seen)
 
     async def _process_pinned_channel(
+        self,
+        channel: ChannelConfig,
+        discord_client: DiscordClient,
+        telegram_api: TelegramAPI,
+        telegram_rate: RateLimiter,
+        runtime: RuntimeOptions,
+    ) -> None:
+        guard = self._channel_guard
+        if guard is None:
+            await self._process_pinned_channel_inner(
+                channel,
+                discord_client,
+                telegram_api,
+                telegram_rate,
+                runtime,
+            )
+            return
+        async with guard.lock(channel.discord_id):
+            await self._process_pinned_channel_inner(
+                channel,
+                discord_client,
+                telegram_api,
+                telegram_rate,
+                runtime,
+            )
+
+    async def _process_pinned_channel_inner(
         self,
         channel: ChannelConfig,
         discord_client: DiscordClient,
