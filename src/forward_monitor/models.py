@@ -104,6 +104,7 @@ class RuntimeOptions:
     max_delay_seconds: float = 0.0
     rate_per_second: float = 8.0
     healthcheck_interval: float = 180.0
+    deduplicate_messages: bool = False
 
 
 @dataclass(slots=True)

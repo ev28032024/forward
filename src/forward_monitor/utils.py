@@ -69,6 +69,26 @@ def parse_delay_setting(value: str | None, default: float = 0.0) -> float:
     return max(0.0, parsed)
 
 
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    """Parse textual boolean configuration values.
+
+    Supported truthy values: ``on``, ``true``, ``yes``, ``1`` (case-insensitive).
+    Supported falsy values: ``off``, ``false``, ``no``, ``0``.
+    Any other value returns ``default``.
+    """
+
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"on", "true", "yes", "1"}:
+        return True
+    if normalized in {"off", "false", "no", "0"}:
+        return False
+    return default
+
+
 def normalize_username(username: str | None) -> str | None:
     """Return a lowercase username without @ prefix."""
 
