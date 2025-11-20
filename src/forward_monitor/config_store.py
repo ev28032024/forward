@@ -12,7 +12,7 @@ from typing import Iterable, Iterator, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from .models import ChannelConfig, FilterConfig, FormattingOptions, NetworkOptions
-from .utils import normalize_username
+from .utils import normalize_username, parse_bool
 
 _DB_PRAGMA = "PRAGMA journal_mode=WAL;" "PRAGMA synchronous=NORMAL;" "PRAGMA foreign_keys=ON;"
 
@@ -700,6 +700,9 @@ class ConfigStore:
     def load_channel_configurations(self) -> list[ChannelConfig]:
         defaults = self._load_default_options()
         default_filters = self._load_filter_config(0)
+        default_deduplicate = parse_bool(
+            self.get_setting("runtime.deduplicate_messages"), False
+        )
         configs: list[ChannelConfig] = []
         for record in self.list_channels():
             ensured_added_at = self._ensure_channel_added_at(record.id, record.added_at)
@@ -710,6 +713,9 @@ class ConfigStore:
             pinned_only, known_pinned_ids, pinned_synced = _monitoring_from_options(
                 defaults.get("monitoring", {}), channel_options
             )
+            raw_deduplicate = channel_options.get("runtime.deduplicate_messages")
+            deduplicate_inherited = raw_deduplicate is None
+            deduplicate_messages = parse_bool(raw_deduplicate, default_deduplicate)
             health_status, health_message = self.get_health_status(
                 f"channel.{record.discord_id}"
             )
@@ -722,6 +728,8 @@ class ConfigStore:
                     label=record.label or record.discord_id,
                     formatting=channel_formatting,
                     filters=filters,
+                    deduplicate_messages=deduplicate_messages,
+                    deduplicate_inherited=deduplicate_inherited,
                     last_message_id=record.last_message_id,
                     active=record.active,
                     storage_id=record.id,

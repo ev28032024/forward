@@ -54,7 +54,9 @@ class ChannelConfig:
     label: str
     formatting: FormattingOptions
     filters: FilterConfig
-    last_message_id: str | None
+    deduplicate_messages: bool = False
+    deduplicate_inherited: bool = True
+    last_message_id: str | None = None
     active: bool = True
     storage_id: int | None = None
     added_at: datetime | None = None
@@ -80,6 +82,8 @@ class ChannelConfig:
             label=self.label,
             formatting=formatting or self.formatting,
             filters=filters or self.filters,
+            deduplicate_messages=self.deduplicate_messages,
+            deduplicate_inherited=self.deduplicate_inherited,
             last_message_id=(
                 last_message_id if last_message_id is not None else self.last_message_id
             ),
