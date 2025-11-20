@@ -29,6 +29,7 @@ from .config_store import (
     format_filter_value,
     normalize_filter_value,
 )
+from .deduplication import MessageDeduplicator, build_message_signature
 from .discord import DiscordClient
 from .filters import FilterEngine
 from .formatting import format_discord_message
@@ -38,6 +39,7 @@ from .utils import (
     RateLimiter,
     as_moscow_time,
     normalize_username,
+    parse_bool,
     parse_delay_setting,
 )
 
@@ -546,6 +548,11 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
         help_text="/set_monitoring <discord_id|all> <messages|pinned>",
     ),
     _CommandInfo(
+        name="set_duplicate_filter",
+        summary="Фильтровать дублирующиеся сообщения.",
+        help_text="/set_duplicate_filter <on|off>",
+    ),
+    _CommandInfo(
         name="add_filter",
         summary="Добавить фильтр сообщений.",
         help_text="/add_filter <discord_id|all> <тип> <значение>",
@@ -606,6 +613,7 @@ class TelegramController:
         discord_client: DiscordClient,
         on_change: Callable[[], None],
         channel_guard: ChannelProcessingGuard | None = None,
+        deduplicator: MessageDeduplicator | None = None,
     ) -> None:
         self._api = api
         self._store = store
@@ -617,6 +625,7 @@ class TelegramController:
         self._commands_registered = False
         self._stop_requested = False
         self._channel_guard = channel_guard
+        self._deduplicator = deduplicator or MessageDeduplicator()
 
     async def run(self) -> None:
         self._running = True
@@ -936,6 +945,10 @@ class TelegramController:
                         "Выбрать режим (новые или закреплённые сообщения).",
                     ),
                     (
+                        "/set_duplicate_filter <on|off>",
+                        "Фильтровать дубликаты в разных каналах.",
+                    ),
+                    (
                         "/add_filter <discord_id|all> <тип> <значение>",
                         "Добавить фильтр (whitelist, blacklist и т.д.).",
                     ),
@@ -1036,6 +1049,9 @@ class TelegramController:
 
         rate_display = _format_rate(rate_value)
         health_display = _format_seconds(health_interval_value)
+        deduplicate_enabled = parse_bool(
+            self._store.get_setting("runtime.deduplicate_messages"), False
+        )
 
         formatting_settings = {
             key.removeprefix("formatting."): value
@@ -1142,6 +1158,8 @@ class TelegramController:
                 f"{html.escape(_format_seconds(delay_min_value))}–"
                 f"{html.escape(_format_seconds(delay_max_value))} с",
                 f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
+                "• Фильтр дубликатов: "
+                f"{'<b>включён</b>' if deduplicate_enabled else 'выключен'}",
                 "",
                 "<b>🎨 Оформление по умолчанию</b>",
                 f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
@@ -2247,6 +2265,10 @@ class TelegramController:
             )
             return
 
+        deduplicate_enabled = parse_bool(
+            self._store.get_setting("runtime.deduplicate_messages"), False
+        )
+
         await self._send_panel_message(
             ctx,
             title="Ручная пересылка",
@@ -2373,6 +2395,11 @@ class TelegramController:
                     if candidate_id not in previous_known:
                         decision = engine.evaluate(msg)
                         if decision.allowed:
+                            if deduplicate_enabled and self._deduplicator.is_duplicate(
+                                build_message_signature(msg)
+                            ):
+                                processed_new_ids.add(candidate_id)
+                                continue
                             formatted = format_discord_message(
                                 msg, channel_cfg, message_kind="pinned"
                             )
@@ -2462,6 +2489,12 @@ class TelegramController:
                     continue
                 decision = engine.evaluate(msg)
                 if not decision.allowed:
+                    if is_newer(candidate_id, last_seen):
+                        last_seen = candidate_id
+                    continue
+                if deduplicate_enabled and self._deduplicator.is_duplicate(
+                    build_message_signature(msg)
+                ):
                     if is_newer(candidate_id, last_seen):
                         last_seen = candidate_id
                     continue
@@ -2657,6 +2690,33 @@ class TelegramController:
                     "Канал переключён на закреплённые сообщения.",
                     icon="✅",
                 )
+            ],
+        )
+
+    async def cmd_set_duplicate_filter(self, ctx: CommandContext) -> None:
+        value = ctx.args.strip().lower()
+        if value not in {"on", "off"}:
+            await self._send_usage_error(ctx, "/set_duplicate_filter <on|off>")
+            return
+
+        enabled = value == "on"
+        self._store.set_setting(
+            "runtime.deduplicate_messages", "true" if enabled else "false"
+        )
+        self._on_change()
+
+        message_text = (
+            "Фильтр дублирующихся сообщений включён."
+            if enabled
+            else "Фильтр дублирующихся сообщений отключён."
+        )
+
+        await self._send_panel_message(
+            ctx,
+            title="Фильтр дубликатов",
+            icon="🧹",
+            rows=[
+                _panel_bullet(message_text, icon="✅")
             ],
         )
 

@@ -15,12 +15,13 @@ from typing import TypeVar
 import aiohttp
 
 from .config_store import ConfigStore
+from .deduplication import MessageDeduplicator, build_message_signature
 from .discord import DiscordClient
 from .filters import FilterEngine
 from .formatting import format_discord_message
 from .models import ChannelConfig, DiscordMessage, NetworkOptions, RuntimeOptions
 from .telegram import TelegramAPI, TelegramController, send_formatted
-from .utils import ChannelProcessingGuard, RateLimiter, parse_delay_setting
+from .utils import ChannelProcessingGuard, RateLimiter, parse_bool, parse_delay_setting
 
 
 def _parse_discord_timestamp(value: str | None) -> datetime | None:
@@ -111,6 +112,7 @@ class ForwardMonitorApp:
         self._health_version = -1
         self._startup_time = datetime.now(timezone.utc)
         self._channel_guard = ChannelProcessingGuard()
+        self._deduplicator = MessageDeduplicator()
         self._mark_config_dirty()
         self._refresh_event.set()
 
@@ -124,6 +126,7 @@ class ForwardMonitorApp:
                 discord_client=discord_client,
                 on_change=self._signal_refresh,
                 channel_guard=self._channel_guard,
+                deduplicator=self._deduplicator,
             )
 
             async def run_monitor() -> None:
@@ -597,6 +600,12 @@ class ForwardMonitorApp:
             if not decision.allowed:
                 last_seen = candidate_id
                 continue
+            signature: str | None = None
+            if runtime.deduplicate_messages:
+                signature = build_message_signature(msg)
+                if self._deduplicator.is_duplicate(signature):
+                    last_seen = candidate_id
+                    continue
             formatted = format_discord_message(msg, channel, message_kind="message")
             await telegram_rate.wait()
             if self._refresh_event.is_set():
@@ -745,6 +754,12 @@ class ForwardMonitorApp:
             if not decision.allowed:
                 processed_ids.add(msg.id)
                 continue
+            signature: str | None = None
+            if runtime.deduplicate_messages:
+                signature = build_message_signature(msg)
+                if self._deduplicator.is_duplicate(signature):
+                    processed_ids.add(candidate_id)
+                    continue
             formatted = format_discord_message(msg, channel, message_kind="pinned")
             await telegram_rate.wait()
             if self._refresh_event.is_set():
@@ -835,6 +850,9 @@ class ForwardMonitorApp:
             max_delay = min_delay
 
         health_interval = _float("runtime.health_interval", 180.0)
+        deduplicate = parse_bool(
+            self._store.get_setting("runtime.deduplicate_messages"), False
+        )
 
         return RuntimeOptions(
             poll_interval=_float("runtime.poll", 2.0),
@@ -842,6 +860,7 @@ class ForwardMonitorApp:
             max_delay_seconds=max_delay,
             rate_per_second=rate_value,
             healthcheck_interval=health_interval,
+            deduplicate_messages=deduplicate,
         )
 
     def _load_network_options(self) -> NetworkOptions:

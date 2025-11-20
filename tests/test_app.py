@@ -240,6 +240,75 @@ def test_monitor_skips_messages_before_start(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_monitor_skips_duplicate_content_across_channels(tmp_path: Path) -> None:
+    async def runner() -> None:
+        db_path = tmp_path / "db.sqlite"
+        store = ConfigStore(db_path)
+        store.add_channel("111", "telegram-1", label="First")
+        store.add_channel("222", "telegram-2", label="Second")
+
+        app = ForwardMonitorApp(db_path=db_path, telegram_token="token")
+        reference_time = datetime.now(timezone.utc)
+        app._startup_time = reference_time - timedelta(minutes=5)
+        app._refresh_event.clear()
+
+        def _make_message(identifier: str, channel_id: str) -> DiscordMessage:
+            timestamp = reference_time + timedelta(minutes=1)
+            message_id = str(_discord_snowflake_from_datetime(timestamp))
+            return DiscordMessage(
+                id=message_id,
+                channel_id=channel_id,
+                guild_id=None,
+                author_id="user",
+                author_name="User",
+                content="Repeated text",
+                attachments=(),
+                embeds=(),
+                stickers=(),
+                role_ids=set(),
+                timestamp=timestamp.isoformat(),
+            )
+
+        class DedupDiscord(DummyDiscordClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.payloads = {
+                    "111": [_make_message("10", "111")],
+                    "222": [_make_message("20", "222")],
+                }
+
+            async def fetch_messages(
+                self,
+                channel_id: str,
+                *,
+                limit: int = 50,
+                after: str | None = None,
+                before: str | None = None,
+            ) -> list[dict[str, object]]:
+                self.fetch_calls.append(channel_id)
+                return cast(list[dict[str, object]], list(self.payloads.get(channel_id, [])))
+
+        discord = DedupDiscord()
+        telegram = DummyTelegramAPI()
+        runtime = RuntimeOptions(deduplicate_messages=True)
+        telegram_rate = RateLimiter(1000)
+
+        channels = app._store.load_channel_configurations()
+        for channel in channels:
+            await app._process_channel(
+                channel,
+                cast(DiscordClient, discord),
+                cast(TelegramAPI, telegram),
+                telegram_rate,
+                runtime,
+            )
+
+        assert len(telegram.messages) == 1
+        app._store.close()
+
+    asyncio.run(runner())
+
+
 def test_monitor_skips_messages_before_restart(tmp_path: Path) -> None:
     async def runner() -> None:
         db_path = tmp_path / "db.sqlite"
