@@ -550,7 +550,7 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="set_duplicate_filter",
         summary="Фильтровать дублирующиеся сообщения.",
-        help_text="/set_duplicate_filter <on|off>",
+        help_text="/set_duplicate_filter <discord_id|all> <on|off>",
     ),
     _CommandInfo(
         name="add_filter",
@@ -945,8 +945,8 @@ class TelegramController:
                         "Выбрать режим (новые или закреплённые сообщения).",
                     ),
                     (
-                        "/set_duplicate_filter <on|off>",
-                        "Фильтровать дубликаты в разных каналах.",
+                        "/set_duplicate_filter <discord_id|all> <on|off>",
+                        "Фильтровать дубликаты глобально или для конкретного канала.",
                     ),
                     (
                         "/add_filter <discord_id|all> <тип> <значение>",
@@ -1049,7 +1049,7 @@ class TelegramController:
 
         rate_display = _format_rate(rate_value)
         health_display = _format_seconds(health_interval_value)
-        deduplicate_enabled = parse_bool(
+        deduplicate_default = parse_bool(
             self._store.get_setting("runtime.deduplicate_messages"), False
         )
 
@@ -1133,6 +1133,9 @@ class TelegramController:
             proxy_lines.append(f"{_DOUBLE_INDENT}• Без прокси")
 
         channel_configs = self._store.load_channel_configurations()
+        deduplicate_overrides = sum(
+            1 for cfg in channel_configs if not cfg.deduplicate_inherited
+        )
         default_filter_sets = _collect_filter_sets(default_filter_config)
         has_default_filters = any(default_filter_sets[name] for name in _FILTER_TYPES)
 
@@ -1158,8 +1161,15 @@ class TelegramController:
                 f"{html.escape(_format_seconds(delay_min_value))}–"
                 f"{html.escape(_format_seconds(delay_max_value))} с",
                 f"• Лимит запросов: {html.escape(str(rate_display))} в секунду",
-                "• Фильтр дубликатов: "
-                f"{'<b>включён</b>' if deduplicate_enabled else 'выключен'}",
+                "• Фильтр дубликатов (по умолчанию): "
+                f"{'<b>включён</b>' if deduplicate_default else 'выключен'}",
+                *(
+                    [
+                        f"{_INDENT}• Индивидуальные настройки: {deduplicate_overrides}"
+                    ]
+                    if deduplicate_overrides
+                    else []
+                ),
                 "",
                 "<b>🎨 Оформление по умолчанию</b>",
                 f"• Предпросмотр ссылок: {html.escape(preview_desc)}",
@@ -1257,6 +1267,9 @@ class TelegramController:
                     if channel.pinned_only
                     else "новые сообщения"
                 )
+                deduplicate_label = "включён" if channel.deduplicate_messages else "выключен"
+                if channel.deduplicate_inherited:
+                    deduplicate_label += " (по умолчанию)"
 
                 extra_rows: list[tuple[int, str | None, str]] = []
                 if health_message:
@@ -1266,6 +1279,7 @@ class TelegramController:
 
                 details = [
                     ("Режим", mode_label),
+                    ("Фильтр дубликатов", deduplicate_label),
                     ("Предпросмотр", preview_label),
                     (
                         "Максимальная длина",
@@ -2265,10 +2279,6 @@ class TelegramController:
             )
             return
 
-        deduplicate_enabled = parse_bool(
-            self._store.get_setting("runtime.deduplicate_messages"), False
-        )
-
         await self._send_panel_message(
             ctx,
             title="Ручная пересылка",
@@ -2317,6 +2327,7 @@ class TelegramController:
             raw_label = channel_cfg.label or channel_cfg.discord_id
             label = html.escape(raw_label)
             mode = "pinned" if channel_cfg.pinned_only else "messages"
+            deduplicate_enabled = channel_cfg.deduplicate_messages
             forwarded = 0
 
             def _record(note_text: str, forwarded_count: int = 0) -> None:
@@ -2694,15 +2705,48 @@ class TelegramController:
         )
 
     async def cmd_set_duplicate_filter(self, ctx: CommandContext) -> None:
-        value = ctx.args.strip().lower()
+        parts = ctx.args.split(maxsplit=1)
+        if not parts:
+            await self._send_usage_error(
+                ctx, "/set_duplicate_filter <discord_id|all> <on|off>"
+            )
+            return
+
+        if len(parts) == 1:
+            target_key, value_raw = "all", parts[0]
+        else:
+            target_key, value_raw = parts
+
+        value = value_raw.strip().lower()
         if value not in {"on", "off"}:
-            await self._send_usage_error(ctx, "/set_duplicate_filter <on|off>")
+            await self._send_usage_error(
+                ctx, "/set_duplicate_filter <discord_id|all> <on|off>"
+            )
             return
 
         enabled = value == "on"
-        self._store.set_setting(
-            "runtime.deduplicate_messages", "true" if enabled else "false"
-        )
+        setting_value = "true" if enabled else "false"
+        target_label: str
+
+        if target_key.lower() in {"all", "*"}:
+            self._store.set_setting("runtime.deduplicate_messages", setting_value)
+            target_label = "По умолчанию для всех каналов"
+        else:
+            record = self._store.get_channel(target_key)
+            if not record:
+                await self._send_status_notice(
+                    ctx,
+                    title="Фильтр дубликатов",
+                    icon="⚠️",
+                    message="Канал не найден.",
+                    message_icon="❗️",
+                )
+                return
+            self._store.set_channel_option(
+                record.id, "runtime.deduplicate_messages", setting_value
+            )
+            target_label = f"Канал: <b>{html.escape(record.label or record.discord_id)}</b>"
+
         self._on_change()
 
         message_text = (
@@ -2716,8 +2760,10 @@ class TelegramController:
             title="Фильтр дубликатов",
             icon="🧹",
             rows=[
-                _panel_bullet(message_text, icon="✅")
+                _panel_bullet(message_text, icon="✅"),
+                _panel_bullet(target_label, icon="🛰️"),
             ],
+            description_escape=True,
         )
 
     async def cmd_add_filter(self, ctx: CommandContext) -> None:

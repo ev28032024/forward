@@ -560,6 +560,11 @@ class ForwardMonitorApp:
 
         ordered = sorted(unique_messages.values(), key=lambda msg: sort_key(msg.id))
         engine = FilterEngine(channel.filters)
+        deduplicate_messages = (
+            runtime.deduplicate_messages
+            if channel.deduplicate_inherited
+            else channel.deduplicate_messages
+        )
         previous_last_message = channel.last_message_id
         last_seen = previous_last_message
         startup_ts = startup
@@ -601,7 +606,7 @@ class ForwardMonitorApp:
                 last_seen = candidate_id
                 continue
             signature: str | None = None
-            if runtime.deduplicate_messages:
+            if deduplicate_messages:
                 signature = build_message_signature(msg)
                 if self._deduplicator.is_duplicate(signature):
                     last_seen = candidate_id
@@ -725,6 +730,11 @@ class ForwardMonitorApp:
             (msg for msg in messages if msg.id in new_ids),
             key=lambda msg: sort_key(msg.id),
         )
+        deduplicate_messages = (
+            runtime.deduplicate_messages
+            if channel.deduplicate_inherited
+            else channel.deduplicate_messages
+        )
         processed_ids: set[str] = set()
         interrupted = False
 
@@ -755,7 +765,7 @@ class ForwardMonitorApp:
                 processed_ids.add(msg.id)
                 continue
             signature: str | None = None
-            if runtime.deduplicate_messages:
+            if deduplicate_messages:
                 signature = build_message_signature(msg)
                 if self._deduplicator.is_duplicate(signature):
                     processed_ids.add(candidate_id)
