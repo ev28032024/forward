@@ -665,10 +665,13 @@ class TelegramController:
         command, _, args = text.partition(" ")
         command = command.split("@")[0][1:].lower()
         sender = message["from"]
+        chat = message.get("chat", {})
+        if str(chat.get("type") or "private") != "private":
+            return
         handle_raw = sender.get("username")
         display_name = str(handle_raw or sender.get("first_name") or "user")
         ctx = CommandContext(
-            chat_id=int(message["chat"]["id"]),
+            chat_id=int(chat["id"]),
             user_id=int(sender["id"]),
             username=display_name,
             handle=str(handle_raw) if handle_raw else None,
