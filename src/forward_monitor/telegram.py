@@ -659,6 +659,9 @@ class TelegramController:
         message = update.get("message") or update.get("edited_message")
         if not message:
             return
+        chat = message.get("chat") or {}
+        if chat.get("type") != "private":
+            return
         text = str(message.get("text") or "").strip()
         if not text.startswith("/"):
             return
