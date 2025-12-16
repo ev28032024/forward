@@ -260,6 +260,35 @@ def test_controller_persists_update_offset(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_controller_ignores_group_chats(tmp_path: Path) -> None:
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, DummyDiscordClient()),
+            on_change=lambda: None,
+        )
+
+        update = {
+            "update_id": 100,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 1, "type": "group"},
+                "from": {"id": 1, "first_name": "Tester"},
+                "text": "/start",
+            },
+        }
+
+        await controller._handle_update(update)
+
+        assert api.messages == []
+
+    asyncio.run(runner())
+
+
 def test_non_admin_cannot_invoke_commands_after_admin_exists(tmp_path: Path) -> None:
     async def runner() -> None:
         store = ConfigStore(tmp_path / "db.sqlite")
