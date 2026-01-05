@@ -242,7 +242,9 @@ def test_add_channel_parses_discord_url(tmp_path: Path) -> None:
         await controller._dispatch("claim", admin)
 
         # Test forum thread URL parsing
-        admin.args = "https://discord.com/channels/1144692727120937080/1367526357445378122/threads/1454194035387400272 456 Label"
+        forum_url = "https://discord.com/channels/1144692727120937080"
+        forum_url += "/1367526357445378122/threads/1454194035387400272"
+        admin.args = f"{forum_url} 456 Label"
         await controller._dispatch("add_channel", admin)
 
         assert "1454194035387400272" in dummy_client.checked_channels
@@ -1367,7 +1369,7 @@ def test_bot_ignores_commands_from_groups(tmp_path: Path) -> None:
             args="",
             message={"chat": {"id": 1, "type": "private"}},
         )
-        
+
         messages_before = len(api.messages)
         await controller._dispatch("claim", private_ctx)
         # Команда claim в личном чате должна сработать
@@ -1383,7 +1385,7 @@ def test_bot_ignores_commands_from_groups(tmp_path: Path) -> None:
             args="",
             message={"chat": {"id": -1001234567890, "type": "group"}},
         )
-        
+
         messages_before = len(api.messages)
         await controller._dispatch("status", group_ctx)
         # Команда status из группы должна быть проигнорирована
@@ -1398,7 +1400,7 @@ def test_bot_ignores_commands_from_groups(tmp_path: Path) -> None:
             args="",
             message={"chat": {"id": -1001234567890, "type": "supergroup"}},
         )
-        
+
         messages_before = len(api.messages)
         await controller._dispatch("help", supergroup_ctx)
         # Команда help из супергруппы должна быть проигнорирована

@@ -708,7 +708,7 @@ class TelegramController:
         chat_type = ctx.message.get("chat", {}).get("type", "")
         if chat_type != "private":
             return
-        
+
         handler = getattr(self, f"cmd_{command}", None)
         if handler is None:
             if self._is_admin(ctx):
