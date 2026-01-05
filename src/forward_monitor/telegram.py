@@ -112,13 +112,38 @@ def _parse_discord_timestamp(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _parse_discord_url(value: str) -> str | None:
+    """Extract channel/thread ID from Discord URL or return None if not a URL.
+
+    Supports:
+    - Forum thread: discord.com/channels/{guild}/{forum}/threads/{thread_id}
+    - Regular channel: discord.com/channels/{guild}/{channel_id}
+    """
+    import re
+
+    if not value.startswith(("http://", "https://", "discord.com")):
+        return None
+
+    # Forum thread: /channels/{guild}/{forum}/threads/{thread_id}
+    thread_match = re.search(r"discord\.com/channels/\d+/\d+/threads/(\d+)", value)
+    if thread_match:
+        return thread_match.group(1)
+
+    # Regular channel: /channels/{guild}/{channel_id}
+    channel_match = re.search(r"discord\.com/channels/\d+/(\d+)", value)
+    if channel_match:
+        return channel_match.group(1)
+
+    return None
+
+
 def _message_timestamp(message: "DiscordMessage") -> datetime | None:
     """Return the original creation timestamp for sorting purposes."""
-
     created = _parse_discord_timestamp(message.timestamp)
     if created is not None:
         return created
     return _parse_discord_timestamp(message.edited_timestamp)
+
 
 
 def _message_id_sort_key(message_id: str) -> tuple[int, str]:
@@ -665,13 +690,10 @@ class TelegramController:
         command, _, args = text.partition(" ")
         command = command.split("@")[0][1:].lower()
         sender = message["from"]
-        chat = message.get("chat", {})
-        if str(chat.get("type") or "private") != "private":
-            return
         handle_raw = sender.get("username")
         display_name = str(handle_raw or sender.get("first_name") or "user")
         ctx = CommandContext(
-            chat_id=int(chat["id"]),
+            chat_id=int(message["chat"]["id"]),
             user_id=int(sender["id"]),
             username=display_name,
             handle=str(handle_raw) if handle_raw else None,
@@ -682,6 +704,11 @@ class TelegramController:
         await self._dispatch(command, ctx)
 
     async def _dispatch(self, command: str, ctx: CommandContext) -> None:
+        # Игнорируем команды из групп - бот отвечает только в личных сообщениях
+        chat_type = ctx.message.get("chat", {}).get("type", "")
+        if chat_type != "private":
+            return
+        
         handler = getattr(self, f"cmd_{command}", None)
         if handler is None:
             if self._is_admin(ctx):
@@ -1865,7 +1892,12 @@ class TelegramController:
             return
 
         discord_id, telegram_chat_raw, *label_parts = parts
+        # Try to parse Discord URL if input looks like a URL
+        parsed_id = _parse_discord_url(discord_id)
+        if parsed_id:
+            discord_id = parsed_id
         label = " ".join(label_parts).strip()
+
         if not label:
             await self._send_status_notice(
                 ctx,

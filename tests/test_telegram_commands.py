@@ -215,8 +215,85 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
     asyncio.run(runner())
 
 
+def test_add_channel_parses_discord_url(tmp_path: Path) -> None:
+    """Test that add_channel correctly parses Discord forum thread URLs."""
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+        dummy_client.existing_channels = {"1454194035387400272"}
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+
+        # Test forum thread URL parsing
+        admin.args = "https://discord.com/channels/1144692727120937080/1367526357445378122/threads/1454194035387400272 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        assert "1454194035387400272" in dummy_client.checked_channels
+        record = store.get_channel("1454194035387400272")
+        assert record is not None
+        assert record.discord_id == "1454194035387400272"
+
+    asyncio.run(runner())
+
+
+def test_add_channel_parses_regular_discord_url(tmp_path: Path) -> None:
+    """Test that add_channel correctly parses regular Discord channel URLs."""
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        store.set_setting("discord.token", "token")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+        dummy_client.existing_channels = {"123456789"}
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+        admin = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={},
+        )
+
+        await controller._dispatch("claim", admin)
+
+        # Test regular channel URL parsing
+        admin.args = "https://discord.com/channels/999/123456789 456 Label"
+        await controller._dispatch("add_channel", admin)
+
+        assert "123456789" in dummy_client.checked_channels
+        record = store.get_channel("123456789")
+        assert record is not None
+        assert record.discord_id == "123456789"
+
+    asyncio.run(runner())
+
+
 def test_send_recent_handles_pinned_messages(tmp_path: Path) -> None:
     async def runner() -> None:
+
         store = ConfigStore(tmp_path / "db.sqlite")
         store.set_setting("discord.token", "token")
         api = DummyAPI()
@@ -1261,6 +1338,77 @@ def test_set_healthcheck_updates_interval(tmp_path: Path) -> None:
         error_message = api.messages[-1]
         assert error_message.startswith("<b>⚠️ Параметры</b>")
         assert "Минимальный интервал — 10 секунд." in error_message
+
+    import asyncio
+
+    asyncio.run(runner())
+
+
+def test_bot_ignores_commands_from_groups(tmp_path: Path) -> None:
+    """Бот должен игнорировать команды из групп и отвечать только в личных сообщениях"""
+    async def runner() -> None:
+        store = ConfigStore(tmp_path / "db.sqlite")
+        api = DummyAPI()
+        dummy_client = DummyDiscordClient()
+
+        controller = TelegramController(
+            api,
+            store,
+            discord_client=cast(DiscordClient, dummy_client),
+            on_change=lambda: None,
+        )
+
+        # Команда из личного чата - должна работать
+        private_ctx = CommandContext(
+            chat_id=1,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={"chat": {"id": 1, "type": "private"}},
+        )
+        
+        messages_before = len(api.messages)
+        await controller._dispatch("claim", private_ctx)
+        # Команда claim в личном чате должна сработать
+        assert len(api.messages) > messages_before
+        assert store.has_admins()
+
+        # Команда из группы - должна игнорироваться
+        group_ctx = CommandContext(
+            chat_id=-1001234567890,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={"chat": {"id": -1001234567890, "type": "group"}},
+        )
+        
+        messages_before = len(api.messages)
+        await controller._dispatch("status", group_ctx)
+        # Команда status из группы должна быть проигнорирована
+        assert len(api.messages) == messages_before
+
+        # Команда из супергруппы - также должна игнорироваться
+        supergroup_ctx = CommandContext(
+            chat_id=-1001234567890,
+            user_id=1,
+            username="admin",
+            handle="admin",
+            args="",
+            message={"chat": {"id": -1001234567890, "type": "supergroup"}},
+        )
+        
+        messages_before = len(api.messages)
+        await controller._dispatch("help", supergroup_ctx)
+        # Команда help из супергруппы должна быть проигнорирована
+        assert len(api.messages) == messages_before
+
+        # Проверяем, что команды в личном чате всё ещё работают
+        messages_before = len(api.messages)
+        await controller._dispatch("help", private_ctx)
+        # Команда help в личном чате должна работать
+        assert len(api.messages) > messages_before
 
     import asyncio
 
