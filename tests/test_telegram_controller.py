@@ -98,7 +98,7 @@ def test_controller_respects_admin_permissions(tmp_path: Path) -> None:
             username="user",
             handle="user",
             args="token",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("set_discord_token", ctx)
@@ -152,7 +152,7 @@ def test_set_discord_token_uses_normalized_value(tmp_path: Path) -> None:
             username="user",
             handle="user",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", ctx)
@@ -182,7 +182,7 @@ def test_grant_admin_by_username(tmp_path: Path) -> None:
             username="Root",
             handle="root",
             args="@newbie",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
         await controller._dispatch("grant", admin_ctx)
         admins = store.list_admins()
@@ -194,7 +194,7 @@ def test_grant_admin_by_username(tmp_path: Path) -> None:
             username="Newbie",
             handle="newbie",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
         store.remember_user(newcomer_ctx.user_id, newcomer_ctx.handle)
         await controller._dispatch("status", newcomer_ctx)
@@ -277,7 +277,7 @@ def test_non_admin_cannot_invoke_commands_after_admin_exists(tmp_path: Path) -> 
             username="Admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
         await controller._dispatch("claim", admin_ctx)
 
@@ -287,7 +287,7 @@ def test_non_admin_cannot_invoke_commands_after_admin_exists(tmp_path: Path) -> 
             username="Visitor",
             handle="visitor",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         before = len(api.messages)
@@ -326,7 +326,7 @@ def test_claim_rejected_for_non_admin_when_admin_exists(tmp_path: Path) -> None:
             username="Visitor",
             handle="visitor",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         before = len(api.messages)
@@ -359,7 +359,7 @@ def test_controller_handles_command_errors(tmp_path: Path) -> None:
             username="Admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
         await controller._dispatch("claim", admin_ctx)
 
@@ -414,7 +414,7 @@ def test_help_lists_all_commands(tmp_path: Path) -> None:
             username="Explorer",
             handle="explorer",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("help", ctx)
@@ -442,7 +442,7 @@ def test_list_channels_grouped_output(tmp_path: Path) -> None:
             username="Admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
         await controller._dispatch("claim", admin)
 
@@ -482,7 +482,7 @@ def test_status_groups_channels_by_chat(tmp_path: Path) -> None:
             username="Admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
         await controller._dispatch("claim", admin)
 
@@ -582,7 +582,7 @@ def test_manual_forward_uses_channel_guard(tmp_path: Path) -> None:
             username="Admin",
             handle="admin",
             args="1 123",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("send_recent", ctx)

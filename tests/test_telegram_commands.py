@@ -157,7 +157,7 @@ def test_controller_adds_channel_and_updates_formatting(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -236,7 +236,7 @@ def test_add_channel_parses_discord_url(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -276,7 +276,7 @@ def test_add_channel_parses_regular_discord_url(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -313,7 +313,7 @@ def test_send_recent_handles_pinned_messages(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -431,7 +431,7 @@ def test_status_reports_discord_link_and_manual_activity(tmp_path: Path) -> None
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -524,7 +524,7 @@ def test_send_recent_forwards_messages(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -612,7 +612,7 @@ def test_send_recent_sends_messages_in_chronological_order(tmp_path: Path) -> No
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -694,7 +694,7 @@ def test_send_recent_only_new_messages(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -792,7 +792,7 @@ def test_send_recent_includes_recent_history(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -893,7 +893,7 @@ def test_send_recent_respects_invocation_time(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -961,7 +961,7 @@ def test_send_recent_deduplicates_messages(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -1029,7 +1029,7 @@ def test_send_recent_all_channels_respects_limit_and_order(tmp_path: Path) -> No
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -1219,7 +1219,7 @@ def test_send_recent_all_channels_respects_invocation_time(
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
@@ -1323,7 +1323,7 @@ def test_set_healthcheck_updates_interval(tmp_path: Path) -> None:
             username="admin",
             handle="admin",
             args="",
-            message={},
+            message={"chat": {"id": 1, "type": "private"}},
         )
 
         await controller._dispatch("claim", admin)
