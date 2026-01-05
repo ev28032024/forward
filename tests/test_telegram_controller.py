@@ -227,7 +227,7 @@ def test_controller_persists_update_offset(tmp_path: Path) -> None:
                             "update_id": 55,
                             "message": {
                                 "message_id": 1,
-                                "chat": {"id": 1},
+                                "chat": {"id": 1, "type": "private"},
                                 "from": {
                                     "id": 1,
                                     "first_name": "Tester",
