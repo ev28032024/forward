@@ -595,6 +595,28 @@ class ConfigStore:
             "true" if synced else "false",
         )
 
+    def set_known_thread_ids(self, channel_id: int, thread_ids: Iterable[str]) -> None:
+        """Store known forum thread IDs for tracking new threads."""
+        payload = json.dumps(sorted({str(tid) for tid in thread_ids if str(tid)}))
+        self.set_channel_option(channel_id, "state.thread_ids", payload)
+
+    def clear_known_thread_ids(self, channel_id: int) -> None:
+        """Clear forum thread tracking state."""
+        self.delete_channel_option(channel_id, "state.thread_ids")
+        self.delete_channel_option(channel_id, "state.forum_synced")
+
+    def set_forum_synced(self, channel_id: int, *, synced: bool) -> None:
+        """Mark forum as synced (initial threads recorded)."""
+        self.set_channel_option(
+            channel_id,
+            "state.forum_synced",
+            "true" if synced else "false",
+        )
+
+    def set_guild_id(self, channel_id: int, guild_id: str) -> None:
+        """Store guild ID needed for forum thread API calls."""
+        self.set_channel_option(channel_id, "state.guild_id", guild_id)
+
     # ------------------------------------------------------------------
     # Filters
     # ------------------------------------------------------------------
@@ -710,9 +732,15 @@ class ConfigStore:
             channel_options = dict(self.iter_channel_options(record.id))
             channel_formatting = _formatting_from_options(formatting, channel_options)
             filters = default_filters.merge(self._load_filter_config(record.id))
-            pinned_only, known_pinned_ids, pinned_synced = _monitoring_from_options(
-                defaults.get("monitoring", {}), channel_options
-            )
+            (
+                pinned_only,
+                known_pinned_ids,
+                pinned_synced,
+                is_forum,
+                guild_id,
+                known_thread_ids,
+                forum_synced,
+            ) = _monitoring_from_options(defaults.get("monitoring", {}), channel_options)
             raw_deduplicate = channel_options.get("runtime.deduplicate_messages")
             deduplicate_inherited = raw_deduplicate is None
             deduplicate_messages = parse_bool(raw_deduplicate, default_deduplicate)
@@ -737,6 +765,10 @@ class ConfigStore:
                     pinned_only=pinned_only,
                     known_pinned_ids=known_pinned_ids,
                     pinned_synced=pinned_synced,
+                    is_forum=is_forum,
+                    guild_id=guild_id,
+                    known_thread_ids=known_thread_ids,
+                    forum_synced=forum_synced,
                     health_status=health_status,
                     health_message=health_message,
                     blocked_by_health=blocked_by_health,
@@ -959,14 +991,24 @@ def _filter_target(filters: FilterConfig, filter_type: str) -> set[str] | None:
 
 def _monitoring_from_options(
     defaults: dict[str, str], options: dict[str, str]
-) -> tuple[bool, set[str], bool]:
+) -> tuple[bool, set[str], bool, bool, str | None, set[str], bool]:
+    """Parse monitoring options, returning pinned and forum state.
+    
+    Returns:
+        (pinned_only, known_pinned_ids, pinned_synced,
+         is_forum, guild_id, known_thread_ids, forum_synced)
+    """
     default_mode = defaults.get("mode", "messages").strip().lower()
     mode_raw = options.get("monitoring.mode", default_mode)
     mode = str(mode_raw).strip().lower()
     pinned_only = mode == "pinned"
+    is_forum = mode == "forum"
     known_pinned = _parse_known_pinned(options.get("state.pinned_ids"))
     pinned_synced = _parse_bool_option(options.get("state.pinned_synced"))
-    return pinned_only, known_pinned, pinned_synced
+    guild_id = options.get("state.guild_id")
+    known_threads = _parse_known_threads(options.get("state.thread_ids"))
+    forum_synced = _parse_bool_option(options.get("state.forum_synced"))
+    return pinned_only, known_pinned, pinned_synced, is_forum, guild_id, known_threads, forum_synced
 
 
 def _parse_bool_option(value: str | None) -> bool:
@@ -993,6 +1035,11 @@ def _parse_known_pinned(payload: str | None) -> set[str]:
         if text:
             result.add(text)
     return result
+
+
+def _parse_known_threads(payload: str | None) -> set[str]:
+    """Parse stored thread IDs (same format as pinned)."""
+    return _parse_known_pinned(payload)
 
 
 def _normalize_role_value(value: str) -> str | None:

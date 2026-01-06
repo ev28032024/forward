@@ -570,7 +570,7 @@ BOT_COMMANDS: tuple[_CommandInfo, ...] = (
     _CommandInfo(
         name="set_monitoring",
         summary="Выбрать режим мониторинга сообщений.",
-        help_text="/set_monitoring <discord_id|all> <messages|pinned>",
+        help_text="/set_monitoring <discord_id|all> <messages|pinned|forum>",
     ),
     _CommandInfo(
         name="set_duplicate_filter",
@@ -923,7 +923,7 @@ class TelegramController:
                     (
                         (
                             "/add_channel <discord_id> <telegram_chat[:thread]> <название>"
-                            " [messages|pinned]"
+                            " [messages|pinned|forum]"
                         ),
                         "Создать новую связку, выбрать тему, режим и задать имя.",
                     ),
@@ -971,8 +971,8 @@ class TelegramController:
                         "Выбрать формат блока вложений.",
                     ),
                     (
-                        "/set_monitoring <discord_id|all> <messages|pinned>",
-                        "Выбрать режим (новые или закреплённые сообщения).",
+                        "/set_monitoring <discord_id|all> <messages|pinned|forum>",
+                        "Выбрать режим (новые/закреплённые сообщения/темы форума).",
                     ),
                     (
                         "/set_duplicate_filter <discord_id|all> <on|off>",
@@ -1007,8 +1007,8 @@ class TelegramController:
             "<i>Все настройки выполняются из этого чата: категории ниже.</i>",
             "",
             _panel_bullet(
-                "Для <code>/add_channel</code> можно указать режим <code>messages</code> "
-                "или <code>pinned</code> в конце команды, чтобы выбрать тип мониторинга.",
+                "Для <code>/add_channel</code> можно указать режимы <code>messages|pinned|forum</code> "
+                "в конце команды, чтобы выбрать тип мониторинга.",
                 icon="💡",
             ),
             "",
@@ -1293,7 +1293,9 @@ class TelegramController:
                     else "список ссылок"
                 )
                 mode_label = (
-                    "закреплённые сообщения"
+                    "темы форума"
+                    if channel.is_forum
+                    else "закреплённые сообщения"
                     if channel.pinned_only
                     else "новые сообщения"
                 )
@@ -1854,13 +1856,14 @@ class TelegramController:
     async def cmd_add_channel(self, ctx: CommandContext) -> None:
         parts = ctx.args.split()
         usage = (
-            "/add_channel <discord_id> <telegram_chat[:thread]> <название> [messages|pinned]"
+            "/add_channel <discord_id> <telegram_chat[:thread]> <название> [messages|pinned|forum]"
         )
         if len(parts) < 3:
             await self._send_usage_error(ctx, usage)
             return
 
         mode_override: str | None = None
+        # Full alias map for mode= prefix syntax
         mode_aliases = {
             "messages": "messages",
             "message": "messages",
@@ -1868,7 +1871,14 @@ class TelegramController:
             "pinned": "pinned",
             "pin": "pinned",
             "pins": "pinned",
+            "forum": "forum",
+            "threads": "forum",
+            "thread": "forum",
         }
+        # Unambiguous keywords that can be used without mode= prefix
+        # Words like "threads" that might be part of a label require mode= prefix
+        unambiguous_modes = {"forum", "pinned", "messages"}
+        
         tail = parts[-1].lower()
         if tail.startswith("mode="):
             candidate = tail.split("=", 1)[1]
@@ -1878,12 +1888,13 @@ class TelegramController:
                     ctx,
                     title="Каналы",
                     icon="⚠️",
-                    message="Допустимые режимы: messages, pinned.",
+                    message="Допустимые режимы: messages, pinned, forum.",
                     message_icon="❗️",
                 )
                 return
             parts = parts[:-1]
-        elif tail in mode_aliases:
+        elif tail in unambiguous_modes:
+            # Only auto-detect unambiguous mode keywords
             mode_override = mode_aliases[tail]
             parts = parts[:-1]
 
@@ -2041,8 +2052,10 @@ class TelegramController:
         if mode_to_apply == "messages":
             self._store.clear_known_pinned_messages(record.id)
             self._store.set_pinned_synced(record.id, synced=False)
-        else:
+            self._store.clear_known_thread_ids(record.id)
+        elif mode_to_apply == "pinned":
             mode_label = "закреплённые сообщения"
+            self._store.clear_known_thread_ids(record.id)
             pinned_messages = None
             if token:
                 try:
@@ -2063,6 +2076,40 @@ class TelegramController:
             else:
                 self._store.set_known_pinned_messages(record.id, [])
                 self._store.set_pinned_synced(record.id, synced=False)
+        elif mode_to_apply == "forum":
+            mode_label = "темы форума"
+            self._store.clear_known_pinned_messages(record.id)
+            # Fetch channel info to get guild_id
+            channel_info = None
+            if token:
+                try:
+                    channel_info = await self._discord.fetch_channel_info(discord_id)
+                except Exception:  # pragma: no cover
+                    logger.exception(
+                        "Не удалось получить информацию о канале %s при создании связки",
+                        discord_id,
+                    )
+            if channel_info and channel_info.guild_id:
+                self._store.set_guild_id(record.id, channel_info.guild_id)
+                # Fetch current threads to initialize known_thread_ids
+                try:
+                    threads = await self._discord.fetch_forum_threads(
+                        discord_id, channel_info.guild_id
+                    )
+                    self._store.set_known_thread_ids(
+                        record.id, [t.id for t in threads]
+                    )
+                    self._store.set_forum_synced(record.id, synced=True)
+                except Exception:  # pragma: no cover
+                    logger.exception(
+                        "Не удалось получить треды форума %s при создании связки",
+                        discord_id,
+                    )
+                    self._store.set_known_thread_ids(record.id, [])
+                    self._store.set_forum_synced(record.id, synced=False)
+            else:
+                self._store.set_known_thread_ids(record.id, [])
+                self._store.set_forum_synced(record.id, synced=False)
 
         self._on_change()
         label_display = html.escape(label)
@@ -2361,7 +2408,7 @@ class TelegramController:
 
             raw_label = channel_cfg.label or channel_cfg.discord_id
             label = html.escape(raw_label)
-            mode = "pinned" if channel_cfg.pinned_only else "messages"
+            mode = "forum" if channel_cfg.is_forum else "pinned" if channel_cfg.pinned_only else "messages"
             deduplicate_enabled = channel_cfg.deduplicate_messages
             forwarded = 0
 
@@ -2638,7 +2685,7 @@ class TelegramController:
         if len(parts) < 2:
             await self._send_usage_error(
                 ctx,
-                "/set_monitoring <discord_id|all> <messages|pinned>",
+                "/set_monitoring <discord_id|all> <messages|pinned|forum>",
             )
             return
         target_key, mode_raw = parts
