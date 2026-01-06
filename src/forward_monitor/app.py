@@ -960,7 +960,7 @@ class ForwardMonitorApp:
             # Mix in the thread name so two threads with "content" aren't duplicates
             if signature and thread_name:
                 signature = f"thread:{thread_name}\n{signature}"
-            
+
             if self._deduplicator.is_duplicate(signature):
                 logger.debug(
                     "Пропуск дубликата треда %s",
