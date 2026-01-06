@@ -896,6 +896,9 @@ class ForwardMonitorApp:
         # Find threads created after the baseline
         new_threads = []
         for thread in threads:
+            if thread.id in channel.known_thread_ids:
+                continue
+
             created_at = _datetime_from_discord_snowflake(thread.id)
             if created_at and created_at > baseline:
                 new_threads.append(thread)
@@ -980,6 +983,10 @@ class ForwardMonitorApp:
                 continue
 
             await self._sleep_within(runtime)
+
+            channel.known_thread_ids.add(thread.id)
+            if channel.storage_id is not None:
+                self._store.set_known_thread_ids(channel.storage_id, channel.known_thread_ids)
 
     async def _sleep_within(self, runtime: RuntimeOptions) -> None:
         delay_seconds = 0.0
