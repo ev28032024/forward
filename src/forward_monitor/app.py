@@ -206,7 +206,15 @@ class ForwardMonitorApp:
                     await self._wait_for_health(target_version)
                     if self._refresh_event.is_set():
                         continue
+                    previous_channels = {c.discord_id: c for c in state.channels}
                     state = self._reload_state()
+                    # Restore ephemeral known_thread_ids from memory
+                    for ch in state.channels:
+                        if ch.discord_id in previous_channels:
+                            ch.known_thread_ids = previous_channels[
+                                ch.discord_id
+                            ].known_thread_ids
+
                     state_version = target_version
                     discord_client.set_token(state.discord_token)
                     discord_client.set_network_options(state.network)
@@ -949,6 +957,10 @@ class ForwardMonitorApp:
 
             # Check for duplicates
             signature = build_message_signature(first_msg)
+            # Mix in the thread name so two threads with "content" aren't duplicates
+            if signature and thread_name:
+                signature = f"thread:{thread_name}\n{signature}"
+            
             if self._deduplicator.is_duplicate(signature):
                 logger.debug(
                     "Пропуск дубликата треда %s",
@@ -985,8 +997,6 @@ class ForwardMonitorApp:
             await self._sleep_within(runtime)
 
             channel.known_thread_ids.add(thread.id)
-            if channel.storage_id is not None:
-                self._store.set_known_thread_ids(channel.storage_id, channel.known_thread_ids)
 
     async def _sleep_within(self, runtime: RuntimeOptions) -> None:
         delay_seconds = 0.0
