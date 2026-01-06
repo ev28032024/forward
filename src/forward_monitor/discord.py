@@ -399,8 +399,14 @@ class DiscordClient:
                         name=str(thread_data.get("name") or ""),
                         parent_id=str(thread_data.get("parent_id") or forum_channel_id),
                         guild_id=guild_id,
-                        owner_id=str(thread_data.get("owner_id")) if thread_data.get("owner_id") else None,
-                        created_timestamp=thread_data.get("thread_metadata", {}).get("create_timestamp"),
+                        owner_id=(
+                            str(thread_data.get("owner_id"))
+                            if thread_data.get("owner_id")
+                            else None
+                        ),
+                        created_timestamp=thread_data.get("thread_metadata", {}).get(
+                            "create_timestamp"
+                        ),
                     )
                 else:
                     # Create minimal thread info
@@ -421,17 +427,17 @@ class DiscordClient:
         """Fetch threads from a forum channel using multiple methods."""
         # Try search API first (usually works better with user tokens)
         threads = await self.fetch_forum_threads_via_search(forum_channel_id, guild_id)
-        
+
         # Also try archived threads and merge
         archived = await self.fetch_archived_threads(forum_channel_id)
-        
+
         # Merge results, preferring search results for duplicates
         seen_ids = {t.id for t in threads}
         for thread in archived:
             if thread.id not in seen_ids:
                 threads = list(threads) + [thread]
                 seen_ids.add(thread.id)
-        
+
         return threads
 
     def _parse_threads_response(

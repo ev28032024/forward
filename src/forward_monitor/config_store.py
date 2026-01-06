@@ -993,7 +993,7 @@ def _monitoring_from_options(
     defaults: dict[str, str], options: dict[str, str]
 ) -> tuple[bool, set[str], bool, bool, str | None, set[str], bool]:
     """Parse monitoring options, returning pinned and forum state.
-    
+
     Returns:
         (pinned_only, known_pinned_ids, pinned_synced,
          is_forum, guild_id, known_thread_ids, forum_synced)

@@ -871,8 +871,7 @@ class ForwardMonitorApp:
         # Time-based filtering: only forward threads created after last check
         # Use forum_synced to track if we've done initial sync
         # Use last_forum_check timestamp instead of storing all thread IDs
-        now = datetime.now(timezone.utc)
-        
+
         # First sync - just mark current time, don't forward anything
         if not channel.forum_synced:
             if channel.storage_id is not None:
@@ -893,14 +892,14 @@ class ForwardMonitorApp:
         baseline = channel.added_at or self._startup_time
         if baseline.tzinfo is None:
             baseline = baseline.replace(tzinfo=timezone.utc)
-        
+
         # Find threads created after the baseline
         new_threads = []
         for thread in threads:
             created_at = _datetime_from_discord_snowflake(thread.id)
             if created_at and created_at > baseline:
                 new_threads.append(thread)
-        
+
         if not new_threads:
             return
 

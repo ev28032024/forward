@@ -1007,7 +1007,8 @@ class TelegramController:
             "<i>Все настройки выполняются из этого чата: категории ниже.</i>",
             "",
             _panel_bullet(
-                "Для <code>/add_channel</code> можно указать режимы <code>messages|pinned|forum</code> "
+                "Для <code>/add_channel</code> можно указать режимы "
+                "<code>messages|pinned|forum</code> "
                 "в конце команды, чтобы выбрать тип мониторинга.",
                 icon="💡",
             ),
@@ -1878,7 +1879,7 @@ class TelegramController:
         # Unambiguous keywords that can be used without mode= prefix
         # Words like "threads" that might be part of a label require mode= prefix
         unambiguous_modes = {"forum", "pinned", "messages"}
-        
+
         tail = parts[-1].lower()
         if tail.startswith("mode="):
             candidate = tail.split("=", 1)[1]
@@ -2408,7 +2409,12 @@ class TelegramController:
 
             raw_label = channel_cfg.label or channel_cfg.discord_id
             label = html.escape(raw_label)
-            mode = "forum" if channel_cfg.is_forum else "pinned" if channel_cfg.pinned_only else "messages"
+            if channel_cfg.is_forum:
+                mode = "forum"
+            elif channel_cfg.pinned_only:
+                mode = "pinned"
+            else:
+                mode = "messages"
             deduplicate_enabled = channel_cfg.deduplicate_messages
             forwarded = 0
 
